@@ -23,7 +23,9 @@ pub use adapter::{
 pub use auth::{Authenticator, FileTokenStore, TokenStore, Tokens, generate_token, permits};
 pub use bus::EventBus;
 pub use registry::{Registry, RegistryError};
-pub use settings::{HighRiskSettings, Settings, SettingsError, ToolBoundary};
+pub use settings::{
+    Autonomy, HighRiskSettings, NotificationChannel, Settings, SettingsError, ToolBoundary,
+};
 
 /// Unix time in milliseconds. Every timestamp on the wire uses this.
 ///

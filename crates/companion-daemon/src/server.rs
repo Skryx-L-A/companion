@@ -788,13 +788,18 @@ async fn handle(
 ) -> Result<ResponseBody, ProtocolError> {
     let deadline = state.limits.adapter_timeout;
     match request {
-        Request::List => {
+        Request::List {
+            running_only,
+            done_limit,
+        } => {
             let mut sessions = Vec::new();
             for adapter in state.adapters.iter() {
                 sessions.extend(with_deadline(deadline, adapter.list()).await?);
             }
             sessions.extend(state.reported_sessions());
-            Ok(ResponseBody::Sessions { sessions })
+            Ok(ResponseBody::Sessions {
+                sessions: filter_sessions(sessions, running_only, done_limit),
+            })
         }
 
         Request::Spawn(spawn) => {
@@ -950,6 +955,35 @@ fn to_protocol_error(error: companion_core::AdapterError) -> ProtocolError {
 }
 
 /// Whether a state means the session is over.
+/// Applies the list filter of a `list` request.
+///
+/// Everything still going is kept, in the order the adapters reported it. The finished ones
+/// are cut off after `done_limit`, which is a cap and not a selection of the newest: the
+/// protocol carries no timestamp per session, so the daemon takes what the adapters hand it
+/// and leaves the ordering to them. The workbench adapter sorts its finished sessions by
+/// last activity for exactly this reason.
+fn filter_sessions(
+    sessions: Vec<SessionStatus>,
+    running_only: bool,
+    done_limit: u32,
+) -> Vec<SessionStatus> {
+    let mut kept = Vec::with_capacity(sessions.len());
+    let mut finished = 0u32;
+
+    for session in sessions {
+        if !is_final(session.state) {
+            kept.push(session);
+            continue;
+        }
+        if running_only || finished >= done_limit {
+            continue;
+        }
+        finished += 1;
+        kept.push(session);
+    }
+    kept
+}
+
 fn is_final(state: SessionState) -> bool {
     matches!(state, SessionState::Done | SessionState::Error)
 }

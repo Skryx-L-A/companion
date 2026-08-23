@@ -7,10 +7,14 @@
 //! session. Events come from that stream, the readable history and the context estimate
 //! come from the transcript under `~/.claude/projects`, and the three missing hooks
 //! (`Stop`, `SubagentStop`, `Notification`) are installed additively into the target
-//! project's settings so an interactive session can report itself as well.
+//! project's settings so an interactive session can report itself as well. The command
+//! written there is the hook binary next to the running daemon, never a build directory:
+//! see [`hooks::command_for_daemon`].
 //!
-//! What it honestly cannot do is named in its capabilities: the budget of a plain session
-//! is not visible here, and iterations are a concept the CLI does not have.
+//! The budget is measured, not guessed: a run emits `rate_limit_event` lines that carry the
+//! share of the subscription window it has used and when that window resets. What the
+//! adapter honestly cannot report is named in its capabilities: iterations are a concept the
+//! CLI does not have.
 
 pub mod hooks;
 mod stream;
@@ -27,8 +31,8 @@ use companion_core::adapter::{
     AdapterError, AdapterEvent, AdapterResult, ReadChunk, ReadWindow, SessionAdapter, SpawnOptions,
 };
 use companion_protocol::{
-    AdapterCapabilities, AdapterId, CommandKind, ContextUsage, EndReason, Event, EventKind,
-    Provenance, SendOutcome, SessionId, SessionState, SessionStatus, StatusField,
+    AdapterCapabilities, AdapterId, BudgetUsage, CommandKind, ContextUsage, EndReason, Event,
+    EventKind, Provenance, SendOutcome, SessionId, SessionState, SessionStatus, StatusField,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
@@ -138,6 +142,21 @@ impl ClaudeAdapter {
         hook_command: &str,
     ) -> Result<hooks::HookChange, hooks::HookError> {
         hooks::install(&project.join(".claude/settings.json"), hook_command)
+    }
+
+    /// Installs the hooks with the command of the daemon that is running right now.
+    ///
+    /// This is the form the onboarding uses: the hook binary sits next to the daemon, so
+    /// the running binary's own path is what ends up in the project's settings.
+    pub fn install_hooks_for_running_daemon(
+        project: &Path,
+    ) -> Result<hooks::HookChange, hooks::HookError> {
+        let command =
+            hooks::command_for_running_daemon().map_err(|source| hooks::HookError::Io {
+                path: "the running binary".to_owned(),
+                source,
+            })?;
+        Self::install_hooks(project, &command)
     }
 
     /// Removes exactly what [`ClaudeAdapter::install_hooks`] added.
@@ -287,6 +306,24 @@ async fn pump(
                 }
             }
 
+            StreamItem::RateLimit {
+                utilization,
+                resets_at_seconds,
+            } => {
+                let Some(id) = session.clone() else { continue };
+                let budget = Provenance::Measured(BudgetUsage {
+                    used_fraction: utilization,
+                    resets_at_ms: resets_at_seconds.map(|seconds| seconds * 1000),
+                });
+                {
+                    let mut sessions = inner.sessions.lock().await;
+                    if let Some(running) = sessions.get_mut(&id) {
+                        running.status.budget = budget.clone();
+                    }
+                }
+                inner.emit(&id, Event::BudgetLevel { budget });
+            }
+
             StreamItem::Ignored => {}
         }
     }
@@ -338,14 +375,17 @@ impl SessionAdapter for ClaudeAdapter {
                 EventKind::Busy,
                 EventKind::Done,
                 EventKind::ContextLevel,
+                EventKind::BudgetLevel,
                 EventKind::Error,
             ],
-            // No budget: a plain run reports no quota this adapter could read. No
-            // iteration either: the CLI has no such counter.
+            // The budget comes measured out of the stream: a run emits a rate_limit_event
+            // with the share of the window it has used. No iteration, though: the CLI has
+            // no such counter.
             status_fields: vec![
                 StatusField::Project,
                 StatusField::Model,
                 StatusField::Context,
+                StatusField::Budget,
                 StatusField::LastOutput,
             ],
             enforces_permission_modes: true,

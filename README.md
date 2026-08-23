@@ -46,6 +46,18 @@ without a matching export fails the test suite; regenerate with
 COMPANION_UPDATE_SCHEMAS=1 cargo test -p companion-protocol
 ```
 
+### The hook binary
+
+`companion-hook` is what Claude Code calls for its `Stop`, `SubagentStop` and
+`Notification` events. It reports to the daemon over the socket and always exits 0, so a
+hook can never block a session.
+
+It is installed into a project's `.claude/settings.json` additively: existing hooks stay
+untouched, ours is appended, installing twice changes nothing, and the uninstall removes
+only our own entry. The command written there is the hook binary next to the daemon that is
+running, taken from its own path rather than from a build directory, and quoted so a path
+with a space survives the shell.
+
 ### Crates
 
 | Crate | What it holds |

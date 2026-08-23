@@ -72,6 +72,10 @@ impl ProbeBudget {
 #[derive(Debug, Default, Clone)]
 struct Snapshot {
     sessions: BTreeMap<SessionId, SessionStatus>,
+    /// When each session was last active, as the workbench writes it: an RFC 3339 stamp in
+    /// UTC. Kept as the string it is, because in that shape lexical order is chronological
+    /// order and the crate needs no date library for it.
+    last_active: BTreeMap<SessionId, String>,
     /// Newest result file per worker session, as an absolute path.
     results: BTreeMap<SessionId, String>,
     budget: Provenance<BudgetUsage>,
@@ -174,6 +178,7 @@ impl WorkbenchAdapter {
 
         let mut sessions = BTreeMap::new();
         let mut results = BTreeMap::new();
+        let mut last_active = BTreeMap::new();
 
         for entry in &stored {
             let session = &entry.session;
@@ -204,6 +209,9 @@ impl WorkbenchAdapter {
                 Some(model) if !model.is_empty() => Provenance::Measured(model),
                 _ => Provenance::Unknown,
             };
+            if let Some(stamp) = session.last_active.clone() {
+                last_active.insert(id.clone(), stamp);
+            }
             sessions.insert(id.clone(), status);
 
             for worker in &session.workers {
@@ -240,6 +248,13 @@ impl WorkbenchAdapter {
                     },
                 };
 
+                if let Some(stamp) = worker
+                    .spawned_at
+                    .clone()
+                    .or_else(|| session.last_active.clone())
+                {
+                    last_active.insert(worker_id.clone(), stamp);
+                }
                 if let Some(path) = files::newest_result_file(&self.config.results_dir, &name) {
                     let path = path.display().to_string();
                     status.last_output = Some(format!("result file: {path}"));
@@ -259,6 +274,7 @@ impl WorkbenchAdapter {
 
         Snapshot {
             sessions,
+            last_active,
             results,
             budget,
             broken: broken.into_iter().collect(),
@@ -497,7 +513,25 @@ impl SessionAdapter for WorkbenchAdapter {
     }
 
     async fn list(&self) -> AdapterResult<Vec<SessionStatus>> {
-        Ok(self.snapshot().await.sessions.into_values().collect())
+        let snapshot = self.snapshot().await;
+
+        // Running sessions first, then the finished ones with the most recent activity.
+        // The daemon cuts the finished tail off at the client's limit and cannot know which
+        // of them matter, so the order has to be right here, where the timestamps are.
+        let mut sessions: Vec<SessionStatus> = snapshot.sessions.into_values().collect();
+        sessions.sort_by(|left, right| {
+            let finished = |status: &SessionStatus| {
+                matches!(status.state, SessionState::Done | SessionState::Error)
+            };
+            finished(left).cmp(&finished(right)).then_with(|| {
+                snapshot
+                    .last_active
+                    .get(&right.id)
+                    .cmp(&snapshot.last_active.get(&left.id))
+                    .then_with(|| left.id.cmp(&right.id))
+            })
+        });
+        Ok(sessions)
     }
 
     async fn spawn(&self, _options: SpawnOptions) -> AdapterResult<SessionStatus> {

@@ -26,9 +26,9 @@ pub use capabilities::{AdapterCapabilities, CommandKind, StatusField};
 pub use event::{EndReason, Event, EventEnvelope, EventKind};
 pub use ids::{AdapterId, AuftragId, SessionId};
 pub use message::{
-    ClientMessage, ErrorCode, Hello, ProtocolError, ReadWindow, Request, RequestEnvelope,
-    RequestId, RequestKind, Response, ResponseBody, ResponseResult, SendOutcome, ServerMessage,
-    SpawnRequest, UNSOLICITED_REQUEST_ID, Welcome,
+    ClientMessage, DEFAULT_DONE_LIMIT, ErrorCode, Hello, ProtocolError, ReadWindow, Request,
+    RequestEnvelope, RequestId, RequestKind, Response, ResponseBody, ResponseResult, SendOutcome,
+    ServerMessage, SpawnRequest, UNSOLICITED_REQUEST_ID, Welcome,
 };
 pub use provenance::{Origin, Provenance};
 pub use registry::{Cost, RegistryEntry, SelfAnswer};

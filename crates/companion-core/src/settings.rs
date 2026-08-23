@@ -3,8 +3,11 @@
 //! The settings file: one JSON document next to the register.
 //!
 //! A missing file is not an error. `DESIGN.md` § Ersteinrichtung requires an aborted setup
-//! to leave a running daemon on safe defaults, never half a state, so loading falls back
-//! to [`Settings::default`] and only writes when something actually changed.
+//! to leave a running daemon on safe defaults, never half a state. The daemon therefore
+//! writes the conservative defaults on its first start ([`Settings::load_or_create`]), and
+//! the onboarding of the shell only ever changes an existing file. Whoever looks into the
+//! configuration directory after a first start finds a complete, valid file, not an
+//! absence that every part of the program has to interpret for itself.
 
 use std::path::Path;
 
@@ -48,6 +51,32 @@ impl Default for HighRiskSettings {
     }
 }
 
+/// Where the companion may reach a person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationChannel {
+    /// The character on the screen. The only channel that never leaves the machine, and
+    /// therefore the only one that is on by default.
+    Figure,
+    /// A push message to a phone.
+    Push,
+    /// An email.
+    Mail,
+}
+
+/// How far the companion acts on its own when a session reports something.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Autonomy {
+    /// Watch and report, decide nothing. The default.
+    #[default]
+    Observe,
+    /// Answer what is unambiguous, ask about the rest.
+    Ask,
+    /// Answer and act within the guardrails of the job file.
+    Act,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -57,6 +86,13 @@ pub struct Settings {
     pub high_risk: HighRiskSettings,
     /// Adapters the daemon should load. Empty means every adapter it was built with.
     pub enabled_adapters: Vec<String>,
+    /// Where the person is told about something. The figure alone by default: every other
+    /// channel sends data off this machine.
+    pub notification_channels: Vec<NotificationChannel>,
+    /// Whether a finished session is worth telling the person about. On by default, because
+    /// a run that is done is the one thing somebody is actually waiting for.
+    pub forward_done: bool,
+    pub autonomy: Autonomy,
 }
 
 impl Default for Settings {
@@ -66,6 +102,9 @@ impl Default for Settings {
             tool_boundary: ToolBoundary::Ask,
             high_risk: HighRiskSettings::default(),
             enabled_adapters: Vec::new(),
+            notification_channels: vec![NotificationChannel::Figure],
+            forward_done: true,
+            autonomy: Autonomy::Observe,
         }
     }
 }
@@ -124,6 +163,20 @@ impl Settings {
         Ok(settings)
     }
 
+    /// The settings, writing the conservative defaults when the file does not exist yet.
+    ///
+    /// This is what the daemon calls on start. An existing file is never rewritten, not
+    /// even to add fields a newer build knows: the defaults fill those in at load time, and
+    /// rewriting somebody's file behind their back is how a setting silently disappears.
+    pub fn load_or_create(path: &Path) -> Result<Self, SettingsError> {
+        if path.exists() {
+            return Self::load(path);
+        }
+        let settings = Self::default();
+        settings.save(path)?;
+        Ok(settings)
+    }
+
     pub fn save(&self, path: &Path) -> Result<(), SettingsError> {
         let mut text =
             serde_json::to_string_pretty(self).map_err(|source| SettingsError::Parse {
@@ -154,6 +207,69 @@ mod tests {
         let settings = Settings::load(&temp_path("does-not-exist.json")).unwrap();
         assert_eq!(settings.tool_boundary, ToolBoundary::Ask);
         assert_eq!(settings.high_risk.publish, ToolBoundary::Ask);
+    }
+
+    #[test]
+    fn the_defaults_are_the_careful_ones() {
+        let settings = Settings::default();
+        assert_eq!(
+            settings.notification_channels,
+            vec![NotificationChannel::Figure],
+            "no channel that leaves the machine without being asked for"
+        );
+        assert!(settings.forward_done, "a finished run is worth saying");
+        assert_eq!(settings.autonomy, Autonomy::Observe);
+        assert_eq!(settings.tool_boundary, ToolBoundary::Ask);
+        assert_eq!(settings.high_risk.mail, ToolBoundary::Ask);
+        assert_eq!(settings.high_risk.push, ToolBoundary::Ask);
+        assert_eq!(settings.high_risk.publish, ToolBoundary::Ask);
+    }
+
+    #[test]
+    fn the_first_start_leaves_a_complete_file_behind() {
+        let path = temp_path("first-start");
+        let created = Settings::load_or_create(&path).unwrap();
+        assert_eq!(created, Settings::default());
+
+        // A complete file, not an empty one: everything the defaults hold is written out.
+        let text = std::fs::read_to_string(&path).unwrap();
+        for key in [
+            "schema_version",
+            "tool_boundary",
+            "high_risk",
+            "notification_channels",
+            "forward_done",
+            "autonomy",
+        ] {
+            assert!(text.contains(key), "the file must name {key}: {text}");
+        }
+
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "settings stay owner-only");
+
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_second_start_leaves_the_file_exactly_as_it_was() {
+        let path = temp_path("second-start");
+        Settings::load_or_create(&path).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"schema_version": 1, "autonomy": "act", "something_of_theirs": 7}"#,
+        )
+        .unwrap();
+
+        let loaded = Settings::load_or_create(&path).unwrap();
+        assert_eq!(loaded.autonomy, Autonomy::Act, "their choice survives");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"{"schema_version": 1, "autonomy": "act", "something_of_theirs": 7}"#,
+            "an existing file is never rewritten"
+        );
+
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

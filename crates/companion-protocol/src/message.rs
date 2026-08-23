@@ -20,6 +20,13 @@ pub type RequestId = u64;
 /// its own could not tell the two apart, so a request carrying it is refused.
 pub const UNSOLICITED_REQUEST_ID: RequestId = 0;
 
+/// How many finished sessions a listing carries when the client does not say.
+pub const DEFAULT_DONE_LIMIT: u32 = 20;
+
+fn default_done_limit() -> u32 {
+    DEFAULT_DONE_LIMIT
+}
+
 /// First message of every connection.
 ///
 /// The client presents a token and nothing else; the daemon decides the role from it. A
@@ -99,8 +106,20 @@ pub enum SendOutcome {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "request", rename_all = "snake_case")]
 pub enum Request {
-    /// All sessions the daemon currently knows.
-    List,
+    /// The sessions the daemon knows, filtered.
+    ///
+    /// A machine that has been working for weeks has hundreds of finished sessions, and a
+    /// session list that shows all of them is unusable. The filter is part of the request
+    /// rather than of the shell, so every client gets the same short answer.
+    List {
+        /// Only sessions that are still going: busy, idle or waiting.
+        #[serde(default)]
+        running_only: bool,
+        /// How many finished sessions to include at most. Ignored when `running_only` is
+        /// set.
+        #[serde(default = "default_done_limit")]
+        done_limit: u32,
+    },
     Spawn(SpawnRequest),
     Send {
         session_id: SessionId,
@@ -160,9 +179,18 @@ pub enum RequestKind {
 }
 
 impl Request {
+    /// A listing with the defaults: everything still running, plus the last
+    /// [`DEFAULT_DONE_LIMIT`] finished sessions.
+    pub fn list() -> Self {
+        Self::List {
+            running_only: false,
+            done_limit: DEFAULT_DONE_LIMIT,
+        }
+    }
+
     pub fn kind(&self) -> RequestKind {
         match self {
-            Self::List => RequestKind::List,
+            Self::List { .. } => RequestKind::List,
             Self::Spawn(_) => RequestKind::Spawn,
             Self::Send { .. } => RequestKind::Send,
             Self::Read { .. } => RequestKind::Read,
@@ -298,13 +326,27 @@ mod tests {
     fn request_envelope_flattens_onto_one_object() {
         let envelope = RequestEnvelope {
             id: 7,
-            request: Request::List,
+            request: Request::list(),
         };
         let json = serde_json::to_string(&ClientMessage::Request(envelope.clone())).unwrap();
-        assert_eq!(json, r#"{"type":"request","id":7,"request":"list"}"#);
+        assert_eq!(
+            json,
+            r#"{"type":"request","id":7,"request":"list","running_only":false,"done_limit":20}"#
+        );
 
         let back: ClientMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back, ClientMessage::Request(envelope));
+    }
+
+    #[test]
+    fn a_listing_without_a_filter_still_parses_and_gets_the_defaults() {
+        // A shell written before the filter existed sends the bare form.
+        let parsed: ClientMessage =
+            serde_json::from_str(r#"{"type":"request","id":1,"request":"list"}"#).unwrap();
+        let ClientMessage::Request(envelope) = parsed else {
+            panic!("expected a request");
+        };
+        assert_eq!(envelope.request, Request::list());
     }
 
     #[test]

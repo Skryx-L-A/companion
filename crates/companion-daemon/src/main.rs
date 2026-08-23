@@ -8,8 +8,8 @@ use std::time::Duration;
 use companion_adapter_claude::{ClaudeAdapter, ClaudeConfig};
 use companion_adapter_workbench::{WorkbenchAdapter, WorkbenchConfig};
 use companion_core::adapter::AdapterSet;
-use companion_core::{FileTokenStore, Registry, Settings, TokenStore, paths};
-use companion_daemon::{ServerConfig, start};
+use companion_core::{FileTokenStore, Registry, TokenStore, paths};
+use companion_daemon::{ServerConfig, prepare_config, start};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -35,16 +35,16 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let config_dir = paths::config_dir();
-    paths::ensure_private_dir(&config_dir)?;
-
-    // A missing settings file is the normal first start, not an error: the daemon comes up
-    // on safe defaults and the onboarding fills them in later.
-    let settings = Settings::load(&paths::settings_path())?;
+    // A missing settings file is the normal first start, not an error: the daemon writes
+    // the careful defaults and the onboarding of the shell changes them later.
+    let (settings, created) = prepare_config(&paths::config_dir())?;
     info!(
+        created,
         tool_boundary = ?settings.tool_boundary,
+        autonomy = ?settings.autonomy,
+        channels = settings.notification_channels.len(),
         adapters = settings.enabled_adapters.len(),
-        "settings loaded"
+        "settings ready"
     );
 
     let tokens = FileTokenStore::new(paths::token_file_path()).load_or_create()?;

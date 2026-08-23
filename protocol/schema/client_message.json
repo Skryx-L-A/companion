@@ -576,9 +576,21 @@
       ],
       "oneOf": [
         {
-          "description": "All sessions the daemon currently knows.",
+          "description": "The sessions the daemon knows, filtered.\n\nA machine that has been working for weeks has hundreds of finished sessions, and a\nsession list that shows all of them is unusable. The filter is part of the request\nrather than of the shell, so every client gets the same short answer.",
           "type": "object",
           "properties": {
+            "running_only": {
+              "description": "Only sessions that are still going: busy, idle or waiting.",
+              "type": "boolean",
+              "default": false
+            },
+            "done_limit": {
+              "description": "How many finished sessions to include at most. Ignored when `running_only` is\nset.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "default": 20
+            },
             "request": {
               "type": "string",
               "const": "list"
