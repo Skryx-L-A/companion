@@ -7,19 +7,15 @@
     "adapter": {
       "$ref": "#/$defs/AdapterId"
     },
+    "display_name": {
+      "description": "Human-readable name for the settings page.",
+      "type": "string"
+    },
     "commands": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/CommandKind"
       }
-    },
-    "display_name": {
-      "description": "Human-readable name for the settings page.",
-      "type": "string"
-    },
-    "enforces_permission_modes": {
-      "description": "True when the adapter can hand a permission mode down into the session and have it\nhold. False for anything that only drives a terminal.",
-      "type": "boolean"
     },
     "events": {
       "type": "array",
@@ -32,6 +28,10 @@
       "items": {
         "$ref": "#/$defs/StatusField"
       }
+    },
+    "enforces_permission_modes": {
+      "description": "True when the adapter can hand a permission mode down into the session and have it\nhold. False for anything that only drives a terminal.",
+      "type": "boolean"
     },
     "supports_subagents": {
       "description": "True when sessions of this adapter can run sub-agents, which is what a gauntlet\nloop needs.",

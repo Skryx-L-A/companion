@@ -417,6 +417,7 @@ async fn handle(request: Request, state: &ServerState) -> Result<ResponseBody, P
                     project: spawn.project,
                     auftrag_id: spawn.auftrag_id,
                     model: spawn.model,
+                    prompt: spawn.prompt,
                 })
                 .await
                 .map_err(to_protocol_error)?;

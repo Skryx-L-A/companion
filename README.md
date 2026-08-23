@@ -7,10 +7,10 @@ their workers.
 
 ## Status
 
-Phase 1 is under way. The Rust core is in place: the wire protocol, the session-adapter
-interface with its event bus, the register, the settings file and the daemon that serves
-them on a user-only Unix socket. No session adapter talks to a real harness yet, and the
-macOS shell has not been started.
+Phase 1 is under way. The Rust core is in place, and so are the two adapters v1 ships with:
+one for the Claude Code Workbench, which watches its state files, and one for plain Claude
+Code, which drives the CLI headless and reads its transcripts. The macOS shell has not been
+started.
 
 ## Architecture
 
@@ -32,7 +32,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-`cargo run -p companion-daemon` starts the daemon. It creates its configuration directory,
+`cargo run --bin companion-daemon` starts the daemon. It creates its configuration directory,
 generates a token pair on first start and listens on `$XDG_RUNTIME_DIR/companion/companion.sock`,
 or on `companion.sock` inside the configuration directory where there is no runtime directory,
 as on macOS. `COMPANION_CONFIG_DIR` moves everything somewhere else, which is what the tests
@@ -52,7 +52,9 @@ COMPANION_UPDATE_SCHEMAS=1 cargo test -p companion-protocol
 |---|---|
 | `companion-protocol` | The versioned JSON protocol: envelopes, events, session status, job file, register entry, capabilities, client roles. Serde and schemars only. |
 | `companion-core` | Session-adapter trait, event bus, SQLite register with migrations, settings, token store and the role model. |
-| `companion-daemon` | The socket server and the binary: handshake, role check, request dispatch, event fan-out. |
+| `companion-adapter-workbench` | Watches the Claude Code Workbench through its state files, `wb-state` and tmux pane metadata. Read-only by design. |
+| `companion-adapter-claude` | Drives plain Claude Code headless, reads its transcripts, and installs the three missing hooks additively. |
+| `companion-daemon` | The socket server and two binaries: the daemon itself and `companion-hook`, which Claude Code's hooks call. |
 
 ## License
 

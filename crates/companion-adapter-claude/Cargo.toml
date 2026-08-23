@@ -1,0 +1,27 @@
+[package]
+name = "companion-adapter-claude"
+description = "Session adapter for plain Claude Code: headless runs, transcripts and the additional hooks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+companion-core.workspace = true
+companion-protocol.workspace = true
+
+async-trait.workspace = true
+serde.workspace = true
+# preserve_order keeps a user's settings.json in the order they wrote it when the hook
+# installer edits it. Rewriting their file alphabetically would be a needless diff.
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "rt", "process", "io-util", "macros"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

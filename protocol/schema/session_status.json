@@ -4,27 +4,38 @@
   "description": "The status of one session.\n\n`DESIGN.md` § Datenmodelle lists this as: id, adapter, maschine, projekt, modell,\nzustand, laufzeit, kontext, budget, iteration, letzte_ausgabe, offene_frage,\nauftrag_id. Every field an adapter may not know carries its origin instead of a\nsilently plausible zero.",
   "type": "object",
   "properties": {
+    "id": {
+      "$ref": "#/$defs/SessionId"
+    },
     "adapter": {
       "$ref": "#/$defs/AdapterId"
     },
-    "auftrag_id": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/AuftragId"
-        },
-        {
-          "type": "null"
-        }
+    "machine": {
+      "description": "Machine the session runs on. `local` for this machine.",
+      "type": "string"
+    },
+    "project": {
+      "description": "Absolute path of the project directory the session works in.",
+      "type": [
+        "string",
+        "null"
       ]
     },
-    "budget": {
-      "$ref": "#/$defs/Provenance4"
+    "model": {
+      "$ref": "#/$defs/Provenance"
+    },
+    "state": {
+      "$ref": "#/$defs/SessionState"
+    },
+    "runtime_ms": {
+      "description": "Milliseconds since the session started.",
+      "$ref": "#/$defs/Provenance2"
     },
     "context": {
       "$ref": "#/$defs/Provenance3"
     },
-    "id": {
-      "$ref": "#/$defs/SessionId"
+    "budget": {
+      "$ref": "#/$defs/Provenance4"
     },
     "iteration": {
       "$ref": "#/$defs/Provenance5"
@@ -36,13 +47,6 @@
         "null"
       ]
     },
-    "machine": {
-      "description": "Machine the session runs on. `local` for this machine.",
-      "type": "string"
-    },
-    "model": {
-      "$ref": "#/$defs/Provenance"
-    },
     "open_question": {
       "description": "The question the session is currently blocked on, if any.",
       "type": [
@@ -50,19 +54,15 @@
         "null"
       ]
     },
-    "project": {
-      "description": "Absolute path of the project directory the session works in.",
-      "type": [
-        "string",
-        "null"
+    "auftrag_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AuftragId"
+        },
+        {
+          "type": "null"
+        }
       ]
-    },
-    "runtime_ms": {
-      "description": "Milliseconds since the session started.",
-      "$ref": "#/$defs/Provenance2"
-    },
-    "state": {
-      "$ref": "#/$defs/SessionState"
     }
   },
   "required": [
@@ -77,59 +77,13 @@
     "iteration"
   ],
   "$defs": {
+    "SessionId": {
+      "description": "Identifies one session. Unique per machine, assigned by the adapter that owns the session.",
+      "type": "string"
+    },
     "AdapterId": {
       "description": "Identifies a session adapter, for example `workbench` or `claude-code`.",
       "type": "string"
-    },
-    "AuftragId": {
-      "description": "Identifies a job file under `.companion/auftraege/<id>.json`.",
-      "type": "string"
-    },
-    "BudgetUsage": {
-      "description": "How much of a subscription or spending budget a session has used up.",
-      "type": "object",
-      "properties": {
-        "resets_at_ms": {
-          "description": "Unix time in milliseconds at which the window resets, when known.",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "minimum": 0
-        },
-        "used_fraction": {
-          "description": "Share of the current window in use, between 0.0 and 1.0.",
-          "type": "number",
-          "format": "double"
-        }
-      },
-      "required": [
-        "used_fraction"
-      ]
-    },
-    "ContextUsage": {
-      "description": "How much of the model context window a session has used up.",
-      "type": "object",
-      "properties": {
-        "used_fraction": {
-          "description": "Share of the window in use, between 0.0 and 1.0.",
-          "type": "number",
-          "format": "double"
-        },
-        "used_tokens": {
-          "description": "Tokens in the window, if the adapter knows the absolute number.",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "used_fraction"
-      ]
     },
     "Provenance": {
       "description": "A value together with where it came from.\n\n`DESIGN.md` § Session-Adapter requires every status field to carry its origin, and the\nsession list to show an unknown field as unknown rather than as empty or zero. Making\n`Unknown` a variant without a payload is what enforces that: there is no value to\nmistake for a measurement.",
@@ -180,6 +134,25 @@
           "required": [
             "origin"
           ]
+        }
+      ]
+    },
+    "SessionState": {
+      "description": "What a session is doing right now.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "busy",
+            "idle",
+            "done",
+            "error"
+          ]
+        },
+        {
+          "description": "Waiting for input from the person, including an open question.",
+          "type": "string",
+          "const": "waiting"
         }
       ]
     },
@@ -291,6 +264,29 @@
         }
       ]
     },
+    "ContextUsage": {
+      "description": "How much of the model context window a session has used up.",
+      "type": "object",
+      "properties": {
+        "used_fraction": {
+          "description": "Share of the window in use, between 0.0 and 1.0.",
+          "type": "number",
+          "format": "double"
+        },
+        "used_tokens": {
+          "description": "Tokens in the window, if the adapter knows the absolute number.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "used_fraction"
+      ]
+    },
     "Provenance4": {
       "description": "A value together with where it came from.\n\n`DESIGN.md` § Session-Adapter requires every status field to carry its origin, and the\nsession list to show an unknown field as unknown rather than as empty or zero. Making\n`Unknown` a variant without a payload is what enforces that: there is no value to\nmistake for a measurement.",
       "oneOf": [
@@ -341,6 +337,29 @@
             "origin"
           ]
         }
+      ]
+    },
+    "BudgetUsage": {
+      "description": "How much of a subscription or spending budget a session has used up.",
+      "type": "object",
+      "properties": {
+        "used_fraction": {
+          "description": "Share of the current window in use, between 0.0 and 1.0.",
+          "type": "number",
+          "format": "double"
+        },
+        "resets_at_ms": {
+          "description": "Unix time in milliseconds at which the window resets, when known.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "used_fraction"
       ]
     },
     "Provenance5": {
@@ -399,28 +418,9 @@
         }
       ]
     },
-    "SessionId": {
-      "description": "Identifies one session. Unique per machine, assigned by the adapter that owns the session.",
+    "AuftragId": {
+      "description": "Identifies a job file under `.companion/auftraege/<id>.json`.",
       "type": "string"
-    },
-    "SessionState": {
-      "description": "What a session is doing right now.",
-      "oneOf": [
-        {
-          "type": "string",
-          "enum": [
-            "busy",
-            "idle",
-            "done",
-            "error"
-          ]
-        },
-        {
-          "description": "Waiting for input from the person, including an open question.",
-          "type": "string",
-          "const": "waiting"
-        }
-      ]
     }
   }
 }

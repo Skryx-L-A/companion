@@ -59,6 +59,8 @@ pub struct SpawnOptions {
     /// Job file to hand over. The adapter passes the path, never the text.
     pub auftrag_id: Option<AuftragId>,
     pub model: Option<String>,
+    /// First message for a session that starts from a prompt rather than from a job file.
+    pub prompt: Option<String>,
 }
 
 /// Why an adapter command failed.

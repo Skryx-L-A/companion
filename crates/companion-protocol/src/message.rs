@@ -53,6 +53,11 @@ pub struct SpawnRequest {
     /// Job file to hand to the session. The daemon passes the path, never the text.
     pub auftrag_id: Option<AuftragId>,
     pub model: Option<String>,
+    /// First message for a session that starts from a prompt rather than from a job file.
+    /// An adapter that drives a headless harness needs something to say; one that attaches
+    /// to an existing terminal ignores it.
+    #[serde(default)]
+    pub prompt: Option<String>,
 }
 
 /// What happened to a `send`.

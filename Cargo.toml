@@ -12,6 +12,8 @@ repository = "https://github.com/Skryx-L-A/companion"
 [workspace.dependencies]
 companion-protocol = { path = "crates/companion-protocol" }
 companion-core = { path = "crates/companion-core" }
+companion-adapter-workbench = { path = "crates/companion-adapter-workbench" }
+companion-adapter-claude = { path = "crates/companion-adapter-claude" }
 
 async-trait = "0.1"
 rusqlite = { version = "0.40", features = ["bundled"] }

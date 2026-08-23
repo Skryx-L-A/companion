@@ -4,6 +4,14 @@
   "description": "One line of the register: what ran, when, and what it left behind.\n\n`DESIGN.md` § Datenmodelle lists this as: session_id, auftrag_id, projekt, start, ende,\nergebnis, offene_punkte, selbstantworten, kosten.",
   "type": "object",
   "properties": {
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "session_id": {
+      "$ref": "#/$defs/SessionId"
+    },
     "auftrag_id": {
       "anyOf": [
         {
@@ -14,9 +22,17 @@
         }
       ]
     },
-    "cost": {
-      "description": "Unknown wherever the adapter cannot report spend, rather than a plausible zero.",
-      "$ref": "#/$defs/Provenance"
+    "project": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "started_at_ms": {
+      "description": "Unix time in milliseconds.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
     },
     "ended_at_ms": {
       "description": "Unix time in milliseconds, absent while the session still runs.",
@@ -27,19 +43,6 @@
       "format": "uint64",
       "minimum": 0
     },
-    "open_points": {
-      "type": "array",
-      "default": [],
-      "items": {
-        "type": "string"
-      }
-    },
-    "project": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
     "result_path": {
       "description": "Path of the result file the session wrote.",
       "type": [
@@ -47,26 +50,23 @@
         "null"
       ]
     },
-    "schema_version": {
-      "type": "integer",
-      "format": "uint32",
-      "minimum": 0
+    "open_points": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
     },
     "self_answers": {
       "type": "array",
-      "default": [],
       "items": {
         "$ref": "#/$defs/SelfAnswer"
-      }
+      },
+      "default": []
     },
-    "session_id": {
-      "$ref": "#/$defs/SessionId"
-    },
-    "started_at_ms": {
-      "description": "Unix time in milliseconds.",
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0
+    "cost": {
+      "description": "Unknown wherever the adapter cannot report spend, rather than a plausible zero.",
+      "$ref": "#/$defs/Provenance"
     }
   },
   "required": [
@@ -76,30 +76,41 @@
     "cost"
   ],
   "$defs": {
+    "SessionId": {
+      "description": "Identifies one session. Unique per machine, assigned by the adapter that owns the session.",
+      "type": "string"
+    },
     "AuftragId": {
       "description": "Identifies a job file under `.companion/auftraege/<id>.json`.",
       "type": "string"
     },
-    "Cost": {
-      "description": "What a run cost.",
+    "SelfAnswer": {
+      "description": "A question the companion answered on its own instead of waking the person, kept so the\nanswer can be reviewed afterwards.",
       "type": "object",
       "properties": {
-        "tokens": {
-          "type": [
-            "integer",
-            "null"
-          ],
+        "question": {
+          "type": "string"
+        },
+        "answer": {
+          "type": "string"
+        },
+        "source": {
+          "description": "Where the answer came from: the job file, a guardrail, the project profile.",
+          "type": "string"
+        },
+        "answered_at_ms": {
+          "description": "Unix time in milliseconds.",
+          "type": "integer",
           "format": "uint64",
           "minimum": 0
-        },
-        "usd": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
         }
-      }
+      },
+      "required": [
+        "question",
+        "answer",
+        "source",
+        "answered_at_ms"
+      ]
     },
     "Provenance": {
       "description": "A value together with where it came from.\n\n`DESIGN.md` § Session-Adapter requires every status field to carry its origin, and the\nsession list to show an unknown field as unknown rather than as empty or zero. Making\n`Unknown` a variant without a payload is what enforces that: there is no value to\nmistake for a measurement.",
@@ -153,37 +164,26 @@
         }
       ]
     },
-    "SelfAnswer": {
-      "description": "A question the companion answered on its own instead of waking the person, kept so the\nanswer can be reviewed afterwards.",
+    "Cost": {
+      "description": "What a run cost.",
       "type": "object",
       "properties": {
-        "answer": {
-          "type": "string"
-        },
-        "answered_at_ms": {
-          "description": "Unix time in milliseconds.",
-          "type": "integer",
+        "tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
           "minimum": 0
         },
-        "question": {
-          "type": "string"
-        },
-        "source": {
-          "description": "Where the answer came from: the job file, a guardrail, the project profile.",
-          "type": "string"
+        "usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
         }
-      },
-      "required": [
-        "question",
-        "answer",
-        "source",
-        "answered_at_ms"
-      ]
-    },
-    "SessionId": {
-      "description": "Identifies one session. Unique per machine, assigned by the adapter that owns the session.",
-      "type": "string"
+      }
     }
   }
 }

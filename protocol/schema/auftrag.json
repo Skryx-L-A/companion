@@ -4,59 +4,22 @@
   "description": "The job file, stored in the project under `.companion/auftraege/<id>.json`.\n\n`DESIGN.md` § Datenmodelle lists this as: id, projekt, ziel, fertig_kriterium,\nreferenz, guardrails, gate_befehle, limits, loop_typ, modell, freigabe.",
   "type": "object",
   "properties": {
-    "approval": {
-      "description": "Absent until the person has approved the exact text. An unapproved job never\ncauses an outward action.",
-      "anyOf": [
-        {
-          "$ref": "#/$defs/Approval"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "done_criterion": {
-      "type": "string"
-    },
-    "gate_commands": {
-      "type": "array",
-      "default": [],
-      "items": {
-        "$ref": "#/$defs/GateCommand"
-      }
-    },
-    "goal": {
-      "type": "string"
-    },
-    "guardrails": {
-      "type": "array",
-      "default": [],
-      "items": {
-        "type": "string"
-      }
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
     },
     "id": {
       "$ref": "#/$defs/AuftragId"
     },
-    "limits": {
-      "$ref": "#/$defs/Limits",
-      "default": {
-        "iterations": null,
-        "time_seconds": null,
-        "tokens": null
-      }
-    },
-    "loop_type": {
-      "$ref": "#/$defs/LoopType"
-    },
-    "model": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
     "project": {
       "description": "Absolute path of the project directory.",
+      "type": "string"
+    },
+    "goal": {
+      "type": "string"
+    },
+    "done_criterion": {
       "type": "string"
     },
     "reference": {
@@ -69,10 +32,47 @@
         }
       ]
     },
-    "schema_version": {
-      "type": "integer",
-      "format": "uint32",
-      "minimum": 0
+    "guardrails": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "gate_commands": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/GateCommand"
+      },
+      "default": []
+    },
+    "limits": {
+      "$ref": "#/$defs/Limits",
+      "default": {
+        "iterations": null,
+        "tokens": null,
+        "time_seconds": null
+      }
+    },
+    "loop_type": {
+      "$ref": "#/$defs/LoopType"
+    },
+    "model": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "approval": {
+      "description": "Absent until the person has approved the exact text. An unapproved job never\ncauses an outward action.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Approval"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [
@@ -84,43 +84,60 @@
     "loop_type"
   ],
   "$defs": {
-    "Approval": {
-      "description": "The person's approval of one exact job text.",
-      "type": "object",
-      "properties": {
-        "approved_at_ms": {
-          "description": "Unix time in milliseconds.",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "text_sha256": {
-          "description": "Hex-encoded SHA-256 of the approved job text, so a later edit invalidates it.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "approved_at_ms",
-        "text_sha256"
-      ]
-    },
     "AuftragId": {
       "description": "Identifies a job file under `.companion/auftraege/<id>.json`.",
       "type": "string"
+    },
+    "Reference": {
+      "description": "The reference a critic judges the result against.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "path"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        }
+      ]
     },
     "GateCommand": {
       "description": "One gate command, split into program and arguments.\n\n`DESIGN.md` § Sicherheit requires the daemon to run the approved text and nothing else,\nwithout shell evaluation of variables or substitutions. Storing the command already\nsplit is what makes that structural: there is no string for a shell to expand.",
       "type": "object",
       "properties": {
-        "args": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "type": "string"
-          }
-        },
         "program": {
           "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
         },
         "working_dir": {
           "description": "Working directory for the command. Relative paths are resolved against the project.",
@@ -146,8 +163,7 @@
           "format": "uint32",
           "minimum": 0
         },
-        "time_seconds": {
-          "description": "Wall-clock limit. `DESIGN.md` § Loops names this the stand-in wherever the adapter\nreports neither iterations nor tokens.",
+        "tokens": {
           "type": [
             "integer",
             "null"
@@ -155,7 +171,8 @@
           "format": "uint64",
           "minimum": 0
         },
-        "tokens": {
+        "time_seconds": {
+          "description": "Wall-clock limit. `DESIGN.md` § Loops names this the stand-in wherever the adapter\nreports neither iterations nor tokens.",
           "type": [
             "integer",
             "null"
@@ -185,41 +202,24 @@
         }
       ]
     },
-    "Reference": {
-      "description": "The reference a critic judges the result against.",
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "type": "string",
-              "const": "path"
-            },
-            "path": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "path"
-          ]
+    "Approval": {
+      "description": "The person's approval of one exact job text.",
+      "type": "object",
+      "properties": {
+        "approved_at_ms": {
+          "description": "Unix time in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
         },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "type": "string",
-              "const": "text"
-            },
-            "text": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "text"
-          ]
+        "text_sha256": {
+          "description": "Hex-encoded SHA-256 of the approved job text, so a later edit invalidates it.",
+          "type": "string"
         }
+      },
+      "required": [
+        "approved_at_ms",
+        "text_sha256"
       ]
     }
   }
