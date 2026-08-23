@@ -16,7 +16,7 @@ use crate::{generate_token, now_ms};
 /// A slow client falls behind rather than blocking the adapter: the broadcast channel
 /// drops the oldest events for that receiver and reports the gap, and the sequence number
 /// on the envelope lets the client see how many it missed.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EventBus {
     sender: broadcast::Sender<EventEnvelope>,
     sequence: Arc<AtomicU64>,

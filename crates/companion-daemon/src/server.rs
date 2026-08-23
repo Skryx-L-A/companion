@@ -172,6 +172,7 @@ impl Connection {
 
 /// A running server. Dropping the handle leaves the server running; call
 /// [`ServerHandle::shutdown`] to stop it and remove the socket.
+#[derive(Debug)]
 pub struct ServerHandle {
     socket_path: PathBuf,
     /// Device and inode of the socket this handle created, so shutdown can tell it apart
