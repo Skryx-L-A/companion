@@ -6,6 +6,7 @@
 //! schema carries its version in SQLite's own `user_version`, and migrations run forward
 //! one step at a time on open, so an older database is upgraded rather than rejected.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -69,7 +70,17 @@ impl Registry {
                 source,
             })?;
         }
-        Self::from_connection(Connection::open(path)?)
+        let connection = Connection::open(path)?;
+        // Owner-only before the first write, so SQLite copies the mode onto the -wal and
+        // -shm files it creates next. The directory is already 0700; this is the second
+        // lock on a file that names projects and quotes session output.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
+            |source| RegistryError::Io {
+                path: path.display().to_string(),
+                source,
+            },
+        )?;
+        Self::from_connection(connection)
     }
 
     /// For tests and for a daemon run that must not leave anything behind.
