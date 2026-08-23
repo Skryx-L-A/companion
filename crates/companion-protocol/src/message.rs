@@ -11,18 +11,36 @@ use crate::session::SessionStatus;
 
 /// Matches a response to the request that caused it. Chosen by the client, unique per
 /// connection.
+///
+/// The value [`UNSOLICITED_REQUEST_ID`] is reserved and a client must not use it.
 pub type RequestId = u64;
+
+/// The request id the daemon uses for an answer that belongs to no request, for example
+/// the error for a line that did not parse. A client that used this id for a request of
+/// its own could not tell the two apart, so a request carrying it is refused.
+pub const UNSOLICITED_REQUEST_ID: RequestId = 0;
 
 /// First message of every connection.
 ///
 /// The client presents a token and nothing else; the daemon decides the role from it. A
 /// client cannot claim to be human.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Hello {
     pub protocol_version: u32,
     pub token: String,
     /// Free-text name of the client, for the connection list and the log.
     pub client_name: String,
+}
+
+/// Never prints the token, so no debug log of a message can leak it.
+impl std::fmt::Debug for Hello {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hello")
+            .field("protocol_version", &self.protocol_version)
+            .field("token", &"[redacted]")
+            .field("client_name", &self.client_name)
+            .finish()
+    }
 }
 
 /// The daemon's answer to a valid [`Hello`].
@@ -32,6 +50,13 @@ pub struct Welcome {
     pub role: ClientRole,
     /// Version of the daemon binary.
     pub daemon_version: String,
+    /// Identifies this run of the daemon. Sequence numbers restart at zero after a
+    /// restart, so a client compares this before it compares sequence numbers.
+    pub run_id: String,
+    /// The prefix the daemon puts in front of every session id this connection reports
+    /// about. A client may report, ask and report progress only inside it; the daemon
+    /// assigns it, so no connection can write the status of another one's session.
+    pub session_namespace: String,
 }
 
 /// Which slice of a session's output to read.
@@ -253,6 +278,14 @@ pub enum ServerMessage {
     Welcome(Welcome),
     Response(Response),
     Event(EventEnvelope),
+    /// This connection read its events too slowly and lost some. Only this client is
+    /// affected, so the gap is reported to it alone instead of on the event stream.
+    /// The client should re-read the session list rather than trust what it has.
+    EventsDropped {
+        missed: u64,
+        /// The last sequence number that did arrive before the gap.
+        after_sequence: u64,
+    },
     /// The daemon refused the handshake and closes the connection right after.
     Rejected(ProtocolError),
 }
@@ -272,6 +305,24 @@ mod tests {
 
         let back: ClientMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back, ClientMessage::Request(envelope));
+    }
+
+    #[test]
+    fn a_hello_never_shows_its_token_in_debug_output() {
+        let hello = Hello {
+            protocol_version: 1,
+            token: "s3cr3t-token".to_owned(),
+            client_name: "shell".to_owned(),
+        };
+        let rendered = format!("{hello:?}");
+        assert!(
+            !rendered.contains("s3cr3t"),
+            "debug output leaked the token"
+        );
+        assert!(
+            rendered.contains("shell"),
+            "the client name is not a secret"
+        );
     }
 
     #[test]

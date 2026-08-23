@@ -24,6 +24,13 @@ pub struct WorkbenchConfig {
     pub results_dir: PathBuf,
     /// How long a single call to `wb-state` or `tmux` may take before it counts as failed.
     pub command_timeout: Duration,
+    /// How much time one listing may spend in total on the optional `wb-state` calls that
+    /// fill gaps the state files leave.
+    ///
+    /// The daemon puts every adapter call under a deadline, so a listing that asks about
+    /// forty workers one after another would fail as a whole. Once this budget is spent the
+    /// remaining gaps stay unknown, which is the honest answer and keeps the list fast.
+    pub probe_budget: Duration,
 }
 
 impl WorkbenchConfig {
@@ -39,7 +46,8 @@ impl WorkbenchConfig {
             limits_file: workbench.join("limits.jsonl"),
             kontingent_file: workbench.join("kontingent.json"),
             results_dir: home.join(".pi-workers/results"),
-            command_timeout: Duration::from_secs(5),
+            command_timeout: Duration::from_secs(2),
+            probe_budget: Duration::from_secs(2),
         }
     }
 }

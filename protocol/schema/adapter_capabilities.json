@@ -78,7 +78,8 @@
         "context_level",
         "budget_level",
         "iteration",
-        "error"
+        "error",
+        "events_dropped"
       ]
     },
     "StatusField": {

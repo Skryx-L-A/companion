@@ -13,9 +13,9 @@ companion-protocol.workspace = true
 
 async-trait.workspace = true
 serde.workspace = true
-# preserve_order keeps a user's settings.json in the order they wrote it when the hook
-# installer edits it. Rewriting their file alphabetically would be a needless diff.
-serde_json = { workspace = true, features = ["preserve_order"] }
+# The workspace enables preserve_order, which is what keeps a user's settings.json in the
+# order they wrote it when the hook installer edits it.
+serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "rt", "process", "io-util", "macros"] }
 tracing.workspace = true

@@ -20,7 +20,7 @@ mod files;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use companion_core::adapter::{
@@ -46,6 +46,27 @@ const WORKER_SEPARATOR: char = '#';
 /// A change of at least this many percentage points is worth a `budget_level` event.
 /// Below that the value flickers with every request and would drown the event stream.
 const BUDGET_STEP: f64 = 0.01;
+
+/// How much time one listing may still spend on optional `wb-state` calls.
+///
+/// The files are always read; only the gap-filling questions are cut off, so running out of
+/// budget costs detail, never a session.
+#[derive(Debug, Clone, Copy)]
+struct ProbeBudget {
+    deadline: Instant,
+}
+
+impl ProbeBudget {
+    fn new(budget: Duration) -> Self {
+        Self {
+            deadline: Instant::now() + budget,
+        }
+    }
+
+    fn allows(&self) -> bool {
+        Instant::now() < self.deadline
+    }
+}
 
 /// What one poll saw.
 #[derive(Debug, Default, Clone)]
@@ -133,6 +154,7 @@ impl WorkbenchAdapter {
     }
 
     async fn snapshot(&self) -> Snapshot {
+        let budget = ProbeBudget::new(self.config.probe_budget);
         let (stored, broken) = files::read_sessions(&self.config.sessions_dir);
         let panes = commands::list_panes(&self.config)
             .await
@@ -157,6 +179,7 @@ impl WorkbenchAdapter {
             let session = &entry.session;
             let mut tmux = session.tmux_session.clone();
             if tmux.is_none()
+                && budget.allows()
                 && let Some(dir) = session.dir.as_deref()
             {
                 // Only asked when the file has nothing: one process per gap, not per poll.
@@ -202,6 +225,7 @@ impl WorkbenchAdapter {
                 status.project = worker.dir.clone().or_else(|| session.dir.clone());
                 status.model = match worker.model.clone() {
                     Some(model) if !model.is_empty() => Provenance::Measured(model),
+                    _ if !budget.allows() => Provenance::Unknown,
                     _ => match commands::worker_model(&self.config, &name).await {
                         Ok(Some(model)) => Provenance::Measured(model),
                         _ => Provenance::Unknown,
@@ -209,6 +233,7 @@ impl WorkbenchAdapter {
                 };
                 status.machine = match worker.machine.clone() {
                     Some(machine) if !machine.is_empty() => machine,
+                    _ if !budget.allows() => "local".to_owned(),
                     _ => match commands::worker_machine(&self.config, &name).await {
                         Ok(Some(machine)) => machine,
                         _ => "local".to_owned(),
@@ -224,7 +249,8 @@ impl WorkbenchAdapter {
             }
         }
 
-        self.resolve_unknown_panes(&panes, &mut sessions).await;
+        self.resolve_unknown_panes(&panes, &mut sessions, budget)
+            .await;
 
         let budget = self.budget().await;
         for status in sessions.values_mut() {
@@ -250,11 +276,16 @@ impl WorkbenchAdapter {
         &self,
         panes: &[commands::Pane],
         sessions: &mut BTreeMap<SessionId, SessionStatus>,
+        budget: ProbeBudget,
     ) {
         let known_tmux: BTreeSet<String> =
             panes.iter().map(|pane| pane.tmux_session.clone()).collect();
 
         for tmux_session in known_tmux {
+            if !budget.allows() {
+                debug!("probe budget spent, remaining panes stay unresolved");
+                return;
+            }
             // `-view` sessions are tmux mirrors of a session that is already in the list.
             if tmux_session.ends_with("-view") {
                 continue;

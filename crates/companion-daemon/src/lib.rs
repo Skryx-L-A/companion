@@ -7,7 +7,7 @@
 
 pub mod server;
 
-pub use server::{ServerConfig, ServerError, ServerHandle, start};
+pub use server::{Limits, ServerConfig, ServerError, ServerHandle, start};
 
 /// Version of the daemon binary, reported in the handshake.
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");

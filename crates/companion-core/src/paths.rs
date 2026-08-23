@@ -71,6 +71,23 @@ pub fn ensure_private_dir(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
 
+/// The name of the temporary file used while replacing `path`.
+///
+/// It carries the process id, so two programs writing the same file at the same time
+/// cannot write into one another's temporary file, and two files with the same stem and
+/// different extensions cannot collide either.
+fn temp_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "companion".to_owned());
+    let temp_name = format!(".{name}.tmp.{}", std::process::id());
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(temp_name),
+        _ => PathBuf::from(temp_name),
+    }
+}
+
 /// Writes a file only the owner can read, replacing any previous content in one step.
 ///
 /// The temporary file is created with mode 0600 from the start, so the content is never
@@ -79,7 +96,7 @@ pub fn write_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         ensure_private_dir(parent)?;
     }
-    let temp = path.with_extension("tmp");
+    let temp = temp_path(path);
     {
         use std::io::Write;
         let mut file = fs::OpenOptions::new()
@@ -92,6 +109,25 @@ pub fn write_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
         file.sync_all()?;
     }
     fs::rename(&temp, path)
+}
+
+/// Writes a file that must not exist yet, owner-only.
+///
+/// Fails with [`io::ErrorKind::AlreadyExists`] when another process got there first, which
+/// is what makes this usable as a lock: two daemons starting at the same moment cannot
+/// both believe they created the file.
+pub fn write_new_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        ensure_private_dir(parent)?;
+    }
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()
 }
 
 #[cfg(test)]
@@ -108,6 +144,31 @@ mod tests {
         assert_eq!(mode, 0o600, "written file must stay owner-only");
         let dir_mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700, "directory must stay owner-only");
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_temporary_name_carries_the_process_id_and_keeps_the_full_file_name() {
+        let temp = temp_path(Path::new("/tmp/companion/register.sqlite3"));
+        let name = temp.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with(".register.sqlite3.tmp."), "got {name}");
+        assert!(
+            name.ends_with(&std::process::id().to_string()),
+            "got {name}"
+        );
+        assert_eq!(temp.parent().unwrap(), Path::new("/tmp/companion"));
+    }
+
+    #[test]
+    fn a_file_that_already_exists_is_not_written_a_second_time() {
+        let dir = std::env::temp_dir().join(format!("companion-paths-new-{}", std::process::id()));
+        let path = dir.join("tokens.json");
+        write_new_private_file(&path, b"first").unwrap();
+
+        let error = write_new_private_file(&path, b"second").expect_err("must refuse");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "first");
 
         fs::remove_dir_all(&dir).unwrap();
     }
