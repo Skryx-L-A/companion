@@ -75,6 +75,12 @@ pub enum Event {
     Error {
         message: String,
     },
+    /// Events were lost between an adapter and the bus before they could be numbered, so
+    /// no gap in the sequence shows them. Only the daemon produces this; an adapter never
+    /// does. It carries no session id because the loss can span several sessions.
+    EventsDropped {
+        missed: u64,
+    },
 }
 
 /// The name of an event without its payload. Adapters use this in their capabilities to
@@ -96,11 +102,13 @@ pub enum EventKind {
     BudgetLevel,
     Iteration,
     Error,
+    EventsDropped,
 }
 
 impl EventKind {
-    /// Every event kind the protocol defines.
-    pub const ALL: [EventKind; 12] = [
+    /// Every event kind the protocol defines, including the one only the daemon produces.
+    /// An adapter names the subset it can really deliver in its capabilities.
+    pub const ALL: [EventKind; 13] = [
         Self::SessionStarted,
         Self::SessionEnded,
         Self::QuestionOpen,
@@ -113,6 +121,7 @@ impl EventKind {
         Self::BudgetLevel,
         Self::Iteration,
         Self::Error,
+        Self::EventsDropped,
     ];
 }
 
@@ -131,16 +140,23 @@ impl Event {
             Self::BudgetLevel { .. } => EventKind::BudgetLevel,
             Self::Iteration { .. } => EventKind::Iteration,
             Self::Error { .. } => EventKind::Error,
+            Self::EventsDropped { .. } => EventKind::EventsDropped,
         }
     }
 }
 
 /// An event as it leaves the daemon: the adapter's report plus the bookkeeping the bus
-/// adds. `sequence` is strictly increasing per daemon run, so a client can tell a gap
-/// from a reorder after a reconnect.
+/// adds.
+///
+/// `sequence` is strictly increasing within one daemon run and starts again at zero after
+/// a restart, so `run_id` has to be compared first: a smaller sequence under a different
+/// run id is a new daemon, not a reordering.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EventEnvelope {
     pub sequence: u64,
+    /// Identifies the daemon run that numbered this event, the same value the handshake
+    /// returned in [`crate::Welcome`].
+    pub run_id: String,
     /// Unix time in milliseconds when the daemon published the event.
     pub timestamp_ms: u64,
     pub adapter: AdapterId,
@@ -155,7 +171,7 @@ mod tests {
     #[test]
     fn every_variant_maps_to_its_kind() {
         // Guards against a new event variant that nobody added to EventKind::ALL.
-        assert_eq!(EventKind::ALL.len(), 12);
+        assert_eq!(EventKind::ALL.len(), 13);
         assert_eq!(Event::Busy.kind(), EventKind::Busy);
         assert_eq!(
             Event::Error {

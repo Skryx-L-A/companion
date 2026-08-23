@@ -9,17 +9,18 @@ use companion_protocol::{AdapterId, EventEnvelope};
 use tokio::sync::broadcast;
 
 use crate::adapter::AdapterEvent;
-use crate::now_ms;
+use crate::{generate_token, now_ms};
 
 /// Fan-out of adapter events to every connected client.
 ///
 /// A slow client falls behind rather than blocking the adapter: the broadcast channel
 /// drops the oldest events for that receiver and reports the gap, and the sequence number
 /// on the envelope lets the client see how many it missed.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EventBus {
     sender: broadcast::Sender<EventEnvelope>,
     sequence: Arc<AtomicU64>,
+    run_id: Arc<str>,
 }
 
 impl EventBus {
@@ -30,7 +31,14 @@ impl EventBus {
         Self {
             sender,
             sequence: Arc::new(AtomicU64::new(0)),
+            run_id: new_run_id().into(),
         }
+    }
+
+    /// Identifies this run of the daemon. The sequence number starts at zero again after
+    /// a restart, so a client has to compare this before it compares sequence numbers.
+    pub fn run_id(&self) -> &str {
+        &self.run_id
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<EventEnvelope> {
@@ -46,6 +54,7 @@ impl EventBus {
     pub fn publish(&self, adapter: AdapterId, event: AdapterEvent) -> EventEnvelope {
         let envelope = EventEnvelope {
             sequence: self.sequence.fetch_add(1, Ordering::Relaxed),
+            run_id: self.run_id.to_string(),
             timestamp_ms: now_ms(),
             adapter,
             session_id: event.session_id,
@@ -60,6 +69,15 @@ impl EventBus {
 impl Default for EventBus {
     fn default() -> Self {
         Self::new(1024)
+    }
+}
+
+/// A short random name for one daemon run. It identifies a run, it guards nothing, so a
+/// clock reading is a good enough fallback when the random source is unavailable.
+fn new_run_id() -> String {
+    match generate_token() {
+        Ok(token) => token[..16].to_owned(),
+        Err(_) => format!("run-{}", now_ms()),
     }
 }
 
@@ -88,6 +106,18 @@ mod tests {
         assert_eq!(first.sequence, 0);
         assert_eq!(second.sequence, 1);
         assert_eq!(second.adapter.as_str(), "claude-code");
+        assert_eq!(first.run_id, bus.run_id());
+        assert_eq!(second.run_id, bus.run_id());
+    }
+
+    #[tokio::test]
+    async fn two_runs_have_different_run_ids() {
+        // Without this a client could not tell a restarted daemon from a reordering: the
+        // sequence number starts at zero again either way.
+        let first = EventBus::new(8);
+        let second = EventBus::new(8);
+        assert_ne!(first.run_id(), second.run_id());
+        assert!(!first.run_id().is_empty());
     }
 
     #[tokio::test]

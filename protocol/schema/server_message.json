@@ -43,6 +43,32 @@
       ]
     },
     {
+      "description": "This connection read its events too slowly and lost some. Only this client is\naffected, so the gap is reported to it alone instead of on the event stream.\nThe client should re-read the session list rather than trust what it has.",
+      "type": "object",
+      "properties": {
+        "after_sequence": {
+          "description": "The last sequence number that did arrive before the gap.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "missed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "events_dropped"
+        }
+      },
+      "required": [
+        "type",
+        "missed",
+        "after_sequence"
+      ]
+    },
+    {
       "description": "The daemon refused the handshake and closes the connection right after.",
       "type": "object",
       "properties": {
@@ -479,11 +505,30 @@
             "event",
             "message"
           ]
+        },
+        {
+          "description": "Events were lost between an adapter and the bus before they could be numbered, so\nno gap in the sequence shows them. Only the daemon produces this; an adapter never\ndoes. It carries no session id because the loss can span several sessions.",
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "events_dropped"
+            },
+            "missed": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "event",
+            "missed"
+          ]
         }
       ]
     },
     "EventEnvelope": {
-      "description": "An event as it leaves the daemon: the adapter's report plus the bookkeeping the bus\nadds. `sequence` is strictly increasing per daemon run, so a client can tell a gap\nfrom a reorder after a reconnect.",
+      "description": "An event as it leaves the daemon: the adapter's report plus the bookkeeping the bus\nadds.\n\n`sequence` is strictly increasing within one daemon run and starts again at zero after\na restart, so `run_id` has to be compared first: a smaller sequence under a different\nrun id is a new daemon, not a reordering.",
       "type": "object",
       "properties": {
         "adapter": {
@@ -491,6 +536,10 @@
         },
         "event": {
           "$ref": "#/$defs/Event"
+        },
+        "run_id": {
+          "description": "Identifies the daemon run that numbered this event, the same value the handshake\nreturned in [`crate::Welcome`].",
+          "type": "string"
         },
         "sequence": {
           "type": "integer",
@@ -516,6 +565,7 @@
       },
       "required": [
         "sequence",
+        "run_id",
         "timestamp_ms",
         "adapter",
         "event"
@@ -536,7 +586,8 @@
         "context_level",
         "budget_level",
         "iteration",
-        "error"
+        "error",
+        "events_dropped"
       ]
     },
     "ProtocolError": {
@@ -1128,12 +1179,22 @@
         },
         "role": {
           "$ref": "#/$defs/ClientRole"
+        },
+        "run_id": {
+          "description": "Identifies this run of the daemon. Sequence numbers restart at zero after a\nrestart, so a client compares this before it compares sequence numbers.",
+          "type": "string"
+        },
+        "session_namespace": {
+          "description": "The prefix the daemon puts in front of every session id this connection reports\nabout. A client may report, ask and report progress only inside it; the daemon\nassigns it, so no connection can write the status of another one's session.",
+          "type": "string"
         }
       },
       "required": [
         "protocol_version",
         "role",
-        "daemon_version"
+        "daemon_version",
+        "run_id",
+        "session_namespace"
       ]
     }
   }

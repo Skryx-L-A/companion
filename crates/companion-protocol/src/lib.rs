@@ -28,7 +28,7 @@ pub use ids::{AdapterId, AuftragId, SessionId};
 pub use message::{
     ClientMessage, ErrorCode, Hello, ProtocolError, ReadWindow, Request, RequestEnvelope,
     RequestId, RequestKind, Response, ResponseBody, ResponseResult, SendOutcome, ServerMessage,
-    SpawnRequest, Welcome,
+    SpawnRequest, UNSOLICITED_REQUEST_ID, Welcome,
 };
 pub use provenance::{Origin, Provenance};
 pub use registry::{Cost, RegistryEntry, SelfAnswer};

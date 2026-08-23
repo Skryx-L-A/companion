@@ -44,7 +44,7 @@ pub enum RegistryError {
         source: serde_json::Error,
     },
     #[error("database has schema version {found}, this build understands {expected}")]
-    NewerSchema { found: u32, expected: u32 },
+    NewerSchema { found: i64, expected: u32 },
     #[error("cannot prepare {path}: {source}")]
     Io {
         path: String,
@@ -89,12 +89,24 @@ impl Registry {
     }
 
     fn from_connection(connection: Connection) -> Result<Self, RegistryError> {
+        Self::from_connection_with(connection, MIGRATIONS)
+    }
+
+    /// The same as [`Self::from_connection`], but with the migration list handed in.
+    ///
+    /// Only the tests pass anything but [`MIGRATIONS`]: with a single shipped migration
+    /// there is otherwise no way to show that an existing database is carried forward
+    /// instead of being recreated.
+    fn from_connection_with(
+        connection: Connection,
+        migrations: &[&str],
+    ) -> Result<Self, RegistryError> {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", true)?;
         let registry = Self {
             connection: Mutex::new(connection),
         };
-        registry.migrate()?;
+        registry.migrate(migrations)?;
         Ok(registry)
     }
 
@@ -107,20 +119,23 @@ impl Registry {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Brings the database up to [`MIGRATIONS`], one step per transaction.
-    fn migrate(&self) -> Result<(), RegistryError> {
+    /// Brings the database up to `migrations`, one step per transaction.
+    fn migrate(&self, migrations: &[&str]) -> Result<(), RegistryError> {
         let mut connection = self.lock();
-        let current: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        let target = MIGRATIONS.len() as u32;
+        // SQLite stores `user_version` as a signed 32-bit value, so it is read as a signed
+        // one: a negative number is a corrupt or foreign file and gets the same clear
+        // answer as a version from the future, not a type error from the driver.
+        let current: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let target = migrations.len() as u32;
 
-        if current > target {
+        if current < 0 || current > i64::from(target) {
             return Err(RegistryError::NewerSchema {
                 found: current,
                 expected: target,
             });
         }
 
-        for (index, migration) in MIGRATIONS.iter().enumerate().skip(current as usize) {
+        for (index, migration) in migrations.iter().enumerate().skip(current as usize) {
             let transaction = connection.transaction()?;
             transaction.execute_batch(migration)?;
             transaction.pragma_update(None, "user_version", index as u32 + 1)?;
@@ -130,9 +145,10 @@ impl Registry {
     }
 
     pub fn schema_version(&self) -> Result<u32, RegistryError> {
-        Ok(self
+        let version: i64 = self
             .lock()
-            .query_row("PRAGMA user_version", [], |row| row.get(0))?)
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        Ok(version.max(0) as u32)
     }
 
     /// Writes an entry, replacing an earlier one for the same session.
@@ -279,7 +295,7 @@ mod tests {
     #[test]
     fn migrating_twice_changes_nothing() {
         let registry = Registry::open_in_memory().unwrap();
-        registry.migrate().unwrap();
+        registry.migrate(MIGRATIONS).unwrap();
         assert_eq!(registry.schema_version().unwrap(), MIGRATIONS.len() as u32);
     }
 
@@ -339,5 +355,89 @@ mod tests {
 
         let error = Registry::from_connection(connection).expect_err("must not downgrade");
         assert!(matches!(error, RegistryError::NewerSchema { .. }));
+    }
+
+    #[test]
+    fn a_negative_schema_version_is_named_instead_of_failing_as_a_type_error() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.pragma_update(None, "user_version", -1).unwrap();
+
+        let error = Registry::from_connection(connection).expect_err("must not be accepted");
+        assert!(
+            matches!(error, RegistryError::NewerSchema { found: -1, .. }),
+            "got {error:?}"
+        );
+    }
+
+    /// A second migration for the test only. It adds a column, which is the change most
+    /// likely to lose data if a migration ever recreated the table instead of altering it.
+    const SECOND_MIGRATION: &str = "ALTER TABLE registry_entries ADD COLUMN note TEXT;";
+
+    #[test]
+    fn an_existing_database_is_carried_forward_with_its_rows() {
+        let path = std::env::temp_dir()
+            .join(format!("companion-registry-migrate-{}", std::process::id()))
+            .join("register.sqlite3");
+        crate::paths::ensure_private_dir(path.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        // A database as an older build left it: schema version 1, with a row in it.
+        {
+            let first =
+                Registry::from_connection_with(Connection::open(&path).unwrap(), &MIGRATIONS[..1])
+                    .unwrap();
+            assert_eq!(first.schema_version().unwrap(), 1);
+            first.upsert(&entry("session-a")).unwrap();
+        }
+
+        // The newer build opens the same file and adds the step it brought along.
+        let migrations = [MIGRATIONS[0], SECOND_MIGRATION];
+        let second =
+            Registry::from_connection_with(Connection::open(&path).unwrap(), &migrations).unwrap();
+        assert_eq!(second.schema_version().unwrap(), 2);
+        assert_eq!(
+            second.get(&SessionId::new("session-a")).unwrap().unwrap(),
+            entry("session-a"),
+            "the row from the older build must survive the migration"
+        );
+
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn the_register_and_its_wal_files_are_owner_only() {
+        let path = std::env::temp_dir()
+            .join(format!("companion-registry-mode-{}", std::process::id()))
+            .join("register.sqlite3");
+        let directory = path.parent().unwrap();
+        crate::paths::ensure_private_dir(directory).unwrap();
+
+        // A file left behind with loose rights, which is also what a permissive umask
+        // would produce: opening the register has to tighten it before SQLite copies the
+        // mode onto the -wal and -shm files.
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+        let registry = Registry::open(&path).unwrap();
+        registry.upsert(&entry("session-a")).unwrap();
+
+        for name in [
+            "register.sqlite3",
+            "register.sqlite3-wal",
+            "register.sqlite3-shm",
+        ] {
+            let file = directory.join(name);
+            let mode = std::fs::metadata(&file)
+                .unwrap_or_else(|error| panic!("{name} must exist: {error}"))
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "{name} must stay owner-only");
+        }
+        let directory_mode = std::fs::metadata(directory).unwrap().permissions().mode() & 0o777;
+        assert_eq!(directory_mode, 0o700);
+
+        drop(registry);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
