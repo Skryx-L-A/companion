@@ -281,14 +281,13 @@
       ]
     },
     "SessionState": {
-      "description": "What a session is doing right now.",
+      "description": "What a session is doing right now.\n\n`DESIGN.md` § Session-Adapter wants unknown things shown as unknown rather than as\nsomething plausible, and this field is where an adapter is most tempted to guess. An\nadapter that only sees a live terminal knows the session exists, not what it is doing:\nthat is [`SessionState::Unknown`]. One whose session has simply vanished knows it is\nover but not how it went: that is [`SessionState::Lost`].",
       "oneOf": [
         {
           "type": "string",
           "enum": [
             "busy",
             "idle",
-            "done",
             "error"
           ]
         },
@@ -296,6 +295,21 @@
           "description": "Waiting for input from the person, including an open question.",
           "type": "string",
           "const": "waiting"
+        },
+        {
+          "description": "Finished its work. Only for an adapter that saw it finish.",
+          "type": "string",
+          "const": "done"
+        },
+        {
+          "description": "The session is there, but the adapter cannot tell what it is doing.",
+          "type": "string",
+          "const": "unknown"
+        },
+        {
+          "description": "The session is gone and the adapter never learned how it ended. Over, but not\nfinished: a crash and a clean end look the same from the outside.",
+          "type": "string",
+          "const": "lost"
         }
       ]
     },
@@ -576,9 +590,21 @@
       ],
       "oneOf": [
         {
-          "description": "All sessions the daemon currently knows.",
+          "description": "The sessions the daemon knows, filtered.\n\nA machine that has been working for weeks has hundreds of finished sessions, and a\nsession list that shows all of them is unusable. The filter is part of the request\nrather than of the shell, so every client gets the same short answer.",
           "type": "object",
           "properties": {
+            "running_only": {
+              "description": "Only sessions that are still going: busy, idle or waiting.",
+              "type": "boolean",
+              "default": false
+            },
+            "done_limit": {
+              "description": "How many finished sessions to include at most. Ignored when `running_only` is\nset.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "default": 20
+            },
             "request": {
               "type": "string",
               "const": "list"
@@ -639,6 +665,23 @@
             "request",
             "session_id",
             "window"
+          ]
+        },
+        {
+          "description": "Cut the running turn short. The session stays alive and can be talked to again.",
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "request": {
+              "type": "string",
+              "const": "interrupt"
+            }
+          },
+          "required": [
+            "request",
+            "session_id"
           ]
         },
         {

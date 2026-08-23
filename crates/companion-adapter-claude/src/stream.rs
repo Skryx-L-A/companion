@@ -31,6 +31,13 @@ pub enum StreamItem {
         /// The final answer, or the error text when the run failed.
         text: Option<String>,
     },
+    /// The CLI reported how much of a subscription window is used up.
+    RateLimit {
+        /// Share of the window in use, between 0.0 and 1.0.
+        utilization: f64,
+        /// Unix seconds at which the window resets.
+        resets_at_seconds: Option<u64>,
+    },
     /// A line this build has no use for.
     Ignored,
 }
@@ -46,6 +53,17 @@ struct Line {
     message: Option<Message>,
     is_error: Option<bool>,
     result: Option<String>,
+    rate_limit_info: Option<RateLimitInfo>,
+}
+
+/// The quota block of a `rate_limit_event` line, as a real run writes it.
+#[derive(Debug, Deserialize)]
+struct RateLimitInfo {
+    /// Share of the window in use, between 0.0 and 1.0.
+    utilization: Option<f64>,
+    /// Unix seconds.
+    #[serde(rename = "resetsAt")]
+    resets_at: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,6 +98,16 @@ pub fn parse(line: &str) -> StreamItem {
                 model: message.and_then(|message| message.model),
             }
         }
+        (Some("rate_limit_event"), _) => match parsed.rate_limit_info {
+            Some(info) => match info.utilization {
+                Some(utilization) => StreamItem::RateLimit {
+                    utilization,
+                    resets_at_seconds: info.resets_at,
+                },
+                None => StreamItem::Ignored,
+            },
+            None => StreamItem::Ignored,
+        },
         (Some("result"), _) => StreamItem::Finished {
             session_id: parsed.session_id,
             is_error: parsed.is_error.unwrap_or(false),
@@ -167,11 +195,35 @@ mod tests {
     }
 
     #[test]
-    fn hook_chatter_rate_limits_and_junk_are_ignored() {
+    fn a_rate_limit_line_carries_the_measured_share_of_the_window() {
+        // Taken from a real run on this machine, 2026-08-23.
+        let item = parse(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1787572800,"rateLimitType":"seven_day","utilization":0.84,"isUsingOverage":false,"surpassedThreshold":0.75},"session_id":"x"}"#,
+        );
+        assert_eq!(
+            item,
+            StreamItem::RateLimit {
+                utilization: 0.84,
+                resets_at_seconds: Some(1_787_572_800),
+            }
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_line_without_a_number_says_nothing() {
+        // Better no budget than a made-up one.
+        assert_eq!(
+            parse(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#),
+            StreamItem::Ignored
+        );
+        assert_eq!(parse(r#"{"type":"rate_limit_event"}"#), StreamItem::Ignored);
+    }
+
+    #[test]
+    fn hook_chatter_and_junk_are_ignored() {
         for line in [
             r#"{"type":"system","subtype":"hook_started","hook_name":"SessionStart:startup"}"#,
             r#"{"type":"system","subtype":"thinking_tokens","tokens":139}"#,
-            r#"{"type":"rate_limit_event","rate_limit_info":{"utilization":0.84}}"#,
             "not json at all",
             "",
         ] {

@@ -7,10 +7,14 @@
 //! session. Events come from that stream, the readable history and the context estimate
 //! come from the transcript under `~/.claude/projects`, and the three missing hooks
 //! (`Stop`, `SubagentStop`, `Notification`) are installed additively into the target
-//! project's settings so an interactive session can report itself as well.
+//! project's settings so an interactive session can report itself as well. The command
+//! written there is the hook binary next to the running daemon, never a build directory:
+//! see [`hooks::command_for_daemon`].
 //!
-//! What it honestly cannot do is named in its capabilities: the budget of a plain session
-//! is not visible here, and iterations are a concept the CLI does not have.
+//! The budget is measured, not guessed: a run emits `rate_limit_event` lines that carry the
+//! share of the subscription window it has used and when that window resets. What the
+//! adapter honestly cannot report is named in its capabilities: iterations are a concept the
+//! CLI does not have.
 
 pub mod hooks;
 mod stream;
@@ -27,8 +31,8 @@ use companion_core::adapter::{
     AdapterError, AdapterEvent, AdapterResult, ReadChunk, ReadWindow, SessionAdapter, SpawnOptions,
 };
 use companion_protocol::{
-    AdapterCapabilities, AdapterId, CommandKind, ContextUsage, EndReason, Event, EventKind,
-    Provenance, SendOutcome, SessionId, SessionState, SessionStatus, StatusField,
+    AdapterCapabilities, AdapterId, BudgetUsage, CommandKind, ContextUsage, EndReason, Event,
+    EventKind, Provenance, SendOutcome, SessionId, SessionState, SessionStatus, StatusField,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
@@ -133,11 +137,39 @@ impl ClaudeAdapter {
 
     /// Installs `Stop`, `SubagentStop` and `Notification` into a project's settings so an
     /// interactive session reports itself. Existing hooks are never replaced.
+    ///
+    /// The target is the local settings file by default, because the command is an absolute
+    /// path on this machine: written into the shared `settings.json` it would land in the
+    /// repository and hand every colleague a hook that points nowhere.
     pub fn install_hooks(
         project: &Path,
         hook_command: &str,
     ) -> Result<hooks::HookChange, hooks::HookError> {
-        hooks::install(&project.join(".claude/settings.json"), hook_command)
+        Self::install_hooks_in(project, hook_command, hooks::HookTarget::Local)
+    }
+
+    /// Installs into a chosen settings file of the project.
+    pub fn install_hooks_in(
+        project: &Path,
+        hook_command: &str,
+        target: hooks::HookTarget,
+    ) -> Result<hooks::HookChange, hooks::HookError> {
+        hooks::install(&target.path_in(project), hook_command)
+    }
+
+    /// Installs the hooks with the command of the daemon that is running right now.
+    ///
+    /// This is the form the onboarding uses: the hook binary sits next to the daemon, so
+    /// the running binary's own path is what ends up in the project's settings.
+    pub fn install_hooks_for_running_daemon(
+        project: &Path,
+    ) -> Result<hooks::HookChange, hooks::HookError> {
+        let command =
+            hooks::command_for_running_daemon().map_err(|source| hooks::HookError::Io {
+                path: "the running binary".to_owned(),
+                source,
+            })?;
+        Self::install_hooks(project, &command)
     }
 
     /// Removes exactly what [`ClaudeAdapter::install_hooks`] added.
@@ -145,8 +177,30 @@ impl ClaudeAdapter {
         project: &Path,
         hook_command: &str,
     ) -> Result<hooks::HookChange, hooks::HookError> {
-        hooks::uninstall(&project.join(".claude/settings.json"), hook_command)
+        Self::uninstall_hooks_in(project, hook_command, hooks::HookTarget::Local)
     }
+
+    /// Removes the entry from a chosen settings file of the project.
+    pub fn uninstall_hooks_in(
+        project: &Path,
+        hook_command: &str,
+        target: hooks::HookTarget,
+    ) -> Result<hooks::HookChange, hooks::HookError> {
+        hooks::uninstall(&target.path_in(project), hook_command)
+    }
+}
+
+/// Everything from a byte offset, rounded down to the nearest character boundary.
+///
+/// An offset that lands inside a multi-byte character used to yield an empty string while
+/// `next_offset` still pointed at the end, so the reader believed it was up to date and the
+/// text in between was gone. Rounding down repeats a few bytes at worst.
+pub(crate) fn slice_from(text: &str, offset: u64) -> String {
+    let mut start = (offset as usize).min(text.len());
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    text[start..].to_owned()
 }
 
 /// The message shape the CLI expects on stdin in `--input-format stream-json`.
@@ -287,6 +341,24 @@ async fn pump(
                 }
             }
 
+            StreamItem::RateLimit {
+                utilization,
+                resets_at_seconds,
+            } => {
+                let Some(id) = session.clone() else { continue };
+                let budget = Provenance::Measured(BudgetUsage {
+                    used_fraction: utilization,
+                    resets_at_ms: resets_at_seconds.map(|seconds| seconds * 1000),
+                });
+                {
+                    let mut sessions = inner.sessions.lock().await;
+                    if let Some(running) = sessions.get_mut(&id) {
+                        running.status.budget = budget.clone();
+                    }
+                }
+                inner.emit(&id, Event::BudgetLevel { budget });
+            }
+
             StreamItem::Ignored => {}
         }
     }
@@ -294,18 +366,23 @@ async fn pump(
     // Closed stdout means the process is gone.
     match session {
         Some(id) => {
-            inner.sessions.lock().await.remove(&id);
-            inner.emit(
-                &id,
-                Event::SessionEnded {
-                    reason: if failed {
-                        EndReason::Crashed
-                    } else {
-                        EndReason::Finished
+            // A session that is no longer registered was stopped through `stop`, which
+            // already said so. Reporting a second, different ending here would contradict
+            // the first one.
+            let was_registered = inner.sessions.lock().await.remove(&id).is_some();
+            if was_registered {
+                inner.emit(
+                    &id,
+                    Event::SessionEnded {
+                        reason: if failed {
+                            EndReason::Crashed
+                        } else {
+                            EndReason::Finished
+                        },
+                        result_path: None,
                     },
-                    result_path: None,
-                },
-            );
+                );
+            }
         }
         None => {
             if let Some(sender) = started.take() {
@@ -338,14 +415,17 @@ impl SessionAdapter for ClaudeAdapter {
                 EventKind::Busy,
                 EventKind::Done,
                 EventKind::ContextLevel,
+                EventKind::BudgetLevel,
                 EventKind::Error,
             ],
-            // No budget: a plain run reports no quota this adapter could read. No
-            // iteration either: the CLI has no such counter.
+            // The budget comes measured out of the stream: a run emits a rate_limit_event
+            // with the share of the window it has used. No iteration, though: the CLI has
+            // no such counter.
             status_fields: vec![
                 StatusField::Project,
                 StatusField::Model,
                 StatusField::Context,
+                StatusField::Budget,
                 StatusField::LastOutput,
             ],
             enforces_permission_modes: true,
@@ -465,7 +545,9 @@ impl SessionAdapter for ClaudeAdapter {
         status.project = Some(project.display().to_string());
         status.auftrag_id = options.auftrag_id;
         if let Some(model) = options.model {
-            status.model = Provenance::Measured(model);
+            // What was asked for, not yet what is running: the init line of the stream
+            // confirms it a moment later and lifts this to measured.
+            status.model = Provenance::Estimated(model);
         }
 
         let transcript = transcript::find(
@@ -553,15 +635,23 @@ impl SessionAdapter for ClaudeAdapter {
                 }
                 slice
             }
-            ReadWindow::FromOffset { offset } => {
-                text.get(offset as usize..).unwrap_or_default().to_owned()
-            }
+            ReadWindow::FromOffset { offset } => slice_from(&text, offset),
         };
 
         Ok(ReadChunk {
             next_offset: text.len() as u64,
             text: slice,
         })
+    }
+
+    async fn interrupt(&self, session: &SessionId) -> AdapterResult<()> {
+        // The contract exists, the implementation does not: the CLI in stream-json mode
+        // has no documented way to cut a turn short, and killing the process would be
+        // `stop` under another name. Saying so is better than doing the wrong thing.
+        if !self.inner.sessions.lock().await.contains_key(session) {
+            return Err(AdapterError::UnknownSession(session.clone()));
+        }
+        Err(AdapterError::NotSupported(CommandKind::Interrupt))
     }
 
     async fn stop(&self, session: &SessionId) -> AdapterResult<()> {
@@ -597,6 +687,16 @@ impl SessionAdapter for ClaudeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_offset_inside_a_character_rounds_down_instead_of_losing_the_text() {
+        let text = "abc\u{e4}\u{f6}\u{fc}def";
+        // Byte 4 sits inside the two-byte character that starts at byte 3.
+        assert_eq!(slice_from(text, 4), "\u{e4}\u{f6}\u{fc}def");
+        assert_eq!(slice_from(text, 3), "\u{e4}\u{f6}\u{fc}def");
+        assert_eq!(slice_from(text, 0), text);
+        assert_eq!(slice_from(text, 9_999), "");
+    }
 
     #[test]
     fn the_user_message_matches_what_the_cli_reads() {

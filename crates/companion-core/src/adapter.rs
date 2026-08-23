@@ -114,6 +114,15 @@ pub trait SessionAdapter: Send + Sync {
     /// from a byte offset a previous read returned.
     async fn read(&self, session: &SessionId, window: ReadWindow) -> AdapterResult<ReadChunk>;
 
+    /// Cuts the running turn short and leaves the session alive.
+    ///
+    /// An adapter that cannot do this says so through its capabilities and answers
+    /// `not_supported`; the default is exactly that, so a new adapter does not silently
+    /// pretend it can interrupt.
+    async fn interrupt(&self, _session: &SessionId) -> AdapterResult<()> {
+        Err(AdapterError::NotSupported(CommandKind::Interrupt))
+    }
+
     async fn stop(&self, session: &SessionId) -> AdapterResult<()>;
 
     /// A stream of everything the adapter observes. Every subscriber gets every event

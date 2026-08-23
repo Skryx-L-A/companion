@@ -14,10 +14,11 @@ use std::time::Duration;
 use companion_core::adapter::{AdapterEvent, AdapterResult, AdapterSet, SpawnOptions};
 use companion_core::{AdapterError, Authenticator, EventBus, Registry, Tokens, now_ms, permits};
 use companion_protocol::{
-    AdapterCapabilities, AdapterId, AuftragId, ClientMessage, ClientRole, Cost, ErrorCode, Event,
-    EventEnvelope, PROTOCOL_VERSION, ProtocolError, Provenance, REGISTRY_SCHEMA_VERSION,
-    RegistryEntry, Request, RequestEnvelope, Response, ResponseBody, ResponseResult, ServerMessage,
-    SessionId, SessionState, SessionStatus, UNSOLICITED_REQUEST_ID, Welcome,
+    AdapterCapabilities, AdapterId, AuftragId, ClientMessage, ClientRole, Cost, EndReason,
+    ErrorCode, Event, EventEnvelope, PROTOCOL_VERSION, ProtocolError, Provenance,
+    REGISTRY_SCHEMA_VERSION, RegistryEntry, Request, RequestEnvelope, Response, ResponseBody,
+    ResponseResult, ServerMessage, SessionId, SessionState, SessionStatus, UNSOLICITED_REQUEST_ID,
+    Welcome,
 };
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -75,6 +76,12 @@ pub struct Limits {
     pub reported_grace: Duration,
     /// How many sessions one connection may report about at the same time.
     pub max_reported_per_connection: usize,
+    /// How long a reported session outlives the connection that reported it.
+    ///
+    /// Short on purpose. A hook binary connects once per event and is gone again, so the
+    /// entries of a closed connection have to disappear quickly; what keeps the session
+    /// alive across those connections is the takeover rule, not this grace period.
+    pub orphan_grace: Duration,
 }
 
 impl Default for Limits {
@@ -85,6 +92,7 @@ impl Default for Limits {
             max_line_bytes: 1024 * 1024,
             reported_grace: Duration::from_secs(60),
             max_reported_per_connection: 64,
+            orphan_grace: Duration::from_secs(30),
         }
     }
 }
@@ -121,9 +129,18 @@ struct ReportedSession {
     /// The namespace of the connection that reported it. Only that connection may write
     /// it, ask about it or report on it.
     namespace: String,
+    /// The id the client itself used, before the daemon put a namespace in front of it.
+    /// Together with `kind` this is what makes a session recognisable across the many
+    /// short connections a hook binary opens.
+    raw_id: SessionId,
+    /// The adapter the client said this session belongs to.
+    kind: AdapterId,
     /// When the session reached `done` or `error`, so it can be dropped after the grace
     /// period instead of staying in the list for the rest of the daemon's life.
     finished_at_ms: Option<u64>,
+    /// When the connection that owned it went away. An entry nobody owns any more is kept
+    /// for a short while so the next connection can take it over, and dropped after that.
+    orphaned_at_ms: Option<u64>,
 }
 
 struct ServerState {
@@ -158,15 +175,6 @@ impl Connection {
             self.namespace,
             session_id.as_str()
         ))
-    }
-
-    /// The prefix an event has to carry to be visible to this connection, or `None` when
-    /// the connection sees everything.
-    fn event_prefix(&self) -> Option<String> {
-        match self.role {
-            ClientRole::Human => None,
-            ClientRole::Agent => Some(format!("{}{NAMESPACE_SEPARATOR}", self.namespace)),
-        }
     }
 }
 
@@ -481,15 +489,16 @@ async fn serve_client(stream: UnixStream, state: Arc<ServerState>) -> std::io::R
         }
     });
 
-    let event_prefix = connection.event_prefix();
     let events_out = outgoing.clone();
+    let events_connection = connection.clone();
+    let events_state = Arc::clone(&state);
     let events_task = tokio::spawn(async move {
         let mut last_sequence = 0u64;
         loop {
             match events.recv().await {
                 Ok(envelope) => {
                     last_sequence = envelope.sequence;
-                    if !visible(event_prefix.as_deref(), &envelope) {
+                    if !visible(&events_connection, &events_state, &envelope) {
                         continue;
                     }
                     if events_out
@@ -586,6 +595,10 @@ async fn serve_client(stream: UnixStream, state: Arc<ServerState>) -> std::io::R
         }
     }
 
+    // Whatever this connection reported has no owner any more. The next connection of the
+    // same reporter takes it over; if none comes, the pruning drops it.
+    state.orphan_reported(&connection.namespace);
+
     drop(outgoing);
     events_task.abort();
     let _ = writer_task.await;
@@ -597,13 +610,16 @@ async fn serve_client(stream: UnixStream, state: Arc<ServerState>) -> std::io::R
 /// A human shell sees everything. A docked orchestrator sees only what happens inside its
 /// own namespace: `DESIGN.md` § Sicherheit gives it the right to report and to ask, not to
 /// watch the other sessions of the person.
-fn visible(prefix: Option<&str>, envelope: &EventEnvelope) -> bool {
-    match prefix {
-        None => true,
-        Some(prefix) => envelope
+fn visible(connection: &Connection, state: &ServerState, envelope: &EventEnvelope) -> bool {
+    match connection.role {
+        ClientRole::Human => true,
+        // Ownership, not the shape of the id: an agent that took a session over from a
+        // connection that went away has to see that session's events, and one that lost a
+        // session must stop seeing them.
+        ClientRole::Agent => envelope
             .session_id
             .as_ref()
-            .is_some_and(|id| id.as_str().starts_with(prefix)),
+            .is_some_and(|id| state.owns(&connection.namespace, id)),
     }
 }
 
@@ -788,13 +804,18 @@ async fn handle(
 ) -> Result<ResponseBody, ProtocolError> {
     let deadline = state.limits.adapter_timeout;
     match request {
-        Request::List => {
+        Request::List {
+            running_only,
+            done_limit,
+        } => {
             let mut sessions = Vec::new();
             for adapter in state.adapters.iter() {
                 sessions.extend(with_deadline(deadline, adapter.list()).await?);
             }
             sessions.extend(state.reported_sessions());
-            Ok(ResponseBody::Sessions { sessions })
+            Ok(ResponseBody::Sessions {
+                sessions: filter_sessions(sessions, running_only, done_limit),
+            })
         }
 
         Request::Spawn(spawn) => {
@@ -829,6 +850,12 @@ async fn handle(
             })
         }
 
+        Request::Interrupt { session_id } => {
+            let adapter = state.adapter_for_session(&session_id).await?;
+            with_deadline(deadline, adapter.interrupt(&session_id)).await?;
+            Ok(ResponseBody::Ack)
+        }
+
         Request::Stop { session_id } => {
             let adapter = state.adapter_for_session(&session_id).await?;
             with_deadline(deadline, adapter.stop(&session_id)).await?;
@@ -858,20 +885,26 @@ async fn handle(
 
         Request::ReportStatus { status } => {
             // The client names the session, the daemon decides under which id it is
-            // stored: its own namespace, and the adapter that stands for a reported
-            // session. Neither is taken from the message, so no connection can write the
-            // status of a session that belongs to somebody else.
+            // stored. Normally that is this connection's namespace in front of the name;
+            // where a connection that has gone away left the same session behind, this one
+            // takes that entry over instead of adding a second copy of it. Either way the
+            // id comes from the daemon, so no connection can write the status of a session
+            // that belongs to somebody who is still there.
             let mut status = *status;
-            let session_id = connection.qualify(&status.id);
+            let raw_id = status.id.clone();
+            let kind = status.adapter.clone();
+            let session_id = state.stored_id_for(connection, &raw_id, &kind);
             status.id = session_id.clone();
             status.adapter = AdapterId::new(REPORTED_ADAPTER);
 
-            state.remember_reported(connection, status.clone())?;
+            state.remember_reported(connection, &raw_id, &kind, status.clone())?;
             state.record_reported(&status, None);
-            state.bus.publish(
-                AdapterId::new(REPORTED_ADAPTER),
-                AdapterEvent::for_session(session_id, derived_event(&status)),
-            );
+            if let Some(event) = derived_event(&status) {
+                state.bus.publish(
+                    AdapterId::new(REPORTED_ADAPTER),
+                    AdapterEvent::for_session(session_id, event),
+                );
+            }
             Ok(ResponseBody::Ack)
         }
 
@@ -925,8 +958,11 @@ async fn handle(
 }
 
 /// The event that matches a reported state, so a shell can react without polling.
-fn derived_event(status: &SessionStatus) -> Event {
-    match status.state {
+///
+/// A state nobody can name produces no event: there is nothing to report, and inventing
+/// one would be the guess this field exists to avoid.
+fn derived_event(status: &SessionStatus) -> Option<Event> {
+    Some(match status.state {
         SessionState::Busy => Event::Busy,
         SessionState::Idle => Event::Idle,
         SessionState::Waiting => Event::WaitingForInput {
@@ -942,7 +978,12 @@ fn derived_event(status: &SessionStatus) -> Event {
                 .clone()
                 .unwrap_or_else(|| "session reported an error".to_owned()),
         },
-    }
+        SessionState::Lost => Event::SessionEnded {
+            reason: EndReason::Lost,
+            result_path: None,
+        },
+        SessionState::Unknown => return None,
+    })
 }
 
 fn to_protocol_error(error: companion_core::AdapterError) -> ProtocolError {
@@ -950,8 +991,37 @@ fn to_protocol_error(error: companion_core::AdapterError) -> ProtocolError {
 }
 
 /// Whether a state means the session is over.
+/// Applies the list filter of a `list` request.
+///
+/// Everything still going is kept, in the order the adapters reported it. The finished ones
+/// are cut off after `done_limit`, which is a cap and not a selection of the newest: the
+/// protocol carries no timestamp per session, so the daemon takes what the adapters hand it
+/// and leaves the ordering to them. The workbench adapter sorts its finished sessions by
+/// last activity for exactly this reason.
+fn filter_sessions(
+    sessions: Vec<SessionStatus>,
+    running_only: bool,
+    done_limit: u32,
+) -> Vec<SessionStatus> {
+    let mut kept = Vec::with_capacity(sessions.len());
+    let mut finished = 0u32;
+
+    for session in sessions {
+        if !is_final(session.state) {
+            kept.push(session);
+            continue;
+        }
+        if running_only || finished >= done_limit {
+            continue;
+        }
+        finished += 1;
+        kept.push(session);
+    }
+    kept
+}
+
 fn is_final(state: SessionState) -> bool {
-    matches!(state, SessionState::Done | SessionState::Error)
+    state.is_final()
 }
 
 /// Writes what an adapter reports into the register, so a restart does not lose it.
@@ -1071,13 +1141,41 @@ impl ServerState {
     }
 
     /// Stores what a connection reports about one of its own sessions.
+    /// The id a session of this connection is stored under.
+    ///
+    /// A session whose owner is gone is taken over rather than duplicated. That is what
+    /// makes the hook binary usable at all: it opens one connection per event, so every
+    /// event would otherwise add another copy of the same interactive session to the list.
+    /// A session whose owner is still connected is never taken over.
+    fn stored_id_for(
+        &self,
+        connection: &Connection,
+        raw_id: &SessionId,
+        kind: &AdapterId,
+    ) -> SessionId {
+        let mut reported = self.lock_reported();
+        self.prune(&mut reported);
+
+        let adoptable = reported.values().find(|entry| {
+            &entry.raw_id == raw_id
+                && &entry.kind == kind
+                && (entry.namespace == connection.namespace || entry.orphaned_at_ms.is_some())
+        });
+        match adoptable {
+            Some(entry) => entry.status.id.clone(),
+            None => connection.qualify(raw_id),
+        }
+    }
+
     fn remember_reported(
         &self,
         connection: &Connection,
+        raw_id: &SessionId,
+        kind: &AdapterId,
         status: SessionStatus,
     ) -> Result<(), ProtocolError> {
         let mut reported = self.lock_reported();
-        prune_reported(&mut reported, self.limits.reported_grace);
+        self.prune(&mut reported);
 
         let known = reported.contains_key(&status.id);
         if !known {
@@ -1097,12 +1195,17 @@ impl ServerState {
         }
 
         let finished_at_ms = is_final(status.state).then(now_ms);
+        // Writing a status is what claims a session: an entry that was ownerless a moment
+        // ago now belongs to this connection again.
         reported.insert(
             status.id.clone(),
             ReportedSession {
+                raw_id: raw_id.clone(),
+                kind: kind.clone(),
                 status,
                 namespace: connection.namespace.clone(),
                 finished_at_ms,
+                orphaned_at_ms: None,
             },
         );
         Ok(())
@@ -1115,11 +1218,17 @@ impl ServerState {
         connection: &Connection,
         session_id: &SessionId,
     ) -> Result<SessionId, ProtocolError> {
-        let qualified = connection.qualify(session_id);
         let reported = self.lock_reported();
-        match reported.get(&qualified) {
-            Some(entry) if entry.namespace == connection.namespace => Ok(qualified),
-            _ => Err(ProtocolError::new(
+        let owned = reported
+            .values()
+            .find(|entry| {
+                entry.namespace == connection.namespace
+                    && (&entry.raw_id == session_id || &entry.status.id == session_id)
+            })
+            .map(|entry| entry.status.id.clone());
+        match owned {
+            Some(id) => Ok(id),
+            None => Err(ProtocolError::new(
                 ErrorCode::Forbidden,
                 format!(
                     "session {session_id} does not belong to this connection; report its status \
@@ -1129,9 +1238,37 @@ impl ServerState {
         }
     }
 
+    /// Marks everything a connection reported as ownerless, so the next connection can
+    /// take it over and the pruning can drop it if nobody does.
+    fn orphan_reported(&self, namespace: &str) {
+        let now = now_ms();
+        let mut reported = self.lock_reported();
+        for entry in reported.values_mut() {
+            if entry.namespace == namespace && entry.orphaned_at_ms.is_none() {
+                entry.orphaned_at_ms = Some(now);
+            }
+        }
+        self.prune(&mut reported);
+    }
+
+    fn prune(&self, reported: &mut HashMap<SessionId, ReportedSession>) {
+        prune_reported(
+            reported,
+            self.limits.reported_grace,
+            self.limits.orphan_grace,
+        );
+    }
+
+    /// Whether this connection may see events about a stored session id.
+    fn owns(&self, namespace: &str, session_id: &SessionId) -> bool {
+        self.lock_reported()
+            .get(session_id)
+            .is_some_and(|entry| entry.namespace == namespace)
+    }
+
     fn reported_sessions(&self) -> Vec<SessionStatus> {
         let mut reported = self.lock_reported();
-        prune_reported(&mut reported, self.limits.reported_grace);
+        self.prune(&mut reported);
         reported
             .values()
             .map(|entry| entry.status.clone())
@@ -1162,11 +1299,23 @@ impl ServerState {
 ///
 /// Without this the map grows for as long as the daemon runs, and a session that is over
 /// stays in the list of the person for ever.
-fn prune_reported(reported: &mut HashMap<SessionId, ReportedSession>, grace: Duration) {
+/// Drops what nobody needs any more: sessions that ended a while ago, and sessions whose
+/// reporter went away and never came back.
+fn prune_reported(
+    reported: &mut HashMap<SessionId, ReportedSession>,
+    grace: Duration,
+    orphan_grace: Duration,
+) {
     let now = now_ms();
     let grace_ms = grace.as_millis() as u64;
-    reported.retain(|_, entry| match entry.finished_at_ms {
-        Some(finished) => now.saturating_sub(finished) < grace_ms,
-        None => true,
+    let orphan_grace_ms = orphan_grace.as_millis() as u64;
+    reported.retain(|_, entry| {
+        let outlived_its_end = entry
+            .finished_at_ms
+            .is_some_and(|finished| now.saturating_sub(finished) >= grace_ms);
+        let outlived_its_owner = entry
+            .orphaned_at_ms
+            .is_some_and(|orphaned| now.saturating_sub(orphaned) >= orphan_grace_ms);
+        !outlived_its_end && !outlived_its_owner
     });
 }

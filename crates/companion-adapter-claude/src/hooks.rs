@@ -7,7 +7,7 @@
 //! that are unused on this machine. The installer therefore only ever *adds*: an existing
 //! hook is never edited, moved or removed, and installing twice changes nothing.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 use thiserror::Error;
@@ -15,9 +15,59 @@ use thiserror::Error;
 /// The hook events the companion installs.
 pub const HOOK_EVENTS: [&str; 3] = ["Stop", "SubagentStop", "Notification"];
 
+/// Name of the binary Claude Code calls for those events.
+pub const HOOK_BINARY: &str = "companion-hook";
+
+/// Which settings file of a project the hook goes into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HookTarget {
+    /// `.claude/settings.local.json`: the file that is not checked in. The default,
+    /// because the hook command is an absolute path on this machine.
+    #[default]
+    Local,
+    /// `.claude/settings.json`: shared with everybody who clones the project. Only right
+    /// where the command is the same on every machine.
+    Shared,
+}
+
+impl HookTarget {
+    pub fn path_in(self, project: &Path) -> PathBuf {
+        match self {
+            Self::Local => project.join(".claude/settings.local.json"),
+            Self::Shared => project.join(".claude/settings.json"),
+        }
+    }
+}
+
 /// Seconds a hook may take before Claude Code gives up on it. The hook writes one line to
 /// a local socket, so this is generous.
 const HOOK_TIMEOUT_SECONDS: u64 = 5;
+
+/// The command line for the hook, derived from the daemon that is actually running.
+///
+/// The hook binary sits next to the daemon in whatever directory the installation put them,
+/// so the daemon's own path is the only reliable answer. Guessing a build directory would
+/// write an entry into somebody's settings that stops working after the next clean build.
+///
+/// The result is quoted, because Claude Code hands the command to a shell and an
+/// application bundle lives under a path with a space in it.
+pub fn command_for_daemon(daemon_exe: &Path) -> String {
+    let path = daemon_exe
+        .parent()
+        .map_or_else(|| PathBuf::from(HOOK_BINARY), |dir| dir.join(HOOK_BINARY));
+    shell_quote(&path.to_string_lossy())
+}
+
+/// The hook command for the daemon that is running right now.
+pub fn command_for_running_daemon() -> std::io::Result<String> {
+    Ok(command_for_daemon(&std::env::current_exe()?))
+}
+
+/// Wraps a path so a shell reads it as one word, whatever it contains.
+fn shell_quote(path: &str) -> String {
+    let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
 
 #[derive(Debug, Error)]
 pub enum HookError {
@@ -332,6 +382,43 @@ mod tests {
             "{ this is not json",
             "the file must be left exactly as it was"
         );
+    }
+
+    #[test]
+    fn the_hook_lands_in_the_file_that_is_not_checked_in() {
+        let project = Path::new("/tmp/project");
+        assert_eq!(
+            HookTarget::default().path_in(project),
+            project.join(".claude/settings.local.json")
+        );
+        assert_eq!(
+            HookTarget::Shared.path_in(project),
+            project.join(".claude/settings.json")
+        );
+    }
+
+    #[test]
+    fn the_hook_command_sits_next_to_the_daemon_that_runs() {
+        assert_eq!(
+            command_for_daemon(Path::new("/opt/companion/bin/companion-daemon")),
+            "\"/opt/companion/bin/companion-hook\""
+        );
+        // An application bundle has a space in its path, and the command goes to a shell.
+        assert_eq!(
+            command_for_daemon(Path::new(
+                "/Applications/Companion Mac.app/Contents/MacOS/companion-daemon"
+            )),
+            "\"/Applications/Companion Mac.app/Contents/MacOS/companion-hook\""
+        );
+    }
+
+    #[test]
+    fn the_command_of_the_running_binary_points_at_something_real() {
+        // In a test run that is the test binary itself, which is exactly the point: the
+        // path follows the installation instead of a guess about the build directory.
+        let command = command_for_running_daemon().expect("the running binary has a path");
+        assert!(command.starts_with('"') && command.ends_with('"'));
+        assert!(command.contains(HOOK_BINARY), "got {command}");
     }
 
     #[test]

@@ -16,6 +16,10 @@ pub enum CommandKind {
     Spawn,
     Send,
     Read,
+    /// Cut the running turn short without ending the session. `DESIGN.md`
+    /// § Session-Adapter keeps this apart from `send`, which queues behind the turn, and
+    /// from `stop`, which ends the session.
+    Interrupt,
     Stop,
 }
 
@@ -26,6 +30,9 @@ pub enum CommandKind {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum StatusField {
+    /// Whether the adapter can say what a session is doing at all. An adapter that leaves
+    /// this out reports `unknown` and `lost` instead of guessing between busy and idle.
+    State,
     Project,
     Model,
     RuntimeMs,

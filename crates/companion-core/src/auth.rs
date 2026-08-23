@@ -281,6 +281,7 @@ mod tests {
         for kind in [
             RequestKind::Spawn,
             RequestKind::Send,
+            RequestKind::Interrupt,
             RequestKind::Stop,
             RequestKind::RunGate,
             RequestKind::List,
