@@ -80,6 +80,7 @@ final class ServerMessageFixtureTests: XCTestCase {
                   case .success(.sessions(let sessions)) = response.result else { return nil }
             return sessions
         }.first)
+        XCTAssertEqual(sessions.count, 3)
         let status = try XCTUnwrap(sessions.first)
 
         XCTAssertEqual(status.id, "-Users-me-AI-companion")
@@ -96,6 +97,13 @@ final class ServerMessageFixtureTests: XCTestCase {
         XCTAssertTrue(status.iteration.isUnknown)
         XCTAssertEqual(status.openQuestion, "Soll ich pushen?")
         XCTAssertEqual(status.auftragId, "mac-int-1")
+
+        // The two states an honest adapter reaches for when it cannot say more.
+        XCTAssertEqual(sessions[1].state, .unknown)
+        XCTAssertFalse(sessions[1].state.isKnown)
+        XCTAssertFalse(sessions[1].state.isFinal, "a session nobody can read is not over")
+        XCTAssertEqual(sessions[2].state, .lost)
+        XCTAssertTrue(sessions[2].state.isFinal)
     }
 
     func testEveryEventKindHasALineAndDecodes() {
@@ -151,7 +159,7 @@ final class ServerMessageFixtureTests: XCTestCase {
             case .capabilities(let adapters):
                 seen.insert("capabilities")
                 XCTAssertEqual(adapters.first?.adapter, "workbench")
-                XCTAssertEqual(adapters.first?.commands, [.list, .read])
+                XCTAssertEqual(adapters.first?.commands, [.list, .read, .interrupt])
                 XCTAssertEqual(adapters.first?.enforcesPermissionModes, false)
             case .sent(let outcome):
                 seen.insert("sent")
@@ -191,12 +199,15 @@ final class ClientMessageFixtureTests: XCTestCase {
         let expected = try RepositoryLayout.lines(of: "client_messages.jsonl")
         let mine: [ClientMessage] = [
             .hello(Hello(token: "0123456789abcdef", clientName: "companion-mac")),
-            .request(RequestEnvelope(id: 1, request: .list(.all))),
+            .request(RequestEnvelope(id: 1, request: .list(
+                ListOptions(runningOnly: true, doneLimit: 5)))),
             .request(RequestEnvelope(id: 2, request: .send(
                 sessionId: "-Users-me-AI-companion", text: "Bitte den Stand melden."))),
             .request(RequestEnvelope(id: 3, request: .read(
                 sessionId: "-Users-me-AI-companion", window: .tail(lines: 40)))),
             .request(RequestEnvelope(id: 4, request: .stop(sessionId: "-Users-me-AI-companion"))),
+            .request(RequestEnvelope(id: 7, request: .interrupt(
+                sessionId: "-Users-me-AI-companion"))),
             .request(RequestEnvelope(id: 5, request: .capabilities(adapter: "workbench"))),
             .request(RequestEnvelope(id: 6, request: .runGate(
                 sessionId: "-Users-me-AI-companion", gateIndex: 0))),
@@ -212,7 +223,9 @@ final class ClientMessageFixtureTests: XCTestCase {
         }
     }
 
-    func testListStaysThePlainRequestUntilTheDaemonLearnsTheOptions() throws {
+    /// Without options the request stays the bare `list`, and the daemon fills in its own
+    /// defaults. That keeps the default in one place instead of copying the number here.
+    func testListWithoutOptionsIsTheBareRequest() throws {
         let plain = try WireCodec.encode(.request(RequestEnvelope(id: 9, request: .list(.all))))
         XCTAssertEqual(
             try JSONSerialization.jsonObject(with: plain) as? NSDictionary,
@@ -224,5 +237,54 @@ final class ClientMessageFixtureTests: XCTestCase {
             try JSONSerialization.jsonObject(with: narrowed) as? NSDictionary,
             ["type": "request", "id": 9, "request": "list",
              "running_only": true, "done_limit": 5] as NSDictionary)
+    }
+}
+
+/// What happens when the daemon is newer than the shell.
+///
+/// `DESIGN.md` section Architektur, Protokoll-Kompatibilitaet: additive changes must not
+/// break a client. An unknown event, an unknown field and an unknown value are read as such
+/// and never as something the shell believes it understood.
+final class ForwardCompatibilityTests: XCTestCase {
+    func testAnUnknownEventKindIsKeptAsUnrecognised() throws {
+        let line = Data("""
+        {"type":"event","sequence":9,"run_id":"r","timestamp_ms":1,"adapter":"workbench",        "session_id":"s","event":{"event":"voice_started","device":"mic"}}
+        """.utf8)
+        guard case .event(let envelope) = try WireCodec.decode(line) else {
+            return XCTFail("not an event")
+        }
+        XCTAssertEqual(envelope.event, .unrecognised(kind: "voice_started"))
+        XCTAssertNil(envelope.event.kind)
+        XCTAssertEqual(envelope.sequence, 9, "the bookkeeping is still readable")
+    }
+
+    func testAnUnknownFieldDoesNotStopAMessage() throws {
+        let line = Data("""
+        {"type":"event","sequence":9,"run_id":"r","timestamp_ms":1,"adapter":"workbench",        "session_id":"s","event":{"event":"error","message":"boom","severity":"high"}}
+        """.utf8)
+        guard case .event(let envelope) = try WireCodec.decode(line) else {
+            return XCTFail("not an event")
+        }
+        XCTAssertEqual(envelope.event, .error(message: "boom"))
+    }
+
+    func testAnUnknownStateIsNotMistakenForAKnownOne() {
+        let state = SessionState(rawValue: "compacting")
+        XCTAssertEqual(state, .unrecognised("compacting"))
+        XCTAssertFalse(state.isKnown)
+        XCTAssertEqual(state.rawValue, "compacting", "the wire value survives for the log")
+    }
+
+    func testAnUnknownOriginIsReadAsUnknownNotAsAMeasurement() throws {
+        let provenance = try JSONDecoder().decode(
+            Provenance<String>.self,
+            from: Data(#"{"origin":"guessed","value":"claude"}"#.utf8))
+        XCTAssertTrue(provenance.isUnknown)
+        XCTAssertNil(provenance.value)
+    }
+
+    func testAnUnknownMessageTypeIsNamedRatherThanThrown() throws {
+        let message = try WireCodec.decode(Data(#"{"type":"heartbeat","beat":3}"#.utf8))
+        XCTAssertEqual(message, .unrecognised(type: "heartbeat"))
     }
 }

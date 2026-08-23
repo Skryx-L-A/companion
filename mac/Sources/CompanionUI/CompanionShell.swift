@@ -99,7 +99,7 @@ public final class CompanionShell {
                 model: .measured("claude-opus-5"), state: .busy,
                 context: .estimated(ContextUsage(usedFraction: 0.42)))),
             SessionSnapshot(SessionStatus(
-                id: "-Users-me-AI-companion#mac-int", adapter: "workbench",
+                id: "-Users-me-AI-companion/mac-int", adapter: "workbench",
                 project: "/Users/me/.pi-workers/worktrees/mac-int",
                 model: .measured("claude-opus-5"), state: .waiting,
                 openQuestion: "Soll die Sessionliste beendete Sessions weiter zeigen?")),
@@ -108,7 +108,7 @@ public final class CompanionShell {
         ]
         model.selectedSessionId = model.sessions.first?.id
         model.openQuestions = [OpenQuestion(
-            sessionId: "-Users-me-AI-companion#mac-int", questionId: "q-1",
+            sessionId: "-Users-me-AI-companion/mac-int", questionId: "q-1",
             text: "Soll die Sessionliste beendete Sessions weiter zeigen?")]
         model.messages = [
             ChatMessage(author: .system, text: "Beispielinhalt, kein laufender Daemon."),
@@ -153,6 +153,7 @@ public final class CompanionShell {
             dump["daemon_version"] = welcome.daemonVersion
             dump["session_namespace"] = welcome.sessionNamespace
         }
+        dump["ignored_messages"] = client.ignoredCount
         return dump
     }
 
@@ -308,6 +309,8 @@ public final class CompanionShell {
         }
         lastSequence = envelope.sequence
 
+        noteIgnoredMessages()
+
         let title = model.title(forSessionId: envelope.sessionId)
         applyToSessions(envelope)
 
@@ -375,6 +378,24 @@ public final class CompanionShell {
             break
         }
         model.sessions = Self.sorted(model.sessions)
+    }
+
+    /// Says once that the daemon speaks something this shell does not know, and keeps the
+    /// count next to the connection afterwards. An additive protocol change does not break
+    /// anything here, but it must not stay invisible either.
+    private func noteIgnoredMessages() {
+        let model = overlay.model
+        let ignored = client.ignoredCount
+        guard ignored != model.ignoredCount else { return }
+        if model.ignoredCount == 0 {
+            systemMessage(
+                "Der Daemon schickt Nachrichten, die diese Shell nicht kennt. Sie werden uebergangen und gezaehlt; ein Update der Shell holt sie ab.")
+        }
+        model.ignoredCount = ignored
+        if let welcome = client.welcome {
+            model.daemonDetail =
+                "Rolle \(welcome.role.rawValue), Daemon \(welcome.daemonVersion), Lauf \(welcome.runId), \(ignored) uebergangen"
+        }
     }
 
     private func systemMessage(_ text: String) {

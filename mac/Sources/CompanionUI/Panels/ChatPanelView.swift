@@ -189,7 +189,9 @@ struct ChatBubble: View {
     private var author: String {
         switch message.author {
         case .human: return message.sessionId == nil ? "Du" : "Du an \(session)"
-        case .companion: return session
+        // A line without a session comes from the companion itself, not from a session
+        // whose name got lost.
+        case .companion: return message.sessionId == nil ? "Companion" : session
         case .system: return "System"
         }
     }

@@ -29,6 +29,9 @@ public final class OverlayModel {
     public var daemonDetail: String?
     /// What the quick start found in the login shell's PATH.
     public var detectedTools: [DetectedTool] = []
+    /// How many messages the shell had to ignore because it did not know them. Shown rather
+    /// than swallowed, so a version drift between daemon and shell stays visible.
+    public var ignoredCount = 0
 
     public init() {}
 

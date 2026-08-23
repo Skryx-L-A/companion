@@ -152,10 +152,9 @@ public struct SpawnRequest: Codable, Sendable, Equatable {
 
 /// Narrowing options for `list`.
 ///
-/// Neither field is part of schema version 1; the daemon track is adding them. Both are left
-/// out of the message while they are nil, so today's daemon sees the plain `list` it knows,
-/// and a daemon that learns them needs no change here. Sending them early would be harmless
-/// as well: the daemon ignores fields it does not know.
+/// Both fields are optional on the wire and are left out of the message while they are nil,
+/// so a `list` without them is the plain listing. A daemon that does not know them ignores
+/// them, which is what made it safe to build this before they landed in the schema.
 public struct ListOptions: Sendable, Equatable {
     /// Only sessions that are still running.
     public var runningOnly: Bool?
@@ -183,6 +182,8 @@ public enum Request: Sendable, Equatable {
     case send(sessionId: SessionId, text: String)
     case read(sessionId: SessionId, window: ReadWindow)
     case stop(sessionId: SessionId)
+    /// Cut the running turn short without ending the session.
+    case interrupt(sessionId: SessionId)
     /// A single adapter, or all of them when nil.
     case capabilities(adapter: AdapterId?)
     /// Run one gate command of an approved job file, named by its position in the list.
@@ -196,6 +197,7 @@ public enum Request: Sendable, Equatable {
         case .send: return "send"
         case .read: return "read"
         case .stop: return "stop"
+        case .interrupt: return "interrupt"
         case .capabilities: return "capabilities"
         case .runGate: return "run_gate"
         }
@@ -269,7 +271,7 @@ extension ClientMessage: Encodable {
             case .read(let sessionId, let window):
                 try container.encode(sessionId, forKey: .sessionId)
                 try container.encode(window, forKey: .window)
-            case .stop(let sessionId):
+            case .stop(let sessionId), .interrupt(let sessionId):
                 try container.encode(sessionId, forKey: .sessionId)
             case .capabilities(let adapter):
                 try container.encode(adapter, forKey: .adapter)

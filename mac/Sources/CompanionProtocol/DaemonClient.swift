@@ -52,6 +52,13 @@ public final class DaemonClient {
     public private(set) var status: Status = .offline
     /// The handshake of the current connection, nil while there is none.
     public private(set) var welcome: Welcome?
+    /// How many messages this shell had to ignore because it did not know them: an event
+    /// kind or a message type a newer daemon sends.
+    ///
+    /// `DESIGN.md` section Architektur, Protokoll-Kompatibilitaet: additive changes do not
+    /// break a client, but the drift must not stay silent either. Counting is what makes it
+    /// showable.
+    public private(set) var ignoredCount: Int = 0
 
     /// Called after every status change.
     public var onStatusChange: ((Status) -> Void)?
@@ -225,12 +232,16 @@ public final class DaemonClient {
             }
 
         case .event(let envelope):
+            // An event kind this shell does not know is still handed on: it carries the
+            // sequence number the gap check needs, and nothing downstream acts on it.
+            if case .unrecognised = envelope.event { ignoredCount += 1 }
             onEvent?(envelope)
 
         case .eventsDropped(let missed, let afterSequence):
             onEventsDropped?(missed, afterSequence)
 
         case .unrecognised(let type):
+            ignoredCount += 1
             onUndecodableLine?("unbekannte Nachricht \(type)")
         }
     }

@@ -21,18 +21,26 @@ public struct SessionSnapshot: Sendable, Equatable, Identifiable {
     public var id: SessionId { status.id }
 
     /// Name of the row. Derived from what the daemon sent and never invented: the worker
-    /// part of a workbench id, otherwise the last component of the project path, otherwise
-    /// the id itself.
+    /// part of a workbench id, otherwise the last component of the project path, and the
+    /// session key behind it where there is one.
+    ///
+    /// The key matters: a project with six sessions would otherwise show six rows with the
+    /// same name, and picking the right one would be guesswork.
     public var title: String {
-        if let worker = status.id.split(separator: "#", maxSplits: 1).last,
-           status.id.contains("#"), !worker.isEmpty {
-            return String(worker)
+        // A workbench id is `<stem>/<worker>`, and a stem never contains a slash: the
+        // adapter replaces the slashes of the project path with dashes.
+        if let separator = status.id.firstIndex(of: "/") {
+            let worker = status.id[status.id.index(after: separator)...]
+            if !worker.isEmpty { return String(worker) }
         }
-        if let project = status.project, let last = project.split(separator: "/").last,
-           !last.isEmpty {
-            return String(last)
+        let stem = status.id.components(separatedBy: "__")
+        let key = stem.count > 1 ? stem.last : nil
+        guard let project = status.project, let last = project.split(separator: "/").last,
+              !last.isEmpty else {
+            return status.id
         }
-        return status.id
+        guard let key, !key.isEmpty else { return String(last) }
+        return "\(last) (\(key))"
     }
 
     /// Project path with the home directory shortened, or "unbekannt".
@@ -56,8 +64,10 @@ public struct SessionSnapshot: Sendable, Equatable, Identifiable {
         case .waiting: return "wartet auf Eingabe"
         case .done: return "fertig"
         case .error: return "Fehler"
-        // A state this shell does not know is shown as unknown, never as one it does know.
-        case .unrecognised: return Self.unknownText
+        case .lost: return "verschwunden"
+        // Neither an adapter that cannot tell nor a state this shell does not know is
+        // presented as one of the states it does know.
+        case .unknown, .unrecognised: return Self.unknownText
         }
     }
 
@@ -77,10 +87,13 @@ public struct SessionSnapshot: Sendable, Equatable, Identifiable {
         hasOpenQuestion || status.state == .error
     }
 
+    /// Whether the session is still there. An adapter that cannot tell what a session is
+    /// doing still knows that it exists, which is why `unknown` counts as running and `lost`
+    /// does not.
     public var isRunning: Bool {
         switch status.state {
-        case .busy, .idle, .waiting: return true
-        case .done, .error, .unrecognised: return false
+        case .busy, .idle, .waiting, .unknown: return true
+        case .done, .error, .lost, .unrecognised: return false
         }
     }
 
@@ -111,7 +124,8 @@ public struct SessionSnapshot: Sendable, Equatable, Identifiable {
         case .waiting: return Color(red: 0.910, green: 0.639, blue: 0.239)
         case .done: return Color(nsColor: .systemGreen)
         case .error: return Color(nsColor: .systemRed)
-        case .unrecognised: return Color(nsColor: .tertiaryLabelColor)
+        case .lost: return Color(nsColor: .systemGray)
+        case .unknown, .unrecognised: return Color(nsColor: .tertiaryLabelColor)
         }
     }
 
@@ -120,8 +134,9 @@ public struct SessionSnapshot: Sendable, Equatable, Identifiable {
     public var badgeSymbol: String? {
         if hasOpenQuestion { return "questionmark" }
         switch status.state {
-        case .waiting, .unrecognised: return "questionmark"
+        case .waiting, .unknown, .unrecognised: return "questionmark"
         case .error: return "exclamationmark"
+        case .lost: return "minus"
         default: return nil
         }
     }

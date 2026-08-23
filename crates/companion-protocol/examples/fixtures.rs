@@ -15,9 +15,9 @@ use std::path::PathBuf;
 
 use companion_protocol::{
     AdapterCapabilities, ClientMessage, CommandKind, ContextUsage, EndReason, ErrorCode, Event,
-    EventEnvelope, EventKind, Hello, PROTOCOL_VERSION, ProtocolError,
-    Provenance, ReadWindow, Request, RequestEnvelope, Response, ResponseBody, ResponseResult,
-    SendOutcome, ServerMessage, SessionState, SessionStatus, StatusField, Welcome,
+    EventEnvelope, EventKind, Hello, PROTOCOL_VERSION, ProtocolError, Provenance, ReadWindow,
+    Request, RequestEnvelope, Response, ResponseBody, ResponseResult, SendOutcome, ServerMessage,
+    SessionState, SessionStatus, StatusField, Welcome,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,14 +29,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let server = server_messages()
         .iter()
-        .map(|message| serde_json::to_string(message))
+        .map(serde_json::to_string)
         .collect::<Result<Vec<_>, _>>()?
         .join("\n");
     fs::write(directory.join("server_messages.jsonl"), server + "\n")?;
 
     let client = client_messages()
         .iter()
-        .map(|message| serde_json::to_string(message))
+        .map(serde_json::to_string)
         .collect::<Result<Vec<_>, _>>()?
         .join("\n");
     fs::write(directory.join("client_messages.jsonl"), client + "\n")?;
@@ -60,10 +60,31 @@ fn status() -> SessionStatus {
         used_tokens: Some(84_000),
     });
     status.iteration = Provenance::Unknown;
-    status.last_output = Some("result file: /Users/me/.pi-workers/results/mac-int/x.md".to_owned());
+    status.last_output =
+        Some("result file: /Users/me/.pi-workers/results/mac-int/x.md".to_owned());
     status.open_question = Some("Soll ich pushen?".to_owned());
     status.auftrag_id = Some("mac-int-1".into());
     status
+}
+
+/// An adapter that sees the session but not what it is doing.
+fn unknown_status() -> SessionStatus {
+    let mut status = SessionStatus::new(
+        "-tmp-fixture-suedsee".into(),
+        "workbench".into(),
+        SessionState::Unknown,
+    );
+    status.project = Some("/tmp/fixture/suedsee".to_owned());
+    status
+}
+
+/// A session that is gone without the adapter learning how it ended.
+fn lost_status() -> SessionStatus {
+    SessionStatus::new(
+        "claude-pur-1".into(),
+        "claude-code".into(),
+        SessionState::Lost,
+    )
 }
 
 fn envelope(sequence: u64, session: Option<&str>, event: Event) -> ServerMessage {
@@ -138,7 +159,7 @@ fn server_messages() -> Vec<ServerMessage> {
         ServerMessage::Response(Response {
             id: 1,
             result: ResponseResult::Ok(ResponseBody::Sessions {
-                sessions: vec![status()],
+                sessions: vec![status(), unknown_status(), lost_status()],
             }),
         }),
         ServerMessage::Response(Response {
@@ -160,7 +181,7 @@ fn server_messages() -> Vec<ServerMessage> {
                 adapters: vec![AdapterCapabilities {
                     adapter: "workbench".into(),
                     display_name: "Claude Code Workbench".to_owned(),
-                    commands: vec![CommandKind::List, CommandKind::Read],
+                    commands: vec![CommandKind::List, CommandKind::Read, CommandKind::Interrupt],
                     events: vec![EventKind::SessionStarted, EventKind::SessionEnded],
                     status_fields: vec![StatusField::Project, StatusField::Model],
                     enforces_permission_modes: false,
@@ -189,17 +210,11 @@ fn server_messages() -> Vec<ServerMessage> {
             missed: 9,
             after_sequence: 17,
         },
-        ServerMessage::Rejected(ProtocolError::new(
-            ErrorCode::Unauthorized,
-            "unknown token",
-        )),
+        ServerMessage::Rejected(ProtocolError::new(ErrorCode::Unauthorized, "unknown token")),
     ];
-    messages.extend(
-        events
-            .into_iter()
-            .enumerate()
-            .map(|(index, event)| envelope(index as u64 + 1, Some("-Users-me-AI-companion"), event)),
-    );
+    messages.extend(events.into_iter().enumerate().map(|(index, event)| {
+        envelope(index as u64 + 1, Some("-Users-me-AI-companion"), event)
+    }));
     messages
 }
 
@@ -212,7 +227,10 @@ fn client_messages() -> Vec<ClientMessage> {
         }),
         ClientMessage::Request(RequestEnvelope {
             id: 1,
-            request: Request::List,
+            request: Request::List {
+                running_only: true,
+                done_limit: 5,
+            },
         }),
         ClientMessage::Request(RequestEnvelope {
             id: 2,
@@ -231,6 +249,12 @@ fn client_messages() -> Vec<ClientMessage> {
         ClientMessage::Request(RequestEnvelope {
             id: 4,
             request: Request::Stop {
+                session_id: "-Users-me-AI-companion".into(),
+            },
+        }),
+        ClientMessage::Request(RequestEnvelope {
+            id: 7,
+            request: Request::Interrupt {
                 session_id: "-Users-me-AI-companion".into(),
             },
         }),

@@ -8,11 +8,33 @@ public enum SessionState: Sendable, Equatable, Hashable {
     case idle
     /// Waiting for input from the person, including an open question.
     case waiting
+    /// Finished its work. Only for an adapter that saw it finish.
     case done
     case error
+    /// The session is there, but the adapter cannot tell what it is doing.
+    case unknown
+    /// The session is gone and the adapter never learned how it ended. Over, but not
+    /// finished: a crash and a clean end look the same from the outside.
+    case lost
     /// A state a newer daemon knows and this shell does not. Never shown as one of the
     /// known states: an older shell must not present something it did not understand.
     case unrecognised(String)
+
+    /// Whether the session is over, however it ended.
+    public var isFinal: Bool {
+        switch self {
+        case .done, .error, .lost: return true
+        default: return false
+        }
+    }
+
+    /// Whether the adapter knows what the session is doing.
+    public var isKnown: Bool {
+        switch self {
+        case .unknown, .unrecognised: return false
+        default: return true
+        }
+    }
 }
 
 extension SessionState: RawRepresentable, Codable {
@@ -23,6 +45,8 @@ extension SessionState: RawRepresentable, Codable {
         case "waiting": self = .waiting
         case "done": self = .done
         case "error": self = .error
+        case "unknown": self = .unknown
+        case "lost": self = .lost
         default: self = .unrecognised(rawValue)
         }
     }
@@ -34,6 +58,8 @@ extension SessionState: RawRepresentable, Codable {
         case .waiting: return "waiting"
         case .done: return "done"
         case .error: return "error"
+        case .unknown: return "unknown"
+        case .lost: return "lost"
         case .unrecognised(let raw): return raw
         }
     }

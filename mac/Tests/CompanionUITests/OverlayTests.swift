@@ -112,9 +112,19 @@ final class SessionSnapshotTests: XCTestCase {
     }
 
     func testTitleFallsBackFromWorkerToProjectToId() {
-        XCTAssertEqual(SessionSnapshot(status(id: "-Users-me-AI-companion#mac-int")).title, "mac-int")
+        XCTAssertEqual(SessionSnapshot(status(id: "-Users-me-AI-companion/mac-int")).title, "mac-int")
         XCTAssertEqual(SessionSnapshot(status()).title, "companion")
         XCTAssertEqual(SessionSnapshot(status(id: "cc-1", project: nil)).title, "cc-1")
+    }
+
+    func testTwoSessionsOfOneProjectAreToldApartByTheirKey() {
+        let first = SessionSnapshot(status(id: "-Users-me-AI-LokalTest__a1b5f1",
+                                           project: "/Users/me/AI/LokalTest"))
+        let second = SessionSnapshot(status(id: "-Users-me-AI-LokalTest__f42db9",
+                                            project: "/Users/me/AI/LokalTest"))
+        XCTAssertEqual(first.title, "LokalTest (a1b5f1)")
+        XCTAssertEqual(second.title, "LokalTest (f42db9)")
+        XCTAssertNotEqual(first.title, second.title, "same project, different session")
     }
 
     func testUnknownFieldsReadAsUnknownNeverAsEmpty() {

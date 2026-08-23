@@ -64,7 +64,7 @@ final class PreviewRenderTests: XCTestCase {
                 model: .measured("claude-opus-5"), state: .busy,
                 context: .measured(ContextUsage(usedFraction: 0.42)))),
             SessionSnapshot(SessionStatus(
-                id: "-Users-me-AI-companion#mac-int", adapter: "workbench",
+                id: "-Users-me-AI-companion/mac-int", adapter: "workbench",
                 project: "/Users/me/.pi-workers/worktrees/mac-int",
                 model: .estimated("claude-opus-5"), state: .waiting,
                 openQuestion: "Soll die Liste beendete Sessions weiter zeigen?")),
@@ -99,12 +99,12 @@ final class PreviewRenderTests: XCTestCase {
         let model = OverlayModel()
         model.isDaemonReady = true
         model.sessions = [SessionSnapshot(SessionStatus(
-            id: "-Users-me-AI-companion#mac-int", adapter: "workbench",
+            id: "-Users-me-AI-companion/mac-int", adapter: "workbench",
             project: "/Users/me/.pi-workers/worktrees/mac-int", state: .waiting,
             openQuestion: "Soll ich den Zweig pushen?"))]
         model.selectedSessionId = model.sessions.first?.id
         model.openQuestions = [OpenQuestion(
-            sessionId: "-Users-me-AI-companion#mac-int", questionId: "q-1",
+            sessionId: "-Users-me-AI-companion/mac-int", questionId: "q-1",
             text: "Soll ich den Zweig pushen?")]
         model.messages = [
             ChatMessage(author: .human, text: "Wie steht es um die beiden Sessions?"),

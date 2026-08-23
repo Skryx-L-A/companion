@@ -12,7 +12,7 @@ public struct OverlayLayout: Equatable, Sendable {
     public static let panelWidth: CGFloat = 340
     public static let chatHeight: CGFloat = 380
     public static let sessionsHeight: CGFloat = 300
-    public static let onboardingHeight: CGFloat = 430
+    public static let onboardingHeight: CGFloat = 380
     public static let spacing: CGFloat = 12
 
     /// Size of the overlay window.

@@ -9,6 +9,9 @@ public enum CommandKind: Sendable, Equatable, Hashable {
     case send
     case read
     case stop
+    /// Cut the running turn short without ending the session. Kept apart from `send`, which
+    /// queues behind the turn, and from `stop`, which ends the session.
+    case interrupt
     case unrecognised(String)
 }
 
@@ -20,6 +23,7 @@ extension CommandKind: RawRepresentable, Codable {
         case "send": self = .send
         case "read": self = .read
         case "stop": self = .stop
+        case "interrupt": self = .interrupt
         default: self = .unrecognised(rawValue)
         }
     }
@@ -31,6 +35,7 @@ extension CommandKind: RawRepresentable, Codable {
         case .send: return "send"
         case .read: return "read"
         case .stop: return "stop"
+        case .interrupt: return "interrupt"
         case .unrecognised(let raw): return raw
         }
     }
@@ -48,6 +53,9 @@ extension CommandKind: RawRepresentable, Codable {
 /// The optional fields of a session status. An adapter names the ones it can fill; every
 /// field it leaves out stays unknown in the session list.
 public enum StatusField: String, Sendable, Codable, Hashable, CaseIterable {
+    /// Whether the adapter can say what a session is doing at all. One that leaves this out
+    /// reports `unknown` and `lost` instead of guessing between busy and idle.
+    case state
     case project
     case model
     case runtimeMs = "runtime_ms"

@@ -23,17 +23,35 @@ daemon, which is the quickest way to see the overlay:
 
 `--help` lists the rest. `--defaults-suite <name>` writes settings into a throwaway domain;
 the test scripts use it so a run never touches the settings of an installed copy.
+`--config-dir <pfad>` points the shell at another configuration directory, which is where it
+finds the socket and the token, and `--onboarding skip|force` decides whether the quick start
+appears. `--dump-sessions <pfad>` and `--snapshot <pfad>` write what the shell knows about the
+sessions as JSON and as a picture, both on the way out, which is what
+`tests/mac/e2e-daemon.sh` reads.
 
 ## Structure
 
 | Target | Contents |
 |---|---|
-| `CompanionProtocol` | socket client and wire envelope, placeholder until the schema is final |
-| `CompanionUI` | overlay panel, figure, both panels, menu bar item, settings |
+| `CompanionProtocol` | the wire types of `app/protocol/schema`, the socket and the client |
+| `CompanionUI` | overlay panel, figure, the panels, menu bar item, settings, quick start |
 | `CompanionMac` | the executable and its command line |
 
 Inside `CompanionUI`, `Overlay` holds the window and the layout, `Figure` the sprites and the
-state machine, `Panels` the two SwiftUI panels, `Models` the session and settings types.
+state machine, `Panels` the SwiftUI panels, `Models` the session, settings and quick-start
+types.
+
+## How the session list stays current
+
+The list is read once with `list` after the handshake and then kept current by events. The
+shell reads it again whenever it has reason to doubt that it saw everything: after a
+reconnect, when the daemon reports that this connection lost events, when a sequence number
+skips, and when an event arrives about a session the list does not have. Nothing is repaired
+by guessing; the daemon is the source of truth.
+
+The chat panel sends to the session that is selected in the list, and a question a session
+asks appears above the input with its own answer field. The answer goes back through the same
+`send`, addressed to the session that asked.
 
 ## The two decisions worth knowing
 
@@ -66,7 +84,10 @@ States without a folder keep the drawn placeholder, so a partial set works.
 
 ## Tests
 
-`swift test` covers the state machine, the alpha hit test, the layout, the payload decoding
-and the protocol module, and renders the panels to PNG files for review. The window itself is
-exercised by `tests/mac/ui-smoke.sh` in the repository root, which also checks that the
-frontmost application never changes; `tests/mac/ruhelast.sh` measures idle CPU and memory.
+`swift test` covers the state machine, the alpha hit test, the layout, the wire types against
+the fixtures and the schema files, the session display and the quick-start settings, and it
+renders the panels to PNG files for review. Three scripts in the repository root exercise
+what a unit test cannot: `tests/mac/ui-smoke.sh` starts the window and checks that the
+frontmost application never changes, `tests/mac/e2e-daemon.sh` runs the shell against a real
+daemon on a throwaway configuration directory, and `tests/mac/ruhelast.sh` measures idle CPU
+and memory.
