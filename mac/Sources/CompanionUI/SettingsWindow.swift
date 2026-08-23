@@ -10,6 +10,7 @@ struct ShellSettingsView: View {
     @Bindable var settings: AppSettings
     let socketPath: String
     let daemonStatus: String
+    let daemonDetail: String?
 
     var body: some View {
         Form {
@@ -50,8 +51,19 @@ struct ShellSettingsView: View {
 
             Section("Daemon") {
                 LabeledContent("Status", value: daemonStatus)
+                if let daemonDetail {
+                    LabeledContent("Verbindung", value: daemonDetail)
+                        .textSelection(.enabled)
+                }
                 LabeledContent("Socket", value: socketPath)
                     .textSelection(.enabled)
+            }
+
+            Section("Schnellstart") {
+                LabeledContent("Arbeitsmodus", value: settings.workMode.label)
+                LabeledContent("Standardwerkzeug", value: settings.defaultModelTool ?? "keines")
+                LabeledContent("Spracheingabe", value: settings.voiceTrigger.label)
+                Button("Schnellstart erneut zeigen") { controller.startOnboarding() }
             }
         }
         .formStyle(.grouped)
@@ -66,7 +78,10 @@ struct ShellSettingsView: View {
 final class SettingsWindowController {
     private var window: NSWindow?
 
-    func show(controller: OverlayController, socketPath: String, daemonStatus: String) {
+    func show(
+        controller: OverlayController, socketPath: String, daemonStatus: String,
+        daemonDetail: String? = nil
+    ) {
         if let window {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -76,7 +91,8 @@ final class SettingsWindowController {
             controller: controller,
             settings: controller.settings,
             socketPath: socketPath,
-            daemonStatus: daemonStatus)
+            daemonStatus: daemonStatus,
+            daemonDetail: daemonDetail)
         let hosting = NSHostingController(rootView: view)
         let window = NSWindow(contentViewController: hosting)
         window.title = "Companion Einstellungen"

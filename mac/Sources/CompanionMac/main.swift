@@ -6,13 +6,20 @@ import CompanionUI
 import Foundation
 
 /// Command line of the shell. Everything here exists so the overlay can be started and looked
-/// at without a daemon and without a person clicking anything.
+/// at without a person clicking anything, and so a test run never touches the configuration
+/// or the settings of an installed copy.
 struct Options {
-    var socketPath = DaemonEndpoint.defaultSocketPath
+    var configDirectory: URL?
+    var socketPath: String?
     var connectToDaemon = true
     var demo = false
     var printDiagnostics = false
     var quitAfter: TimeInterval?
+    var onboarding: CompanionShell.OnboardingPolicy = .auto
+    /// Where to write what the shell knows about the sessions, as JSON.
+    var dumpSessionsTo: String?
+    /// Where to write a picture of the session list, drawn without a window.
+    var snapshotTo: String?
     /// Throwaway settings domain. A test must never write into the settings the user is
     /// actually running with.
     var defaultsSuite: String?
@@ -22,6 +29,11 @@ struct Options {
         var index = 0
         while index < arguments.count {
             switch arguments[index] {
+            case "--config-dir":
+                index += 1
+                if index < arguments.count {
+                    options.configDirectory = URL(fileURLWithPath: arguments[index])
+                }
             case "--socket":
                 index += 1
                 if index < arguments.count { options.socketPath = arguments[index] }
@@ -35,17 +47,33 @@ struct Options {
             case "--quit-after":
                 index += 1
                 if index < arguments.count { options.quitAfter = TimeInterval(arguments[index]) }
+            case "--onboarding":
+                index += 1
+                if index < arguments.count {
+                    options.onboarding =
+                        CompanionShell.OnboardingPolicy(rawValue: arguments[index]) ?? .auto
+                }
+            case "--dump-sessions":
+                index += 1
+                if index < arguments.count { options.dumpSessionsTo = arguments[index] }
+            case "--snapshot":
+                index += 1
+                if index < arguments.count { options.snapshotTo = arguments[index] }
             case "--defaults-suite":
                 index += 1
                 if index < arguments.count { options.defaultsSuite = arguments[index] }
             case "--help":
                 print("""
                 companion-mac
+                  --config-dir <pfad>        Konfigurationsverzeichnis (Token, Socket)
                   --socket <pfad>            Socket des Daemons
                   --no-daemon                nicht verbinden
                   --demo                     Beispielinhalt zeigen, ohne Daemon
                   --diagnostics              Fensterzustand als JSON auf die Standardausgabe
                   --quit-after <sek>         nach n Sekunden beenden
+                  --onboarding auto|skip|force  Schnellstart zeigen oder ueberspringen
+                  --dump-sessions <pfad>     Sessionliste als JSON schreiben, vor dem Beenden
+                  --snapshot <pfad>          Bild der Sessionliste schreiben, ohne Fenster
                   --defaults-suite <name>    Einstellungen in eine eigene Domain schreiben
                 """)
                 exit(0)
@@ -72,8 +100,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
 
         let defaults = options.defaultsSuite.flatMap { UserDefaults(suiteName: $0) } ?? .standard
-        let shell = CompanionShell(socketPath: options.socketPath, defaults: defaults)
-        shell.start(connectToDaemon: options.connectToDaemon)
+        let paths = CompanionPaths(configDirectory: options.configDirectory)
+        let shell = CompanionShell(
+            paths: paths, socketPath: options.socketPath, defaults: defaults)
+        shell.start(connectToDaemon: options.connectToDaemon, onboarding: options.onboarding)
         if options.demo { shell.seedDemoContent() }
         self.shell = shell
 
@@ -92,9 +122,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// The dump and the picture are written on the way out, so they show what the shell knew
+    /// after it had time to connect and read the list, not what it knew at launch.
     func applicationWillTerminate(_ notification: Notification) {
+        if let shell {
+            writeSessionDump(shell)
+            writeSnapshot(shell)
+        }
         shell?.stop()
         shell = nil
+    }
+
+    @MainActor
+    private func writeSessionDump(_ shell: CompanionShell) {
+        guard let path = options.dumpSessionsTo else { return }
+        let dump = shell.sessionDump()
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: dump, options: [.prettyPrinted, .sortedKeys]) else {
+            FileHandle.standardError.write(Data("Sessionliste liess sich nicht als JSON schreiben\n".utf8))
+            return
+        }
+        do {
+            try data.write(to: URL(fileURLWithPath: path))
+        } catch {
+            FileHandle.standardError.write(Data("\(path): \(error)\n".utf8))
+        }
+    }
+
+    @MainActor
+    private func writeSnapshot(_ shell: CompanionShell) {
+        guard let path = options.snapshotTo else { return }
+        guard let png = PanelSnapshot.sessionListPNG(model: shell.overlay.model) else {
+            FileHandle.standardError.write(Data("Bild der Sessionliste liess sich nicht zeichnen\n".utf8))
+            return
+        }
+        do {
+            try png.write(to: URL(fileURLWithPath: path))
+        } catch {
+            FileHandle.standardError.write(Data("\(path): \(error)\n".utf8))
+        }
     }
 }
 

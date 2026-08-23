@@ -1,0 +1,228 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+import Foundation
+import XCTest
+
+@testable import CompanionProtocol
+
+/// Where the repository lies, derived from this file's own path. The fixtures and the schema
+/// files are part of the source tree, not resources of the test bundle: they are generated
+/// from the Rust crate, and a copy inside the bundle would be a second thing to keep current.
+enum RepositoryLayout {
+    static var appDirectory: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // CompanionProtocolTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // mac
+            .deletingLastPathComponent()  // app
+    }
+
+    static var schemaDirectory: URL { appDirectory.appendingPathComponent("protocol/schema") }
+
+    static var fixtureDirectory: URL {
+        appDirectory.appendingPathComponent("mac/Tests/CompanionProtocolTests/Fixtures")
+    }
+
+    static func lines(of file: String) throws -> [Data] {
+        let url = fixtureDirectory.appendingPathComponent(file)
+        let text = try String(contentsOf: url, encoding: .utf8)
+        return text.split(separator: "\n").map { Data($0.utf8) }
+    }
+
+    static func schema(_ file: String) throws -> [String: Any] {
+        let data = try Data(contentsOf: schemaDirectory.appendingPathComponent(file))
+        return try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+}
+
+/// Decodes the fixture lines that `cargo run -p companion-protocol --example fixtures` wrote
+/// from the real Rust types. Every field the shell reads is checked against a line the daemon
+/// would actually send, so a rename on either side fails here instead of in the overlay.
+final class ServerMessageFixtureTests: XCTestCase {
+    private var messages: [ServerMessage] = []
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        let lines = try RepositoryLayout.lines(of: "server_messages.jsonl")
+        XCTAssertFalse(lines.isEmpty, "no fixtures; run the example in the protocol crate")
+        messages = try lines.map { line in
+            do {
+                return try WireCodec.decode(line)
+            } catch {
+                throw XCTSkip("undecodable fixture: \(String(data: line, encoding: .utf8) ?? "")")
+            }
+        }
+    }
+
+    func testEveryLineDecodesIntoAKnownMessage() {
+        for message in messages {
+            if case .unrecognised(let type) = message {
+                XCTFail("the daemon sends a message this shell does not know: \(type)")
+            }
+        }
+    }
+
+    func testWelcomeCarriesRunIdAndNamespace() throws {
+        let welcome = try XCTUnwrap(messages.compactMap { message -> Welcome? in
+            if case .welcome(let welcome) = message { return welcome }
+            return nil
+        }.first)
+        XCTAssertEqual(welcome.protocolVersion, companionProtocolVersion)
+        XCTAssertEqual(welcome.role, .human)
+        XCTAssertEqual(welcome.runId, "run-7")
+        XCTAssertEqual(welcome.sessionNamespace, "conn-1")
+        XCTAssertEqual(welcome.daemonVersion, "0.1.0")
+    }
+
+    func testSessionStatusKeepsEveryProvenance() throws {
+        let sessions = try XCTUnwrap(messages.compactMap { message -> [SessionStatus]? in
+            guard case .response(let response) = message,
+                  case .success(.sessions(let sessions)) = response.result else { return nil }
+            return sessions
+        }.first)
+        let status = try XCTUnwrap(sessions.first)
+
+        XCTAssertEqual(status.id, "-Users-me-AI-companion")
+        XCTAssertEqual(status.adapter, "workbench")
+        XCTAssertEqual(status.machine, "local")
+        XCTAssertEqual(status.project, "/Users/me/AI/companion")
+        XCTAssertEqual(status.state, .busy)
+        XCTAssertEqual(status.model, .measured("claude-opus-5"))
+        XCTAssertEqual(status.runtimeMs, .estimated(90_000))
+        XCTAssertEqual(status.context.origin, .measured)
+        XCTAssertEqual(status.context.value?.usedFraction, 0.42)
+        XCTAssertEqual(status.context.value?.usedTokens, 84_000)
+        XCTAssertTrue(status.budget.isUnknown, "an unknown field must not carry a value")
+        XCTAssertTrue(status.iteration.isUnknown)
+        XCTAssertEqual(status.openQuestion, "Soll ich pushen?")
+        XCTAssertEqual(status.auftragId, "mac-int-1")
+    }
+
+    func testEveryEventKindHasALineAndDecodes() {
+        let kinds = messages.compactMap { message -> EventKind? in
+            guard case .event(let envelope) = message else { return nil }
+            if case .unrecognised(let kind) = envelope.event {
+                XCTFail("event \(kind) has no case in this shell")
+                return nil
+            }
+            return envelope.event.kind
+        }
+        XCTAssertEqual(Set(kinds), Set(EventKind.allCases), "one fixture per event kind")
+        XCTAssertEqual(kinds.count, 13)
+    }
+
+    func testEventEnvelopeCarriesTheBookkeeping() throws {
+        let envelope = try XCTUnwrap(messages.compactMap { message -> EventEnvelope? in
+            guard case .event(let envelope) = message,
+                  case .questionOpen = envelope.event else { return nil }
+            return envelope
+        }.first)
+        XCTAssertEqual(envelope.runId, "run-7")
+        XCTAssertEqual(envelope.adapter, "workbench")
+        XCTAssertEqual(envelope.sessionId, "-Users-me-AI-companion")
+        XCTAssertEqual(envelope.timestampMs, 1_770_000_000_000)
+        guard case .questionOpen(let questionId, let question) = envelope.event else {
+            return XCTFail("wrong event")
+        }
+        XCTAssertEqual(questionId, "q-1")
+        XCTAssertEqual(question, "Soll ich pushen?")
+    }
+
+    func testErrorResponseKeepsItsCode() throws {
+        let error = try XCTUnwrap(messages.compactMap { message -> ProtocolError? in
+            guard case .response(let response) = message,
+                  case .failure(let error) = response.result else { return nil }
+            return error
+        }.first)
+        XCTAssertEqual(error.code, .notSupported)
+        XCTAssertFalse(error.message.isEmpty)
+    }
+
+    func testBodiesThatCarryNoSession() throws {
+        var seen: Set<String> = []
+        for message in messages {
+            guard case .response(let response) = message,
+                  case .success(let body) = response.result else { continue }
+            switch body {
+            case .chunk(let text, let nextOffset):
+                seen.insert("chunk")
+                XCTAssertEqual(text, "letzte Zeilen")
+                XCTAssertEqual(nextOffset, 4096)
+            case .capabilities(let adapters):
+                seen.insert("capabilities")
+                XCTAssertEqual(adapters.first?.adapter, "workbench")
+                XCTAssertEqual(adapters.first?.commands, [.list, .read])
+                XCTAssertEqual(adapters.first?.enforcesPermissionModes, false)
+            case .sent(let outcome):
+                seen.insert("sent")
+                XCTAssertEqual(outcome, .queued)
+            case .ack:
+                seen.insert("ack")
+            case .session:
+                seen.insert("session")
+            case .sessions, .unrecognised:
+                break
+            }
+        }
+        XCTAssertEqual(seen, ["chunk", "capabilities", "sent", "ack", "session"])
+    }
+
+    func testConnectionLevelDropAndRefusal() throws {
+        let dropped = messages.contains { message in
+            if case .eventsDropped(let missed, let after) = message {
+                return missed == 9 && after == 17
+            }
+            return false
+        }
+        XCTAssertTrue(dropped, "the client-side gap message is part of the protocol")
+
+        let refused = messages.contains { message in
+            if case .rejected(let error) = message { return error.code == .unauthorized }
+            return false
+        }
+        XCTAssertTrue(refused)
+    }
+}
+
+/// What the shell sends, checked against the lines the Rust types produce for the same
+/// values. Compared as parsed JSON, because the order of keys is an encoder's business.
+final class ClientMessageFixtureTests: XCTestCase {
+    func testTheShellWritesWhatTheDaemonReads() throws {
+        let expected = try RepositoryLayout.lines(of: "client_messages.jsonl")
+        let mine: [ClientMessage] = [
+            .hello(Hello(token: "0123456789abcdef", clientName: "companion-mac")),
+            .request(RequestEnvelope(id: 1, request: .list(.all))),
+            .request(RequestEnvelope(id: 2, request: .send(
+                sessionId: "-Users-me-AI-companion", text: "Bitte den Stand melden."))),
+            .request(RequestEnvelope(id: 3, request: .read(
+                sessionId: "-Users-me-AI-companion", window: .tail(lines: 40)))),
+            .request(RequestEnvelope(id: 4, request: .stop(sessionId: "-Users-me-AI-companion"))),
+            .request(RequestEnvelope(id: 5, request: .capabilities(adapter: "workbench"))),
+            .request(RequestEnvelope(id: 6, request: .runGate(
+                sessionId: "-Users-me-AI-companion", gateIndex: 0))),
+        ]
+        XCTAssertEqual(mine.count, expected.count, "one fixture line per request the shell sends")
+
+        for (index, message) in mine.enumerated() {
+            let written = try JSONSerialization.jsonObject(with: try WireCodec.encode(message))
+            let golden = try JSONSerialization.jsonObject(with: expected[index])
+            XCTAssertEqual(
+                written as? NSDictionary, golden as? NSDictionary,
+                "line \(index + 1) does not match what the daemon expects")
+        }
+    }
+
+    func testListStaysThePlainRequestUntilTheDaemonLearnsTheOptions() throws {
+        let plain = try WireCodec.encode(.request(RequestEnvelope(id: 9, request: .list(.all))))
+        XCTAssertEqual(
+            try JSONSerialization.jsonObject(with: plain) as? NSDictionary,
+            ["type": "request", "id": 9, "request": "list"] as NSDictionary)
+
+        let narrowed = try WireCodec.encode(.request(RequestEnvelope(
+            id: 9, request: .list(ListOptions(runningOnly: true, doneLimit: 5)))))
+        XCTAssertEqual(
+            try JSONSerialization.jsonObject(with: narrowed) as? NSDictionary,
+            ["type": "request", "id": 9, "request": "list",
+             "running_only": true, "done_limit": 5] as NSDictionary)
+    }
+}

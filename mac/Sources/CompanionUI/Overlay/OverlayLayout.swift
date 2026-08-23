@@ -12,6 +12,7 @@ public struct OverlayLayout: Equatable, Sendable {
     public static let panelWidth: CGFloat = 340
     public static let chatHeight: CGFloat = 380
     public static let sessionsHeight: CGFloat = 300
+    public static let onboardingHeight: CGFloat = 430
     public static let spacing: CGFloat = 12
 
     /// Size of the overlay window.
@@ -22,19 +23,25 @@ public struct OverlayLayout: Equatable, Sendable {
     public let chatRect: CGRect?
     /// Session list, nil when collapsed.
     public let sessionsRect: CGRect?
+    /// Quick start, nil unless the first start is being answered.
+    public let onboardingRect: CGRect?
 
-    public var openPanelRects: [CGRect] { [chatRect, sessionsRect].compactMap { $0 } }
+    public var openPanelRects: [CGRect] {
+        [chatRect, sessionsRect, onboardingRect].compactMap { $0 }
+    }
 
     public static func compute(
         figureSize: CGFloat,
         corner: ScreenCorner,
         isChatOpen: Bool,
-        isSessionListOpen: Bool
+        isSessionListOpen: Bool,
+        isOnboardingOpen: Bool = false
     ) -> OverlayLayout {
         let width = max(figureSize, panelWidth)
         let chatBlock = isChatOpen ? chatHeight + spacing : 0
         let sessionsBlock = isSessionListOpen ? sessionsHeight + spacing : 0
-        let height = figureSize + chatBlock + sessionsBlock
+        let onboardingBlock = isOnboardingOpen ? onboardingHeight + spacing : 0
+        let height = figureSize + chatBlock + sessionsBlock + onboardingBlock
         let size = CGSize(width: width, height: height)
 
         let figureX = corner.isLeading ? 0 : width - figureSize
@@ -46,8 +53,16 @@ public struct OverlayLayout: Equatable, Sendable {
         var cursor = corner.isTop ? height - figureSize - spacing : figureSize + spacing
         var chatRect: CGRect?
         var sessionsRect: CGRect?
+        var onboardingRect: CGRect?
 
-        // Session list first: it is the overview, the chat is the conversation below it.
+        // The quick start sits closest to the figure: while it is open it is the only panel,
+        // and it is what the first start is about.
+        if isOnboardingOpen {
+            let y = corner.isTop ? cursor - onboardingHeight : cursor
+            onboardingRect = CGRect(x: 0, y: y, width: panelWidth, height: onboardingHeight)
+            cursor = corner.isTop ? y - spacing : cursor + onboardingHeight + spacing
+        }
+        // Session list next: it is the overview, the chat is the conversation below it.
         if isSessionListOpen {
             let y = corner.isTop ? cursor - sessionsHeight : cursor
             sessionsRect = CGRect(x: 0, y: y, width: panelWidth, height: sessionsHeight)
@@ -59,7 +74,8 @@ public struct OverlayLayout: Equatable, Sendable {
         }
 
         return OverlayLayout(
-            windowSize: size, figureRect: figureRect, chatRect: chatRect, sessionsRect: sessionsRect)
+            windowSize: size, figureRect: figureRect, chatRect: chatRect,
+            sessionsRect: sessionsRect, onboardingRect: onboardingRect)
     }
 
     /// Converts a rectangle from window coordinates to the top-left origin SwiftUI uses.

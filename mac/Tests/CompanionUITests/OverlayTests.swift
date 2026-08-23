@@ -98,78 +98,181 @@ final class OverlayLayoutTests: XCTestCase {
     }
 }
 
-final class SessionDecodingTests: XCTestCase {
-    func testReadsFieldsWithProvenance() {
-        let payload = JSONValue.object(["sessions": .array([
-            .object([
-                "id": .string("wb-1"),
-                "name": .object(["value": .string("orchestrator"), "provenance": .string("measured")]),
-                "project": .object(["value": .string("companion"), "provenance": .string("estimated")]),
-                "activity": .object(["value": .string("busy"), "provenance": .string("measured")]),
-            ])
-        ])])
-        let sessions = SessionDecoding.sessions(from: payload)
-        XCTAssertEqual(sessions.count, 1)
-        XCTAssertEqual(sessions[0].name.display, "orchestrator")
-        XCTAssertEqual(sessions[0].project.display, "companion (geschaetzt)")
-        XCTAssertEqual(sessions[0].activity, .busy)
+final class SessionSnapshotTests: XCTestCase {
+    private func status(
+        id: String = "-Users-me-AI-companion",
+        state: SessionState = .idle,
+        project: String? = "/Users/me/AI/companion",
+        model: Provenance<String> = .unknown,
+        question: String? = nil
+    ) -> SessionStatus {
+        SessionStatus(
+            id: id, adapter: "workbench", project: project, model: model, state: state,
+            openQuestion: question)
     }
 
-    func testAcceptsBareStrings() {
-        let payload = JSONValue.object(["sessions": .array([
-            .object(["id": .string("a"), "name": .string("x"), "activity": .string("idle")])
-        ])])
-        let sessions = SessionDecoding.sessions(from: payload)
-        XCTAssertEqual(sessions[0].name.display, "x")
-        XCTAssertEqual(sessions[0].activity, .idle)
+    func testTitleFallsBackFromWorkerToProjectToId() {
+        XCTAssertEqual(SessionSnapshot(status(id: "-Users-me-AI-companion#mac-int")).title, "mac-int")
+        XCTAssertEqual(SessionSnapshot(status()).title, "companion")
+        XCTAssertEqual(SessionSnapshot(status(id: "cc-1", project: nil)).title, "cc-1")
     }
 
-    func testMissingFieldsReadAsUnknownNeverAsEmpty() {
-        let payload = JSONValue.object(["sessions": .array([.object(["id": .string("a")])])])
-        let session = SessionDecoding.sessions(from: payload)[0]
-        XCTAssertEqual(session.name.display, "unbekannt")
-        XCTAssertEqual(session.project.display, "unbekannt")
-        XCTAssertEqual(session.activity, .unknown)
-        XCTAssertEqual(session.activityDisplay, "unbekannt")
-        XCTAssertFalse(session.name.isKnown)
+    func testUnknownFieldsReadAsUnknownNeverAsEmpty() {
+        let snapshot = SessionSnapshot(status(project: nil))
+        XCTAssertEqual(snapshot.projectDisplay, "unbekannt")
+        XCTAssertEqual(snapshot.modelDisplay, "unbekannt")
+        XCTAssertEqual(snapshot.contextDisplay, "unbekannt")
+        XCTAssertEqual(snapshot.budgetDisplay, "unbekannt")
     }
 
-    func testUnknownActivityNameDoesNotBecomeAGuess() {
-        let payload = JSONValue.object(["sessions": .array([
-            .object(["id": .string("a"), "activity": .string("compacting")])
-        ])])
-        let session = SessionDecoding.sessions(from: payload)[0]
-        XCTAssertEqual(session.activity, .unknown)
-        XCTAssertEqual(session.activityProvenance, .unknown)
+    func testAnEstimateSaysThatItIsOne() {
+        let snapshot = SessionSnapshot(status(model: .estimated("claude-opus-5")))
+        XCTAssertEqual(snapshot.modelDisplay, "claude-opus-5 (geschaetzt)")
     }
 
-    func testRowWithoutAnIdIsDropped() {
-        let payload = JSONValue.object(["sessions": .array([
-            .object(["name": .string("nameless")]),
-            .object(["id": .string("a")]),
-        ])])
-        XCTAssertEqual(SessionDecoding.sessions(from: payload).count, 1)
+    func testAStateThisShellDoesNotKnowStaysUnknown() {
+        var raw = status()
+        raw.state = SessionState(rawValue: "compacting")
+        let snapshot = SessionSnapshot(raw)
+        XCTAssertEqual(snapshot.stateLabel, "unbekannt")
+        XCTAssertFalse(snapshot.isRunning, "an unknown state must not count as running")
+        XCTAssertNotNil(snapshot.badgeSymbol, "colour alone must not carry the meaning")
     }
 
-    func testEmptyAndMalformedPayloads() {
-        XCTAssertTrue(SessionDecoding.sessions(from: .object([:])).isEmpty)
-        XCTAssertTrue(SessionDecoding.sessions(from: .string("nope")).isEmpty)
-        XCTAssertTrue(SessionDecoding.sessions(from: .object(["sessions": .string("nope")])).isEmpty)
+    func testAnOpenQuestionOutranksTheState() {
+        let snapshot = SessionSnapshot(status(state: .busy, question: "Soll ich pushen?"))
+        XCTAssertEqual(snapshot.activityDisplay, "Frage offen")
+        XCTAssertTrue(snapshot.needsAttention)
     }
 
-    func testAttentionStates() {
-        XCTAssertTrue(SessionActivity.questionOpen.needsAttention)
-        XCTAssertTrue(SessionActivity.error.needsAttention)
-        XCTAssertFalse(SessionActivity.busy.needsAttention)
-        XCTAssertNotNil(SessionActivity.unknown.badgeSymbol, "colour alone must not carry the meaning")
+    func testErrorNeedsAttentionAndBusyDoesNot() {
+        XCTAssertTrue(SessionSnapshot(status(state: .error)).needsAttention)
+        XCTAssertFalse(SessionSnapshot(status(state: .busy)).needsAttention)
     }
 
-    func testFigureEventMapping() {
-        XCTAssertEqual(SessionDecoding.figureEvent(from: .object(["event": .string("busy")])), .workStarted)
+    func testProjectPathIsShortenedForTheRow() {
+        let home = NSHomeDirectory()
+        let snapshot = SessionSnapshot(status(project: home + "/AI/companion"))
+        XCTAssertEqual(snapshot.projectDisplay, "~/AI/companion")
+    }
+
+    func testContextIsPrintedAsPercent() {
+        var raw = status()
+        raw.context = .measured(ContextUsage(usedFraction: 0.42, usedTokens: 84_000))
+        XCTAssertEqual(SessionSnapshot(raw).contextDisplay, "42 Prozent")
+        raw.context = .estimated(ContextUsage(usedFraction: 0.615))
+        XCTAssertEqual(SessionSnapshot(raw).contextDisplay, "62 Prozent (geschaetzt)")
+    }
+}
+
+final class EventMappingTests: XCTestCase {
+    func testFigureEvents() {
+        XCTAssertEqual(EventMapping.figureEvent(for: .busy), .workStarted)
+        XCTAssertEqual(EventMapping.figureEvent(for: .idle), .workFinished)
         XCTAssertEqual(
-            SessionDecoding.figureEvent(from: .object(["event": .string("question_open")])),
+            EventMapping.figureEvent(for: .questionOpen(questionId: "q", question: "?")),
             .attentionRequired)
-        XCTAssertNil(SessionDecoding.figureEvent(from: .object(["event": .string("brand_new")])))
-        XCTAssertNil(SessionDecoding.figureEvent(from: .object([:])))
+        XCTAssertEqual(EventMapping.figureEvent(for: .error(message: "x")), .attentionRequired)
+        XCTAssertNil(EventMapping.figureEvent(for: .unrecognised(kind: "brand_new")))
+        XCTAssertNil(EventMapping.figureEvent(for: .iteration(iteration: .measured(2))))
+    }
+
+    func testStatesAnEventImplies() {
+        XCTAssertEqual(EventMapping.state(for: .busy), .busy)
+        XCTAssertEqual(EventMapping.state(for: .waitingForInput(hint: nil)), .waiting)
+        XCTAssertEqual(EventMapping.state(for: .done(summary: nil, resultPath: nil)), .done)
+        XCTAssertNil(EventMapping.state(for: .contextLevel(context: .unknown)))
+    }
+
+    func testChatLinesAreWrittenForWhatAPersonHasToRead() {
+        XCTAssertEqual(
+            EventMapping.chatLine(for: .error(message: "tmux weg"), session: "mac-int"),
+            "Fehler in mac-int: tmux weg")
+        XCTAssertNil(EventMapping.chatLine(for: .busy, session: "mac-int"))
+        XCTAssertNil(EventMapping.chatLine(for: .unrecognised(kind: "brand_new"), session: "x"))
+        let done = EventMapping.chatLine(
+            for: .done(summary: "fertig", resultPath: "/tmp/r.md"), session: "mac-int")
+        XCTAssertEqual(done, "Die Session mac-int meldet ihre Arbeit als fertig. fertig Ergebnisdatei: /tmp/r.md")
+    }
+}
+
+@MainActor
+final class SessionOrderTests: XCTestCase {
+    func testQuestionsComeFirstThenRunningThenByName() {
+        let sessions = [
+            SessionSnapshot(SessionStatus(id: "z-done", adapter: "workbench", state: .done)),
+            SessionSnapshot(SessionStatus(id: "a-busy", adapter: "workbench", state: .busy)),
+            SessionSnapshot(SessionStatus(
+                id: "m-question", adapter: "workbench", state: .idle,
+                openQuestion: "Soll ich?")),
+        ]
+        XCTAssertEqual(CompanionShell.sorted(sessions).map(\.id), ["m-question", "a-busy", "z-done"])
+    }
+}
+
+@MainActor
+final class OverlayModelTests: XCTestCase {
+    func testOpenQuestionsAndStatusesAreCountedOnce() {
+        let model = OverlayModel()
+        model.sessions = [SessionSnapshot(SessionStatus(
+            id: "s1", adapter: "workbench", state: .waiting, openQuestion: "Soll ich?"))]
+        model.openQuestions = [OpenQuestion(sessionId: "s1", questionId: "q1", text: "Soll ich?")]
+        XCTAssertEqual(model.openQuestionCount, 1)
+
+        model.openQuestions.append(OpenQuestion(sessionId: "s2", questionId: "q2", text: "Und?"))
+        XCTAssertEqual(model.openQuestionCount, 2, "a question about a session not in the list still counts")
+    }
+
+    func testTheQuestionToAnswerFollowsTheSelection() {
+        let model = OverlayModel()
+        model.openQuestions = [
+            OpenQuestion(sessionId: "s1", questionId: "q1", text: "eins"),
+            OpenQuestion(sessionId: "s2", questionId: "q2", text: "zwei"),
+        ]
+        XCTAssertEqual(model.questionToAnswer?.questionId, "q2")
+        model.selectedSessionId = "s1"
+        XCTAssertEqual(model.questionToAnswer?.questionId, "q1")
+    }
+
+    func testTitleOfAnUnknownSessionIsItsId() {
+        let model = OverlayModel()
+        XCTAssertEqual(model.title(forSessionId: "s9"), "s9")
+        XCTAssertEqual(model.title(forSessionId: nil), "unbekannte Session")
+    }
+}
+
+final class OnboardingSettingsTests: XCTestCase {
+    private var suite: String!
+    private var defaults: UserDefaults!
+
+    override func setUp() {
+        super.setUp()
+        suite = "de.skryx.companion.tests.\(UUID().uuidString.prefix(8))"
+        defaults = UserDefaults(suiteName: suite)
+    }
+
+    override func tearDown() {
+        defaults.removePersistentDomain(forName: suite)
+        super.tearDown()
+    }
+
+    @MainActor
+    func testDefaultsAreTheSparingOnesAndSurviveARestart() {
+        let settings = AppSettings(defaults: defaults)
+        XCTAssertFalse(settings.hasCompletedOnboarding)
+        XCTAssertEqual(settings.workMode, .singleAgents)
+        XCTAssertEqual(settings.voiceTrigger, .pushToTalk)
+        XCTAssertNil(settings.defaultModelTool)
+
+        settings.workMode = .orchestrator
+        settings.voiceTrigger = .wakeword
+        settings.defaultModelTool = "claude"
+        settings.hasCompletedOnboarding = true
+
+        let reopened = AppSettings(defaults: defaults)
+        XCTAssertTrue(reopened.hasCompletedOnboarding)
+        XCTAssertEqual(reopened.workMode, .orchestrator)
+        XCTAssertEqual(reopened.voiceTrigger, .wakeword)
+        XCTAssertEqual(reopened.defaultModelTool, "claude")
     }
 }

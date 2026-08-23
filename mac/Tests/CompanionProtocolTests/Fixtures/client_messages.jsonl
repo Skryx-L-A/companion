@@ -1,0 +1,7 @@
+{"type":"hello","protocol_version":1,"token":"0123456789abcdef","client_name":"companion-mac"}
+{"type":"request","id":1,"request":"list"}
+{"type":"request","id":2,"request":"send","session_id":"-Users-me-AI-companion","text":"Bitte den Stand melden."}
+{"type":"request","id":3,"request":"read","session_id":"-Users-me-AI-companion","window":{"kind":"tail","lines":40}}
+{"type":"request","id":4,"request":"stop","session_id":"-Users-me-AI-companion"}
+{"type":"request","id":5,"request":"capabilities","adapter":"workbench"}
+{"type":"request","id":6,"request":"run_gate","session_id":"-Users-me-AI-companion","gate_index":0}

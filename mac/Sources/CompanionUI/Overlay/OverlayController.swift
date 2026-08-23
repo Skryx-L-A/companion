@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import AppKit
+import CompanionProtocol
 import SwiftUI
 
 /// Owns the overlay window: places it, animates the figure, and decides for every mouse
@@ -23,6 +24,8 @@ public final class OverlayController {
 
     /// Called when the human types a line in the chat panel.
     public var onSubmit: ((String) -> Void)?
+    /// Called when the human answers a question a session asked.
+    public var onAnswer: ((OpenQuestion, String) -> Void)?
 
     public init(settings: AppSettings, spriteFolder: URL? = SpriteSet.defaultFolder) {
         self.settings = settings
@@ -30,7 +33,7 @@ public final class OverlayController {
         self.machine = FigureStateMachine()
         self.layout = OverlayLayout.compute(
             figureSize: settings.figureSize, corner: settings.corner,
-            isChatOpen: false, isSessionListOpen: false)
+            isChatOpen: false, isSessionListOpen: false, isOnboardingOpen: false)
     }
 
     // MARK: - Lifecycle
@@ -121,6 +124,9 @@ public final class OverlayController {
     }
 
     public func closePanels() {
+        // The quick start is not closed by a click elsewhere: it is answered or skipped, and
+        // both of those write something. Escape reaching it would leave the person wondering
+        // whether the answers were kept.
         guard model.isChatOpen || model.isSessionListOpen else { return }
         model.isChatOpen = false
         model.isSessionListOpen = false
@@ -131,9 +137,59 @@ public final class OverlayController {
     public func submit(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        model.messages.append(ChatMessage(author: .human, text: trimmed))
         apply(.userActivity)
         onSubmit?(trimmed)
+    }
+
+    public func answer(_ question: OpenQuestion, with text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        apply(.userActivity)
+        onAnswer?(question, trimmed)
+    }
+
+    /// Picks the session the chat panel talks to. Picking the same row again keeps it
+    /// selected: a click must not silently move the target away from where the person looks.
+    public func selectSession(_ id: SessionId) {
+        model.selectedSessionId = id
+        apply(.userActivity)
+    }
+
+    // MARK: - Quick start
+
+    /// Opens the quick start. The other panels close: three questions are the whole screen
+    /// while they are open.
+    public func startOnboarding() {
+        model.isChatOpen = false
+        model.isSessionListOpen = false
+        model.isOnboardingOpen = true
+        relayout()
+        panel?.makeKeyAndOrderFront(nil)
+        ToolDetection.detectInBackground { [weak self] tools in
+            guard let self else { return }
+            self.model.detectedTools = tools
+            // The list arrives after the panel is on screen, so the view is rebuilt with it.
+            self.relayout()
+        }
+    }
+
+    public func finishOnboarding() {
+        settings.hasCompletedOnboarding = true
+        closeOnboarding()
+    }
+
+    /// Leaving early keeps whatever was already picked and marks the quick start as done, so
+    /// it does not ask again on every start. Everything unanswered stays on its default.
+    public func skipOnboarding() {
+        settings.hasCompletedOnboarding = true
+        closeOnboarding()
+    }
+
+    private func closeOnboarding() {
+        guard model.isOnboardingOpen else { return }
+        model.isOnboardingOpen = false
+        panel?.makeFirstResponder(nil)
+        relayout()
     }
 
     // MARK: - Figure state
@@ -192,7 +248,8 @@ public final class OverlayController {
             figureSize: settings.figureSize,
             corner: settings.corner,
             isChatOpen: model.isChatOpen,
-            isSessionListOpen: model.isSessionListOpen)
+            isSessionListOpen: model.isSessionListOpen,
+            isOnboardingOpen: model.isOnboardingOpen)
         guard let panel else { return }
         let screen = panel.screen ?? NSScreen.main
         let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)

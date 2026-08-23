@@ -17,6 +17,10 @@ public final class AppSettings {
         static let figureVisible = "overlay.figureVisible"
         static let hideDuringScreenCapture = "overlay.hideDuringScreenCapture"
         static let figureSize = "overlay.figureSize"
+        static let onboardingDone = "onboarding.completed"
+        static let workMode = "onboarding.workMode"
+        static let defaultModelTool = "onboarding.defaultModelTool"
+        static let voiceTrigger = "onboarding.voiceTrigger"
     }
 
     public var corner: ScreenCorner {
@@ -37,6 +41,28 @@ public final class AppSettings {
         didSet { defaults.set(Double(figureSize), forKey: Key.figureSize) }
     }
 
+    /// True once the quick start has been answered or skipped. Its absence is what makes a
+    /// start the first one; the shell owns this mark, not the daemon.
+    public var hasCompletedOnboarding: Bool {
+        didSet { defaults.set(hasCompletedOnboarding, forKey: Key.onboardingDone) }
+    }
+
+    /// Quick start, question one. The default is the sparing one, per DESIGN.md Grundprinzip.
+    public var workMode: WorkMode {
+        didSet { defaults.set(workMode.rawValue, forKey: Key.workMode) }
+    }
+
+    /// Quick start, question two: the harness a new session uses unless something says
+    /// otherwise. Nil means the person connected none.
+    public var defaultModelTool: String? {
+        didSet { defaults.set(defaultModelTool, forKey: Key.defaultModelTool) }
+    }
+
+    /// Quick start, question three. Voice arrives in phase 1b; only the answer is kept.
+    public var voiceTrigger: VoiceTrigger {
+        didSet { defaults.set(voiceTrigger.rawValue, forKey: Key.voiceTrigger) }
+    }
+
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let storedCorner = defaults.string(forKey: Key.corner).flatMap(ScreenCorner.init(rawValue:))
@@ -45,5 +71,10 @@ public final class AppSettings {
         hideDuringScreenCapture = defaults.bool(forKey: Key.hideDuringScreenCapture)
         let storedSize = defaults.object(forKey: Key.figureSize) as? Double
         figureSize = CGFloat(storedSize ?? 104)
+        hasCompletedOnboarding = defaults.bool(forKey: Key.onboardingDone)
+        workMode = defaults.string(forKey: Key.workMode).flatMap(WorkMode.init(rawValue:)) ?? .singleAgents
+        defaultModelTool = defaults.string(forKey: Key.defaultModelTool)
+        voiceTrigger = defaults.string(forKey: Key.voiceTrigger)
+            .flatMap(VoiceTrigger.init(rawValue:)) ?? .pushToTalk
     }
 }

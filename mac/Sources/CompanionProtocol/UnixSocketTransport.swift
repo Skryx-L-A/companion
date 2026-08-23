@@ -5,15 +5,16 @@ import Foundation
 
 /// Newline-delimited JSON over a Unix domain socket.
 ///
-/// All socket work runs on one private serial queue; handlers are called on the delivery queue
-/// the caller passes in. Messages are small control frames, so the write path blocks on that
+/// The transport knows about lines, not about messages: `DaemonClient` decodes. All socket
+/// work runs on one private serial queue; handlers are called on the delivery queue the
+/// caller passes in. Messages are small control frames, so the write path blocks on that
 /// private queue instead of buffering.
 public final class UnixSocketTransport: @unchecked Sendable {
     public enum State: Sendable, Equatable {
         case idle
         case connected
         case closed
-        case failed(ProtocolError)
+        case failed(TransportError)
     }
 
     private let queue = DispatchQueue(label: "companion.protocol.transport")
@@ -23,7 +24,7 @@ public final class UnixSocketTransport: @unchecked Sendable {
     private var framer = LineFramer()
     private var state: State = .idle
 
-    private var envelopeHandler: (@Sendable (Envelope) -> Void)?
+    private var lineHandler: (@Sendable (Data) -> Void)?
     private var stateHandler: (@Sendable (State) -> Void)?
 
     public init(deliveryQueue: DispatchQueue = .main) {
@@ -34,10 +35,9 @@ public final class UnixSocketTransport: @unchecked Sendable {
         if descriptor >= 0 { Darwin.close(descriptor) }
     }
 
-    /// Called for every decoded envelope. A line that does not decode is dropped and reported
-    /// as a `decode_error` envelope so the shell can show that the daemon speaks something else.
-    public func onEnvelope(_ handler: @escaping @Sendable (Envelope) -> Void) {
-        queue.async { self.envelopeHandler = handler }
+    /// Called for every complete line, without its newline.
+    public func onLine(_ handler: @escaping @Sendable (Data) -> Void) {
+        queue.async { self.lineHandler = handler }
     }
 
     public func onStateChange(_ handler: @escaping @Sendable (State) -> Void) {
@@ -48,11 +48,14 @@ public final class UnixSocketTransport: @unchecked Sendable {
         queue.async { self.connectOnQueue(path) }
     }
 
-    public func send(_ envelope: Envelope) {
+    /// Writes one line. The newline is added here, so no caller can forget it and merge two
+    /// messages into one.
+    public func send(line: Data) {
         queue.async {
             guard self.descriptor >= 0, case .connected = self.state else { return }
-            guard let data = try? EnvelopeCodec.encode(envelope) else { return }
-            data.withUnsafeBytes { raw in
+            var payload = line
+            payload.append(0x0A)
+            payload.withUnsafeBytes { raw in
                 var offset = 0
                 while offset < raw.count {
                     let written = Darwin.write(
@@ -140,24 +143,16 @@ public final class UnixSocketTransport: @unchecked Sendable {
         let lines: [Data]
         do {
             lines = try framer.push(Data(chunk[0..<count]))
-        } catch let error as ProtocolError {
+        } catch let error as TransportError {
             failOnQueue(error)
             return
         } catch {
             failOnQueue(.notConnected)
             return
         }
-        guard let handler = envelopeHandler else { return }
+        guard let handler = lineHandler else { return }
         for line in lines {
-            let envelope: Envelope
-            if let decoded = try? EnvelopeCodec.decode(line) {
-                envelope = decoded
-            } else {
-                envelope = Envelope(kind: "decode_error", payload: .object([
-                    "bytes": .number(Double(line.count))
-                ]))
-            }
-            deliveryQueue.async { handler(envelope) }
+            deliveryQueue.async { handler(line) }
         }
     }
 
@@ -173,7 +168,7 @@ public final class UnixSocketTransport: @unchecked Sendable {
         }
     }
 
-    private func failOnQueue(_ error: ProtocolError) {
+    private func failOnQueue(_ error: TransportError) {
         readSource?.cancel()
         readSource = nil
         descriptor = -1

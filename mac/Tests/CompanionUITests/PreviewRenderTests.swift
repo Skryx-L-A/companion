@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import AppKit
+import CompanionProtocol
 import SwiftUI
 import XCTest
 
@@ -57,14 +58,19 @@ final class PreviewRenderTests: XCTestCase {
         let model = OverlayModel()
         model.isDaemonReady = true
         model.sessions = [
-            SessionSnapshot(
-                id: "1", name: Field("orchestrator"), project: Field("companion"),
-                activity: .busy, activityProvenance: .measured),
-            SessionSnapshot(
-                id: "2", name: Field("mac-shell"), project: Field("companion", .estimated),
-                activity: .questionOpen, activityProvenance: .measured),
-            SessionSnapshot(id: "3", name: Field("claude pur"), project: .unknown),
+            SessionSnapshot(SessionStatus(
+                id: "-Users-me-AI-companion", adapter: "workbench",
+                project: "/Users/me/AI/companion",
+                model: .measured("claude-opus-5"), state: .busy,
+                context: .measured(ContextUsage(usedFraction: 0.42)))),
+            SessionSnapshot(SessionStatus(
+                id: "-Users-me-AI-companion#mac-int", adapter: "workbench",
+                project: "/Users/me/.pi-workers/worktrees/mac-int",
+                model: .estimated("claude-opus-5"), state: .waiting,
+                openQuestion: "Soll die Liste beendete Sessions weiter zeigen?")),
+            SessionSnapshot(SessionStatus(id: "claude-pur-1", adapter: "claude-code", state: .idle)),
         ]
+        model.selectedSessionId = model.sessions.first?.id
         let view = SessionListView(model: model, onClose: {})
             .frame(width: OverlayLayout.panelWidth, height: OverlayLayout.sessionsHeight)
             .padding(24)
@@ -92,6 +98,14 @@ final class PreviewRenderTests: XCTestCase {
     func testRendersChatPanel() throws {
         let model = OverlayModel()
         model.isDaemonReady = true
+        model.sessions = [SessionSnapshot(SessionStatus(
+            id: "-Users-me-AI-companion#mac-int", adapter: "workbench",
+            project: "/Users/me/.pi-workers/worktrees/mac-int", state: .waiting,
+            openQuestion: "Soll ich den Zweig pushen?"))]
+        model.selectedSessionId = model.sessions.first?.id
+        model.openQuestions = [OpenQuestion(
+            sessionId: "-Users-me-AI-companion#mac-int", questionId: "q-1",
+            text: "Soll ich den Zweig pushen?")]
         model.messages = [
             ChatMessage(author: .human, text: "Wie steht es um die beiden Sessions?"),
             ChatMessage(author: .companion, text: "Eine arbeitet, eine wartet auf eine Antwort zur Ecke des Overlays."),
@@ -109,10 +123,11 @@ final class PreviewRenderTests: XCTestCase {
         let model = OverlayModel()
         model.isDaemonReady = true
         model.sessions = [
-            SessionSnapshot(
-                id: "1", name: Field("orchestrator"), project: Field("companion"),
-                activity: .questionOpen, activityProvenance: .measured),
-            SessionSnapshot(id: "2", name: .unknown, project: .unknown),
+            SessionSnapshot(SessionStatus(
+                id: "-Users-me-AI-companion", adapter: "workbench",
+                project: "/Users/me/AI/companion", state: .waiting,
+                openQuestion: "Soll ich den Zweig pushen?")),
+            SessionSnapshot(SessionStatus(id: "cc-1", adapter: "claude-code", state: .idle)),
         ]
         let view = SessionListView(model: model, onClose: {})
             .frame(width: OverlayLayout.panelWidth, height: OverlayLayout.sessionsHeight)
@@ -128,11 +143,10 @@ final class PreviewRenderTests: XCTestCase {
         let model = OverlayModel()
         model.isDaemonReady = true
         model.sessions = [
-            SessionSnapshot(
-                id: "1", name: Field("orchestrator"), project: Field("companion"),
-                activity: .busy, activityProvenance: .measured),
-            SessionSnapshot(id: "2", name: Field("mac-shell"), project: .unknown, activity: .error,
-                            activityProvenance: .measured),
+            SessionSnapshot(SessionStatus(
+                id: "-Users-me-AI-companion", adapter: "workbench",
+                project: "/Users/me/AI/companion", state: .busy)),
+            SessionSnapshot(SessionStatus(id: "mac-shell", adapter: "workbench", state: .error)),
         ]
         model.messages = [ChatMessage(author: .companion, text: "Zwei Sessions laufen.")]
 
@@ -148,6 +162,29 @@ final class PreviewRenderTests: XCTestCase {
         try render(
             view, size: CGSize(width: 752, height: 348), to: "panels-light.png",
             appearance: NSAppearance(named: .aqua))
+    }
+
+    /// The quick start, all three steps in one sheet, so the wording and the spacing can be
+    /// looked at without clicking through a first start.
+    func testRendersOnboardingSteps() throws {
+        let suite = "de.skryx.companion.preview.\(UUID().uuidString.prefix(8))"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = AppSettings(defaults: defaults)
+        let tools = [
+            DetectedTool(name: "claude", displayName: "Claude Code", path: "/opt/homebrew/bin/claude"),
+            DetectedTool(name: "codex", displayName: "Codex CLI", path: nil),
+            DetectedTool(name: "ollama", displayName: "Ollama", path: "/usr/local/bin/ollama"),
+        ]
+        let view = OnboardingView(settings: settings, tools: tools, onFinish: {}, onSkip: {})
+            .frame(width: OverlayLayout.panelWidth, height: OverlayLayout.onboardingHeight)
+            .padding(24)
+            .background(Color(nsColor: .underPageBackgroundColor))
+        try render(
+            view,
+            size: CGSize(
+                width: OverlayLayout.panelWidth + 48, height: OverlayLayout.onboardingHeight + 48),
+            to: "onboarding.png")
     }
 
     // MARK: - Helper

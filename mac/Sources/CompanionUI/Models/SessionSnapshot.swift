@@ -1,124 +1,162 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import CompanionProtocol
 import Foundation
 import SwiftUI
 
-/// Where a value came from. Every field the daemon reports carries one, per DESIGN.md,
-/// section Session-Adapter.
-public enum Provenance: String, Sendable, Codable {
-    case measured
-    case estimated
-    case unknown
-}
+/// One row of the session list: the status the daemon sent, plus what the panel prints for it.
+///
+/// The wire type is kept whole instead of being copied field by field. A field the adapter
+/// could not fill arrives as `Provenance.unknown` and prints as "unbekannt"; an estimate says
+/// that it is one. Nothing here fills a gap with a plausible value.
+public struct SessionSnapshot: Sendable, Equatable, Identifiable {
+    public static let unknownText = "unbekannt"
 
-/// A value plus where it came from. A field with no value is shown as "unbekannt", never as
-/// an empty line and never as zero.
-public struct Field<Value: Sendable & Equatable>: Sendable, Equatable {
-    public var value: Value?
-    public var provenance: Provenance
+    public var status: SessionStatus
 
-    public init(_ value: Value?, _ provenance: Provenance = .measured) {
-        self.value = value
-        self.provenance = value == nil ? .unknown : provenance
+    public init(_ status: SessionStatus) {
+        self.status = status
     }
 
-    public static var unknown: Field<Value> { Field(nil, .unknown) }
+    public var id: SessionId { status.id }
 
-    public var isKnown: Bool { value != nil && provenance != .unknown }
-}
-
-extension Field where Value == String {
-    /// What the session list prints. Estimated values are marked so a guess never reads as fact.
-    public var display: String {
-        guard let value, !value.isEmpty else { return "unbekannt" }
-        return provenance == .estimated ? "\(value) (geschaetzt)" : value
+    /// Name of the row. Derived from what the daemon sent and never invented: the worker
+    /// part of a workbench id, otherwise the last component of the project path, otherwise
+    /// the id itself.
+    public var title: String {
+        if let worker = status.id.split(separator: "#", maxSplits: 1).last,
+           status.id.contains("#"), !worker.isEmpty {
+            return String(worker)
+        }
+        if let project = status.project, let last = project.split(separator: "/").last,
+           !last.isEmpty {
+            return String(last)
+        }
+        return status.id
     }
-}
 
-/// What a session is doing. `unknown` is a real case, not a missing one: an adapter that
-/// cannot report the state says so.
-public enum SessionActivity: String, Sendable, CaseIterable {
-    case idle
-    case busy
-    case waitingForInput
-    case questionOpen
-    case done
-    case error
-    case unknown
+    /// Project path with the home directory shortened, or "unbekannt".
+    public var projectDisplay: String {
+        guard let project = status.project, !project.isEmpty else { return Self.unknownText }
+        return (project as NSString).abbreviatingWithTildeInPath
+    }
 
-    public var label: String {
-        switch self {
-        case .idle: return "bereit"
+    public var adapterDisplay: String { status.adapter }
+
+    public var machineDisplay: String {
+        status.machine.isEmpty ? Self.unknownText : status.machine
+    }
+
+    public var modelDisplay: String { Self.display(status.model) }
+
+    public var stateLabel: String {
+        switch status.state {
         case .busy: return "arbeitet"
-        case .waitingForInput: return "wartet auf Eingabe"
-        case .questionOpen: return "Frage offen"
+        case .idle: return "bereit"
+        case .waiting: return "wartet auf Eingabe"
         case .done: return "fertig"
         case .error: return "Fehler"
-        case .unknown: return "unbekannt"
+        // A state this shell does not know is shown as unknown, never as one it does know.
+        case .unrecognised: return Self.unknownText
+        }
+    }
+
+    /// What the row prints under the name. An open question outranks the state, because that
+    /// is what the person has to act on.
+    public var activityDisplay: String {
+        hasOpenQuestion ? "Frage offen" : stateLabel
+    }
+
+    public var hasOpenQuestion: Bool {
+        guard let question = status.openQuestion else { return false }
+        return !question.isEmpty
+    }
+
+    /// The states that make the figure raise its hand.
+    public var needsAttention: Bool {
+        hasOpenQuestion || status.state == .error
+    }
+
+    public var isRunning: Bool {
+        switch status.state {
+        case .busy, .idle, .waiting: return true
+        case .done, .error, .unrecognised: return false
+        }
+    }
+
+    /// Share of the context window, marked as an estimate when it is one.
+    public var contextDisplay: String {
+        switch status.context {
+        case .measured(let usage): return Self.percent(usage.usedFraction)
+        case .estimated(let usage): return "\(Self.percent(usage.usedFraction)) (geschaetzt)"
+        case .unknown: return Self.unknownText
+        }
+    }
+
+    public var budgetDisplay: String {
+        switch status.budget {
+        case .measured(let usage): return Self.percent(usage.usedFraction)
+        case .estimated(let usage): return "\(Self.percent(usage.usedFraction)) (geschaetzt)"
+        case .unknown: return Self.unknownText
         }
     }
 
     /// Colour of the status dot. Never the only signal: the label next to it says the same
-    /// thing in words, and the dot carries a distinct shape for the two states that matter.
+    /// thing in words, and the dot carries a distinct shape for the states that matter.
     public var tint: Color {
-        switch self {
-        case .idle: return Color(nsColor: .systemGray)
+        if hasOpenQuestion { return Color(red: 0.910, green: 0.639, blue: 0.239) }
+        switch status.state {
         case .busy: return Color(red: 0.204, green: 0.753, blue: 0.663)
-        case .waitingForInput, .questionOpen: return Color(red: 0.910, green: 0.639, blue: 0.239)
+        case .idle: return Color(nsColor: .systemGray)
+        case .waiting: return Color(red: 0.910, green: 0.639, blue: 0.239)
         case .done: return Color(nsColor: .systemGreen)
         case .error: return Color(nsColor: .systemRed)
-        case .unknown: return Color(nsColor: .tertiaryLabelColor)
+        case .unrecognised: return Color(nsColor: .tertiaryLabelColor)
         }
     }
 
     /// SF Symbol drawn inside the dot for the states a user must not miss. Shape, not colour,
     /// carries the meaning for anyone who cannot tell the two apart.
     public var badgeSymbol: String? {
-        switch self {
-        case .questionOpen, .waitingForInput: return "questionmark"
+        if hasOpenQuestion { return "questionmark" }
+        switch status.state {
+        case .waiting, .unrecognised: return "questionmark"
         case .error: return "exclamationmark"
-        case .unknown: return "questionmark"
         default: return nil
         }
     }
 
-    /// The states that make the figure raise its hand.
-    public var needsAttention: Bool { self == .questionOpen || self == .error }
-}
-
-/// One row of the session list.
-public struct SessionSnapshot: Sendable, Equatable, Identifiable {
-    public var id: String
-    public var name: Field<String>
-    public var project: Field<String>
-    public var activity: SessionActivity
-    public var activityProvenance: Provenance
-    public var harness: Field<String>
-
-    public init(
-        id: String,
-        name: Field<String> = .unknown,
-        project: Field<String> = .unknown,
-        activity: SessionActivity = .unknown,
-        activityProvenance: Provenance = .unknown,
-        harness: Field<String> = .unknown
-    ) {
-        self.id = id
-        self.name = name
-        self.project = project
-        self.activity = activity
-        self.activityProvenance = activityProvenance
-        self.harness = harness
-    }
-
-    public var activityDisplay: String {
-        activityProvenance == .estimated ? "\(activity.label) (geschaetzt)" : activity.label
-    }
-
     /// One line for VoiceOver, so the row is read as a sentence instead of four fragments.
     public var accessibilityDescription: String {
-        "\(name.display), Projekt \(project.display), \(activityDisplay)"
+        "\(title), Projekt \(projectDisplay), \(activityDisplay), Modell \(modelDisplay)"
     }
+
+    static func display(_ provenance: Provenance<String>) -> String {
+        switch provenance {
+        case .measured(let value): return value.isEmpty ? unknownText : value
+        case .estimated(let value): return value.isEmpty ? unknownText : "\(value) (geschaetzt)"
+        case .unknown: return unknownText
+        }
+    }
+
+    static func percent(_ fraction: Double) -> String {
+        "\(Int((fraction * 100).rounded())) Prozent"
+    }
+}
+
+/// A question a session is blocked on, with the id an answer has to be routed back to.
+public struct OpenQuestion: Sendable, Equatable, Identifiable {
+    public var sessionId: SessionId
+    public var questionId: String
+    public var text: String
+
+    public init(sessionId: SessionId, questionId: String, text: String) {
+        self.sessionId = sessionId
+        self.questionId = questionId
+        self.text = text
+    }
+
+    public var id: String { "\(sessionId)/\(questionId)" }
 }
 
 /// A line in the chat panel.
@@ -133,11 +171,20 @@ public struct ChatMessage: Sendable, Equatable, Identifiable {
     public var author: Author
     public var text: String
     public var timestamp: Date
+    /// The session the line belongs to, when it came from or went to one.
+    public var sessionId: SessionId?
 
-    public init(id: UUID = UUID(), author: Author, text: String, timestamp: Date = Date()) {
+    public init(
+        id: UUID = UUID(),
+        author: Author,
+        text: String,
+        timestamp: Date = Date(),
+        sessionId: SessionId? = nil
+    ) {
         self.id = id
         self.author = author
         self.text = text
         self.timestamp = timestamp
+        self.sessionId = sessionId
     }
 }

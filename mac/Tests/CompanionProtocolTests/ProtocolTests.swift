@@ -5,42 +5,6 @@ import XCTest
 
 @testable import CompanionProtocol
 
-final class EnvelopeTests: XCTestCase {
-    func testRoundTripKeepsWireNames() throws {
-        let envelope = Envelope(kind: "sessions_changed", payload: .object([
-            "sessions": .array([.object(["id": .string("a")])])
-        ]))
-        let data = try EnvelopeCodec.encode(envelope)
-        let text = String(data: data, encoding: .utf8)!
-        XCTAssertTrue(text.contains("\"protocol_version\":1"), text)
-        XCTAssertTrue(text.hasSuffix("\n"))
-        XCTAssertEqual(try EnvelopeCodec.decode(data.dropLast()), envelope)
-    }
-
-    func testUnknownPayloadSurvivesDecoding() throws {
-        let json = Data("""
-        {"protocol_version":1,"kind":"weird","payload":{"a":[1,true,null,"x"],"b":{"c":2.5}}}
-        """.utf8)
-        let envelope = try EnvelopeCodec.decode(json)
-        XCTAssertEqual(envelope.payload["a"]?[0]?.doubleValue, 1)
-        XCTAssertEqual(envelope.payload["a"]?[1]?.boolValue, true)
-        XCTAssertEqual(envelope.payload["a"]?[2], .null)
-        XCTAssertEqual(envelope.payload["a"]?[3]?.stringValue, "x")
-        XCTAssertEqual(envelope.payload["b"]?["c"]?.doubleValue, 2.5)
-        XCTAssertNil(envelope.payload["missing"])
-    }
-
-    func testVersionCheck() {
-        XCTAssertTrue(Envelope(kind: "hello").isVersionSupported)
-        XCTAssertFalse(Envelope(protocolVersion: 2, kind: "hello").isVersionSupported)
-    }
-
-    func testMissingPayloadFailsToDecode() {
-        let json = Data(#"{"protocol_version":1,"kind":"hello"}"#.utf8)
-        XCTAssertThrowsError(try EnvelopeCodec.decode(json))
-    }
-}
-
 final class LineFramerTests: XCTestCase {
     func testSplitsCompleteLines() throws {
         var framer = LineFramer()
@@ -66,9 +30,81 @@ final class LineFramerTests: XCTestCase {
     func testRejectsOversizedLine() {
         var framer = LineFramer(limit: 16)
         XCTAssertThrowsError(try framer.push(Data(repeating: 0x41, count: 32))) { error in
-            XCTAssertEqual(error as? ProtocolError, .lineTooLong(limit: 16))
+            XCTAssertEqual(error as? TransportError, .lineTooLong(limit: 16))
         }
         XCTAssertEqual(framer.pendingBytes, 0, "buffer is dropped so the stream can resynchronise")
+    }
+}
+
+final class PathsTests: XCTestCase {
+    func testConfigDirectoryOverrideWinsOverEnvironment() {
+        let paths = CompanionPaths(
+            configDirectory: URL(fileURLWithPath: "/tmp/companion-x"),
+            environment: ["COMPANION_CONFIG_DIR": "/tmp/other"])
+        XCTAssertEqual(paths.socketPath, "/tmp/companion-x/companion.sock")
+        XCTAssertEqual(paths.tokenPath, "/tmp/companion-x/tokens.json")
+    }
+
+    func testEnvironmentIsReadTheSameWayTheDaemonReadsIt() {
+        let paths = CompanionPaths(environment: ["COMPANION_CONFIG_DIR": "/tmp/companion-y"])
+        XCTAssertEqual(paths.configDirectory.path, "/tmp/companion-y")
+        XCTAssertEqual(paths.socketPath, "/tmp/companion-y/companion.sock")
+    }
+
+    func testSocketOverrideBeatsTheConfigDirectory() {
+        let paths = CompanionPaths(
+            configDirectory: URL(fileURLWithPath: "/tmp/companion-z"),
+            environment: ["COMPANION_SOCKET": "/tmp/elsewhere.sock"])
+        XCTAssertEqual(paths.socketPath, "/tmp/elsewhere.sock")
+    }
+}
+
+final class TokenSourceTests: XCTestCase {
+    private var directory: URL!
+
+    override func setUpWithError() throws {
+        directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("companion-token-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    func testReadsTheHumanTokenTheDaemonWrote() throws {
+        let path = directory.appendingPathComponent("tokens.json")
+        try Data(#"{"human":"aaa","agent":"bbb"}"#.utf8).write(to: path)
+        XCTAssertEqual(try FileTokenSource(path: path.path).humanToken(), "aaa")
+    }
+
+    func testMissingFileIsItsOwnCase() {
+        let path = directory.appendingPathComponent("nope.json").path
+        XCTAssertThrowsError(try FileTokenSource(path: path).humanToken()) { error in
+            XCTAssertEqual(error as? FileTokenSource.Failure, .missing(path: path))
+        }
+    }
+
+    func testGarbageIsNotMistakenForAToken() throws {
+        let path = directory.appendingPathComponent("tokens.json")
+        try Data("not json".utf8).write(to: path)
+        XCTAssertThrowsError(try FileTokenSource(path: path.path).humanToken())
+    }
+
+    func testAnEmptyTokenIsRefused() throws {
+        let path = directory.appendingPathComponent("tokens.json")
+        try Data(#"{"human":"","agent":"bbb"}"#.utf8).write(to: path)
+        XCTAssertThrowsError(try FileTokenSource(path: path.path).humanToken()) { error in
+            XCTAssertEqual(error as? FileTokenSource.Failure, .noTokenForRole(path: path.path))
+        }
+    }
+}
+
+final class HelloTests: XCTestCase {
+    func testTheTokenNeverShowsUpInDebugOutput() {
+        let hello = Hello(token: "s3cr3t-token", clientName: "companion-mac")
+        XCTAssertFalse("\(hello)".contains("s3cr3t"), "debug output leaked the token")
+        XCTAssertTrue(String(reflecting: hello).contains("companion-mac"))
     }
 }
 
@@ -83,26 +119,26 @@ final class UnixSocketTransportTests: XCTestCase {
         super.tearDown()
     }
 
-    func testConnectsAndExchangesEnvelopes() throws {
+    func testConnectsAndExchangesLines() throws {
         let server = try TestSocketServer()
         self.server = server
         server.start()
 
         let connected = expectation(description: "connected")
-        let received = expectation(description: "envelope received")
+        let received = expectation(description: "line received")
         let transport = UnixSocketTransport(deliveryQueue: .main)
         transport.onStateChange { state in
             if case .connected = state { connected.fulfill() }
         }
-        transport.onEnvelope { envelope in
-            if envelope.kind == "hello_ack" { received.fulfill() }
+        transport.onLine { line in
+            if (try? WireCodec.decode(line)) != nil { received.fulfill() }
         }
         transport.connect(toSocketAt: server.path)
         wait(for: [connected], timeout: 5)
 
-        transport.send(Envelope(kind: "hello"))
+        transport.send(line: try WireCodec.encode(.hello(Hello(token: "t", clientName: "x"))))
         wait(for: [received], timeout: 5)
-        XCTAssertEqual(server.receivedKinds(), ["hello"])
+        XCTAssertEqual(server.receivedTypes(), ["hello"])
         transport.close()
     }
 
@@ -132,8 +168,8 @@ final class UnixSocketTransportTests: XCTestCase {
     }
 }
 
-/// Minimal stand-in for the daemon: accepts one connection, answers every line with
-/// `hello_ack`, and records what it was sent.
+/// Minimal stand-in for the daemon: accepts one connection, answers every line with a
+/// welcome, and records the message types it was sent.
 final class TestSocketServer: @unchecked Sendable {
     let path: String
     private let directory: URL
@@ -141,7 +177,7 @@ final class TestSocketServer: @unchecked Sendable {
     private var client: Int32 = -1
     private let queue = DispatchQueue(label: "companion.tests.server")
     private let lock = NSLock()
-    private var kinds: [String] = []
+    private var types: [String] = []
 
     init() throws {
         directory = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -178,23 +214,26 @@ final class TestSocketServer: @unchecked Sendable {
                 if count <= 0 { return }
                 let text = String(bytes: buffer[0..<count], encoding: .utf8) ?? ""
                 for line in text.split(separator: "\n") {
-                    if let envelope = try? EnvelopeCodec.decode(Data(line.utf8)) {
-                        lock.lock()
-                        kinds.append(envelope.kind)
-                        lock.unlock()
-                    }
+                    guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
+                          let type = (object as? [String: Any])?["type"] as? String else { continue }
+                    lock.lock()
+                    types.append(type)
+                    lock.unlock()
                 }
-                if let reply = try? EnvelopeCodec.encode(Envelope(kind: "hello_ack")) {
-                    _ = reply.withUnsafeBytes { write(accepted, $0.baseAddress, $0.count) }
-                }
+                let welcome = """
+                {"type":"welcome","protocol_version":1,"role":"human","daemon_version":"0.1.0",\
+                "run_id":"r","session_namespace":"c"}
+
+                """
+                _ = Data(welcome.utf8).withUnsafeBytes { write(accepted, $0.baseAddress, $0.count) }
             }
         }
     }
 
-    func receivedKinds() -> [String] {
+    func receivedTypes() -> [String] {
         lock.lock()
         defer { lock.unlock() }
-        return kinds
+        return types
     }
 
     func stop() {

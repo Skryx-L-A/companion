@@ -14,9 +14,23 @@ struct OverlayRootView: View {
         ZStack(alignment: .topLeading) {
             Color.clear
 
+            if let rect = layout.onboardingRect {
+                let box = layout.flipped(rect)
+                OnboardingView(
+                    settings: controller.settings,
+                    tools: model.detectedTools,
+                    onFinish: { controller.finishOnboarding() },
+                    onSkip: { controller.skipOnboarding() })
+                    .frame(width: box.width, height: box.height)
+                    .offset(x: box.minX, y: box.minY)
+            }
+
             if let rect = layout.sessionsRect {
                 let box = layout.flipped(rect)
-                SessionListView(model: model, onClose: { controller.toggleSessionList() })
+                SessionListView(
+                    model: model,
+                    onSelect: { controller.selectSession($0) },
+                    onClose: { controller.toggleSessionList() })
                     .frame(width: box.width, height: box.height)
                     .offset(x: box.minX, y: box.minY)
             }
@@ -26,6 +40,7 @@ struct OverlayRootView: View {
                 ChatPanelView(
                     model: model,
                     onSubmit: { controller.submit($0) },
+                    onAnswer: { controller.answer($0, with: $1) },
                     onToggleSessionList: { controller.toggleSessionList() },
                     onClose: { controller.toggleChat() })
                     .frame(width: box.width, height: box.height)
