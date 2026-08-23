@@ -13,6 +13,18 @@ use std::sync::Mutex;
 use companion_protocol::{
     AuftragId, Cost, Provenance, REGISTRY_SCHEMA_VERSION, RegistryEntry, SelfAnswer, SessionId,
 };
+
+/// What the register remembers about an approval: which job, over which bytes, and when.
+///
+/// The project is part of the key because two projects may use the same job id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalRecord {
+    pub project: String,
+    pub auftrag_id: AuftragId,
+    /// Hex-encoded SHA-256 of the canonical job without its approval field.
+    pub hash: String,
+    pub approved_at_ms: u64,
+}
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
@@ -20,7 +32,8 @@ use thiserror::Error;
 ///
 /// A migration is never edited after it has shipped; a change gets a new entry, and the
 /// length of this list is the current schema version.
-const MIGRATIONS: &[&str] = &["CREATE TABLE registry_entries (
+const MIGRATIONS: &[&str] = &[
+    "CREATE TABLE registry_entries (
         session_id     TEXT PRIMARY KEY,
         auftrag_id     TEXT,
         project        TEXT,
@@ -31,7 +44,18 @@ const MIGRATIONS: &[&str] = &["CREATE TABLE registry_entries (
         self_answers   TEXT NOT NULL,
         cost           TEXT NOT NULL
     );
-    CREATE INDEX registry_entries_started_at ON registry_entries (started_at_ms DESC);"];
+    CREATE INDEX registry_entries_started_at ON registry_entries (started_at_ms DESC);",
+    // 2: the approval records. They live here, outside the project, because the session a
+    // job commands can write in its own project and could otherwise move its approval
+    // along with a change (DESIGN.md, Sicherheit, Gate-Freigabe).
+    "CREATE TABLE approvals (
+        project        TEXT NOT NULL,
+        auftrag_id     TEXT NOT NULL,
+        hash           TEXT NOT NULL,
+        approved_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (project, auftrag_id)
+    );",
+];
 
 #[derive(Debug, Error)]
 pub enum RegistryError {
@@ -188,6 +212,52 @@ impl Registry {
         Ok(())
     }
 
+    /// Writes an approval, replacing an earlier one for the same job.
+    ///
+    /// A second approval of the same job is a new decision by the person, so it overwrites
+    /// rather than piling up: what counts is what was approved last.
+    pub fn record_approval(&self, record: &ApprovalRecord) -> Result<(), RegistryError> {
+        self.lock().execute(
+            "INSERT INTO approvals (project, auftrag_id, hash, approved_at_ms)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(project, auftrag_id) DO UPDATE SET
+                hash = excluded.hash,
+                approved_at_ms = excluded.approved_at_ms",
+            params![
+                record.project,
+                record.auftrag_id.as_str(),
+                record.hash,
+                record.approved_at_ms as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The approval of one job, or `None` when nobody approved it.
+    pub fn approval_for(
+        &self,
+        project: &str,
+        auftrag_id: &AuftragId,
+    ) -> Result<Option<ApprovalRecord>, RegistryError> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT project, auftrag_id, hash, approved_at_ms FROM approvals
+                 WHERE project = ?1 AND auftrag_id = ?2",
+                params![project, auftrag_id.as_str()],
+                |row| {
+                    let approved_at_ms: i64 = row.get(3)?;
+                    Ok(ApprovalRecord {
+                        project: row.get(0)?,
+                        auftrag_id: AuftragId::new(row.get::<_, String>(1)?),
+                        hash: row.get(2)?,
+                        approved_at_ms: approved_at_ms as u64,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     pub fn get(&self, session_id: &SessionId) -> Result<Option<RegistryEntry>, RegistryError> {
         self.lock()
             .query_row(
@@ -284,6 +354,72 @@ mod tests {
                 usd: None,
             }),
         }
+    }
+
+    #[test]
+    fn an_approval_survives_the_round_trip_and_a_second_decision_replaces_it() {
+        let registry = Registry::open_in_memory().unwrap();
+        let record = ApprovalRecord {
+            project: "/tmp/fixture/projekt".to_owned(),
+            auftrag_id: AuftragId::new("2026-08-24-eins"),
+            hash: "abc123".to_owned(),
+            approved_at_ms: 1_700_000_000_000,
+        };
+        registry.record_approval(&record).unwrap();
+        assert_eq!(
+            registry
+                .approval_for(&record.project, &record.auftrag_id)
+                .unwrap(),
+            Some(record.clone())
+        );
+
+        let second = ApprovalRecord {
+            hash: "def456".to_owned(),
+            approved_at_ms: 1_700_000_500_000,
+            ..record.clone()
+        };
+        registry.record_approval(&second).unwrap();
+        assert_eq!(
+            registry
+                .approval_for(&record.project, &record.auftrag_id)
+                .unwrap(),
+            Some(second),
+            "the last decision of the person is the one that counts"
+        );
+    }
+
+    #[test]
+    fn the_same_job_id_in_two_projects_stays_apart() {
+        let registry = Registry::open_in_memory().unwrap();
+        for project in ["/tmp/eins", "/tmp/zwei"] {
+            registry
+                .record_approval(&ApprovalRecord {
+                    project: project.to_owned(),
+                    auftrag_id: AuftragId::new("nachtlauf"),
+                    hash: format!("hash-of-{project}"),
+                    approved_at_ms: 1,
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            registry
+                .approval_for("/tmp/eins", &AuftragId::new("nachtlauf"))
+                .unwrap()
+                .unwrap()
+                .hash,
+            "hash-of-/tmp/eins"
+        );
+    }
+
+    #[test]
+    fn an_unapproved_job_has_no_record() {
+        let registry = Registry::open_in_memory().unwrap();
+        assert!(
+            registry
+                .approval_for("/tmp/eins", &AuftragId::new("nie-freigegeben"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

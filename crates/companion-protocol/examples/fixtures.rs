@@ -121,6 +121,9 @@ fn server_messages() -> Vec<ServerMessage> {
             result_path: None,
         },
         Event::GateResult {
+            program: None,
+            args: Vec::new(),
+            exit_code: None,
             command: "cargo test --workspace".to_owned(),
             passed: true,
             output: Some("42 passed".to_owned()),
@@ -267,6 +270,9 @@ fn client_messages() -> Vec<ClientMessage> {
         ClientMessage::Request(RequestEnvelope {
             id: 6,
             request: Request::RunGate {
+                project: None,
+                auftrag_id: None,
+                expected_hash: None,
                 session_id: "-Users-me-AI-companion".into(),
                 gate_index: 0,
             },

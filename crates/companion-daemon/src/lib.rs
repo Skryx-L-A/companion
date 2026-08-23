@@ -5,6 +5,7 @@
 //! The binary is a thin wrapper around [`server::start`]. Everything the daemon does lives
 //! in the library so a test can run it in process with an adapter of its own.
 
+pub mod gate;
 pub mod server;
 
 use std::path::Path;

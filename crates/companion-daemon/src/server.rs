@@ -76,6 +76,8 @@ pub struct Limits {
     pub reported_grace: Duration,
     /// How many sessions one connection may report about at the same time.
     pub max_reported_per_connection: usize,
+    /// Longest a gate command may run before it is stopped and counts as failed.
+    pub gate_timeout: Duration,
     /// How long a reported session outlives the connection that reported it.
     ///
     /// Short on purpose. A hook binary connects once per event and is gone again, so the
@@ -93,6 +95,7 @@ impl Default for Limits {
             reported_grace: Duration::from_secs(60),
             max_reported_per_connection: 64,
             orphan_grace: Duration::from_secs(30),
+            gate_timeout: Duration::from_secs(600),
         }
     }
 }
@@ -820,6 +823,20 @@ async fn handle(
 
         Request::Spawn(spawn) => {
             let adapter = state.adapter(&spawn.adapter)?;
+            // A job that nobody approved starts nothing: DESIGN.md, Gate-Freigabe.
+            if let Some(auftrag_id) = &spawn.auftrag_id {
+                let project = PathBuf::from(&spawn.project);
+                let auftrag =
+                    companion_core::auftrag::read(&project, auftrag_id).map_err(auftrag_error)?;
+                let hash = companion_core::hash_of(&auftrag).map_err(auftrag_error)?;
+                companion_core::auftrag::verify_approved(
+                    &project,
+                    auftrag_id,
+                    &hash,
+                    &state.registry,
+                )
+                .map_err(auftrag_error)?;
+            }
             let session = with_deadline(
                 deadline,
                 adapter.spawn(SpawnOptions {
@@ -878,10 +895,102 @@ async fn handle(
             Ok(ResponseBody::Capabilities { adapters })
         }
 
-        Request::RunGate { .. } => Err(ProtocolError::new(
-            ErrorCode::NotSupported,
-            "gate execution arrives with the job file track",
-        )),
+        Request::CreateAuftrag { project, auftrag } => {
+            // Writing a job is not approving it: the file lands without an approval, and
+            // the answer carries the hash and the display text the person has to see
+            // before they can approve anything.
+            let project = PathBuf::from(project);
+            let mut auftrag = *auftrag;
+            auftrag.approval = None;
+
+            let path = companion_core::auftrag::write(&project, &auftrag).map_err(auftrag_error)?;
+            let hash = companion_core::hash_of(&auftrag).map_err(auftrag_error)?;
+            Ok(auftrag_body(auftrag, hash, path))
+        }
+
+        Request::ApproveAuftrag {
+            project,
+            auftrag_id,
+            expected_hash,
+        } => {
+            let project = PathBuf::from(project);
+            companion_core::auftrag::approve(
+                &project,
+                &auftrag_id,
+                &expected_hash,
+                &state.registry,
+            )
+            .map_err(auftrag_error)?;
+
+            let auftrag =
+                companion_core::auftrag::read(&project, &auftrag_id).map_err(auftrag_error)?;
+            let path = companion_core::auftrag::path_for(&project, &auftrag_id);
+            Ok(auftrag_body(auftrag, expected_hash, path))
+        }
+
+        Request::RunGate {
+            session_id,
+            gate_index,
+            project,
+            auftrag_id,
+            expected_hash,
+        } => {
+            // Everything below is refusal until proven otherwise. What runs is what stands
+            // in the approved file, at the position the caller named, and nothing else.
+            let (Some(project), Some(auftrag_id), Some(expected_hash)) =
+                (project, auftrag_id, expected_hash)
+            else {
+                return Err(ProtocolError::new(
+                    ErrorCode::BadRequest,
+                    "a gate needs the project, the job id and the hash that was approved",
+                ));
+            };
+            let project = PathBuf::from(project);
+
+            let auftrag = companion_core::auftrag::verify_approved(
+                &project,
+                &auftrag_id,
+                &expected_hash,
+                &state.registry,
+            )
+            .map_err(auftrag_error)?;
+
+            let command = auftrag
+                .gate_commands
+                .get(gate_index as usize)
+                .cloned()
+                .ok_or_else(|| {
+                    ProtocolError::new(
+                        ErrorCode::BadRequest,
+                        format!(
+                            "job {auftrag_id} has {} gate commands, so there is no number {gate_index}",
+                            auftrag.gate_commands.len()
+                        ),
+                    )
+                })?;
+
+            let outcome = crate::gate::run(&command, &project, state.limits.gate_timeout)
+                .await
+                .map_err(|error| {
+                    ProtocolError::new(ErrorCode::AdapterFailure, error.to_string())
+                })?;
+
+            state.bus.publish(
+                AdapterId::new(REPORTED_ADAPTER),
+                AdapterEvent::for_session(
+                    session_id,
+                    Event::GateResult {
+                        command: command.display(),
+                        program: Some(command.program.clone()),
+                        args: command.args.clone(),
+                        exit_code: outcome.exit_code,
+                        passed: outcome.passed,
+                        output: outcome.output,
+                    },
+                ),
+            );
+            Ok(ResponseBody::Ack)
+        }
 
         Request::ReportStatus { status } => {
             // The client names the session, the daemon decides under which id it is
@@ -955,6 +1064,41 @@ async fn handle(
             Ok(ResponseBody::Ack)
         }
     }
+}
+
+/// The answer to everything that hands a job file back.
+fn auftrag_body(
+    auftrag: companion_protocol::Auftrag,
+    hash: String,
+    path: std::path::PathBuf,
+) -> ResponseBody {
+    ResponseBody::Auftrag {
+        gate_display: auftrag
+            .gate_commands
+            .iter()
+            .map(companion_protocol::GateCommand::display)
+            .collect(),
+        auftrag: Box::new(auftrag),
+        hash,
+        path: path.display().to_string(),
+    }
+}
+
+/// Turns a refusal of the job layer into one the client understands.
+///
+/// A job that is missing, unapproved or changed is `forbidden`, not a server failure: the
+/// daemon did its work, the answer is no.
+fn auftrag_error(error: companion_core::AuftragError) -> ProtocolError {
+    use companion_core::AuftragError;
+    let code = match &error {
+        AuftragError::NotFound { .. } => ErrorCode::BadRequest,
+        AuftragError::NotApproved { .. } | AuftragError::HashMismatch { .. } => {
+            ErrorCode::Forbidden
+        }
+        AuftragError::Parse { .. } | AuftragError::Serialise(_) => ErrorCode::BadRequest,
+        AuftragError::Io { .. } | AuftragError::Registry(_) => ErrorCode::Internal,
+    };
+    ProtocolError::new(code, error.to_string())
 }
 
 /// The event that matches a reported state, so a shell can react without polling.

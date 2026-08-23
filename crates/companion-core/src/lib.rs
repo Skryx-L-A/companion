@@ -9,6 +9,7 @@
 //! [`auth::TokenStore`].
 
 pub mod adapter;
+pub mod auftrag;
 pub mod auth;
 pub mod bus;
 pub mod paths;
@@ -20,9 +21,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub use adapter::{
     AdapterError, AdapterEvent, AdapterSet, ReadChunk, SessionAdapter, SpawnOptions,
 };
+pub use auftrag::{AuftragError, canonical_bytes, hash_of};
 pub use auth::{Authenticator, FileTokenStore, TokenStore, Tokens, generate_token, permits};
 pub use bus::EventBus;
-pub use registry::{Registry, RegistryError};
+pub use registry::{ApprovalRecord, Registry, RegistryError};
 pub use settings::{
     Autonomy, HighRiskSettings, NotificationChannel, Settings, SettingsError, ToolBoundary,
 };

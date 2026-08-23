@@ -3,6 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::auftrag::Auftrag;
 use crate::capabilities::AdapterCapabilities;
 use crate::event::EventEnvelope;
 use crate::ids::{AdapterId, AuftragId, SessionId};
@@ -140,10 +141,38 @@ pub enum Request {
         /// A single adapter, or all of them when absent.
         adapter: Option<AdapterId>,
     },
+    /// Writes a job file into a project. The file is not approved by writing it.
+    CreateAuftrag {
+        /// Absolute path of the project directory.
+        project: String,
+        auftrag: Box<Auftrag>,
+    },
+    /// Approves the exact content the person was shown.
+    ///
+    /// The hash is what the shell computed over the canonical form of the file it
+    /// displayed. The daemon canonicalises the file again and refuses if the two differ:
+    /// that is what ties the approval to the text somebody actually read.
+    ApproveAuftrag {
+        project: String,
+        auftrag_id: AuftragId,
+        expected_hash: String,
+    },
     /// Run one gate command of an approved job file, named by its position in the list.
+    ///
+    /// `project`, `auftrag_id` and `expected_hash` are what make this safe, and a request
+    /// without them is refused. They are optional in the schema only so that a client
+    /// written against the earlier shape still parses; it will be told what is missing
+    /// rather than silently running something.
     RunGate {
+        /// The session the result belongs to, for the event. Not where the command runs.
         session_id: SessionId,
         gate_index: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auftrag_id: Option<AuftragId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_hash: Option<String>,
     },
     /// An orchestrator writes the status of its own session.
     ReportStatus {
@@ -177,6 +206,8 @@ pub enum RequestKind {
     Interrupt,
     Stop,
     Capabilities,
+    CreateAuftrag,
+    ApproveAuftrag,
     RunGate,
     ReportStatus,
     AskQuestion,
@@ -202,6 +233,8 @@ impl Request {
             Self::Interrupt { .. } => RequestKind::Interrupt,
             Self::Stop { .. } => RequestKind::Stop,
             Self::Capabilities { .. } => RequestKind::Capabilities,
+            Self::CreateAuftrag { .. } => RequestKind::CreateAuftrag,
+            Self::ApproveAuftrag { .. } => RequestKind::ApproveAuftrag,
             Self::RunGate { .. } => RequestKind::RunGate,
             Self::ReportStatus { .. } => RequestKind::ReportStatus,
             Self::AskQuestion { .. } => RequestKind::AskQuestion,
@@ -276,6 +309,17 @@ pub enum ResponseBody {
     },
     Sent {
         outcome: SendOutcome,
+    },
+    /// A job file together with the two things a person needs to approve it: the exact
+    /// text they are shown, and the hash of the canonical form of it.
+    Auftrag {
+        auftrag: Box<Auftrag>,
+        /// Hex-encoded SHA-256 of the canonical form, without the approval field.
+        hash: String,
+        /// Where the file lives.
+        path: String,
+        /// The gate commands as they will be shown for approval, quoted.
+        gate_display: Vec<String>,
     },
     /// The request was carried out and has nothing to return.
     Ack,

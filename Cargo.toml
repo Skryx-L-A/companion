@@ -19,6 +19,7 @@ async-trait = "0.1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 schemars = "1.2"
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
 # preserve_order everywhere, not only where a JSON file of a person is edited: with the
 # feature on in one crate only, the generated protocol schemas came out in a different key
 # order depending on which crates a build happened to include.

@@ -57,10 +57,20 @@ pub enum Event {
     },
     /// A gate command from the job file ran and either passed or failed.
     GateResult {
-        /// The gate command as it was approved, for display next to the verdict.
+        /// The gate command as it was approved, quoted for display next to the verdict.
         command: String,
+        /// The same command in the form that actually ran: no shell, no string to
+        /// misread. A reader that wants to know what happened looks here, not at the
+        /// display line.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        program: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        args: Vec<String>,
+        /// Exit code of the process. Absent when a signal ended it or it timed out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
         passed: bool,
-        /// Output of the gate, trimmed by the adapter.
+        /// Output of the gate, trimmed.
         output: Option<String>,
     },
     ContextLevel {

@@ -34,6 +34,22 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
+/// Waits for the two ways this daemon is asked to stop, and says which one came.
+///
+/// launchd and every service manager send SIGTERM; a person in a terminal sends SIGINT.
+/// Both have to end in the same place, because the socket file is only cleaned up on the
+/// way out and a leftover one makes the next start look like a daemon is already running.
+async fn wait_for_stop() -> Result<&'static str, Box<dyn std::error::Error>> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    Ok(tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            result?;
+            "interrupt"
+        }
+        _ = terminate.recv() => "terminate",
+    })
+}
+
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // A missing settings file is the normal first start, not an error: the daemon writes
     // the careful defaults and the onboarding of the shell changes them later.
@@ -82,8 +98,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         wanted(companion_adapter_workbench::ADAPTER_ID).then(|| workbench.watch(WORKBENCH_POLL));
     info!(socket = %handle.socket_path().display(), "ready");
 
-    tokio::signal::ctrl_c().await?;
-    info!("stopping");
+    let signal = wait_for_stop().await?;
+    info!(signal, "stopping");
     if let Some(watch) = watch {
         watch.stop();
     }

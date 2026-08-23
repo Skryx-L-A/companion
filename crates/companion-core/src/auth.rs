@@ -287,6 +287,8 @@ mod tests {
             RequestKind::List,
             RequestKind::Read,
             RequestKind::Capabilities,
+            RequestKind::CreateAuftrag,
+            RequestKind::ApproveAuftrag,
         ] {
             assert!(
                 !permits(ClientRole::Agent, kind),

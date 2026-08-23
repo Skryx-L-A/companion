@@ -28,16 +28,34 @@ pub struct GateCommand {
 }
 
 impl GateCommand {
-    /// The command as one line, for showing it to the person during approval. This form is
-    /// display only and never handed to a shell.
+    /// The command as one line, for showing it to the person during approval.
+    ///
+    /// Arguments that contain a space or anything a reader could misread are quoted, so
+    /// two different commands can never produce the same approval text: `prog "a b"` and
+    /// `prog a b` are one argument and two, and they have to look that way. This form is
+    /// display only and never handed to a shell; what runs is the structured form, and the
+    /// approval binds to that.
     pub fn display(&self) -> String {
-        let mut out = self.program.clone();
+        let mut out = quote_for_display(&self.program);
         for arg in &self.args {
             out.push(' ');
-            out.push_str(arg);
+            out.push_str(&quote_for_display(arg));
         }
         out
     }
+}
+
+/// Quotes a word for display when leaving it bare would be ambiguous.
+fn quote_for_display(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | '@' | ',')
+        });
+    if plain {
+        return word.to_owned();
+    }
+    let escaped = word.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 /// Where a run has to stop even if it is not finished.
@@ -98,7 +116,59 @@ pub struct Auftrag {
 }
 
 impl Auftrag {
+    /// Whether the file carries an approval copy. Only the record outside the project
+    /// decides whether a job may really run; this is the display side of it.
     pub fn is_approved(&self) -> bool {
         self.approval.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn two_different_commands_never_show_the_same_text() {
+        let one_argument = GateCommand {
+            program: "prog".to_owned(),
+            args: vec!["a b".to_owned()],
+            working_dir: None,
+        };
+        let two_arguments = GateCommand {
+            program: "prog".to_owned(),
+            args: vec!["a".to_owned(), "b".to_owned()],
+            working_dir: None,
+        };
+        assert_eq!(one_argument.display(), r#"prog "a b""#);
+        assert_eq!(two_arguments.display(), "prog a b");
+        assert_ne!(one_argument.display(), two_arguments.display());
+    }
+
+    #[test]
+    fn an_ordinary_command_stays_readable() {
+        let command = GateCommand {
+            program: "/usr/bin/cargo".to_owned(),
+            args: vec!["test".to_owned(), "--workspace".to_owned()],
+            working_dir: None,
+        };
+        assert_eq!(command.display(), "/usr/bin/cargo test --workspace");
+    }
+
+    #[test]
+    fn a_quote_in_an_argument_is_escaped_rather_than_swallowed() {
+        let with_quote = format!("say {q}hi{q}", q = '\u{22}');
+        let command = GateCommand {
+            program: "echo".to_owned(),
+            args: vec![with_quote, String::new()],
+            working_dir: None,
+        };
+        let shown = command.display();
+
+        // The inner quotes are escaped, so the argument boundaries stay readable, and
+        // the empty argument is visible as one instead of vanishing.
+        let escaped_quote = format!("{b}{q}", b = '\u{5c}', q = '\u{22}');
+        assert!(shown.contains(&escaped_quote), "got {shown}");
+        let empty_argument = format!("{q}{q}", q = '\u{22}');
+        assert!(shown.ends_with(&empty_argument), "got {shown}");
     }
 }

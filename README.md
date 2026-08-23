@@ -64,6 +64,22 @@ Because the binary connects once per event, the daemon recognises a reporter tha
 back: a session whose connection has gone away is taken over by the next one instead of
 appearing a second time in the list.
 
+### Job files and gates
+
+A job file lives in the project under `.companion/auftraege/<id>.json`. Writing one does not
+approve it. The approval is a decision about an exact text: the shell shows the file, the
+person approves the hash of its canonical form, and the daemon stores that hash in its
+register, outside the project. The copy in the file itself is for reading; the record is
+what decides.
+
+That split matters because the session a job commands can write in its own project. It could
+add a gate command and fix up the approval inside the file, and the register would still say
+no. Running a gate therefore checks three things against each other: the file as it is now,
+the record, and the hash the caller sends with the request.
+
+What runs is a program and a list of arguments, handed to the operating system as they
+stand. There is no shell anywhere on that path, so there is no string for one to expand.
+
 ### Crates
 
 | Crate | What it holds |

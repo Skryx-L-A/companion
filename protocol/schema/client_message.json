@@ -151,6 +151,224 @@
         }
       ]
     },
+    "Auftrag": {
+      "description": "The job file, stored in the project under `.companion/auftraege/<id>.json`.\n\n`DESIGN.md` § Datenmodelle lists this as: id, projekt, ziel, fertig_kriterium,\nreferenz, guardrails, gate_befehle, limits, loop_typ, modell, freigabe.",
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "id": {
+          "$ref": "#/$defs/AuftragId"
+        },
+        "project": {
+          "description": "Absolute path of the project directory.",
+          "type": "string"
+        },
+        "goal": {
+          "type": "string"
+        },
+        "done_criterion": {
+          "type": "string"
+        },
+        "reference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Reference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "guardrails": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "gate_commands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GateCommand"
+          },
+          "default": []
+        },
+        "limits": {
+          "$ref": "#/$defs/Limits",
+          "default": {
+            "iterations": null,
+            "tokens": null,
+            "time_seconds": null
+          }
+        },
+        "loop_type": {
+          "$ref": "#/$defs/LoopType"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "approval": {
+          "description": "Absent until the person has approved the exact text. An unapproved job never\ncauses an outward action.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Approval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "id",
+        "project",
+        "goal",
+        "done_criterion",
+        "loop_type"
+      ]
+    },
+    "Reference": {
+      "description": "The reference a critic judges the result against.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "path"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        }
+      ]
+    },
+    "GateCommand": {
+      "description": "One gate command, split into program and arguments.\n\n`DESIGN.md` § Sicherheit requires the daemon to run the approved text and nothing else,\nwithout shell evaluation of variables or substitutions. Storing the command already\nsplit is what makes that structural: there is no string for a shell to expand.",
+      "type": "object",
+      "properties": {
+        "program": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "working_dir": {
+          "description": "Working directory for the command. Relative paths are resolved against the project.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "program"
+      ]
+    },
+    "Limits": {
+      "description": "Where a run has to stop even if it is not finished.",
+      "type": "object",
+      "properties": {
+        "iterations": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "time_seconds": {
+          "description": "Wall-clock limit. `DESIGN.md` § Loops names this the stand-in wherever the adapter\nreports neither iterations nor tokens.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "LoopType": {
+      "description": "Which loop discipline the orchestrator runs.",
+      "oneOf": [
+        {
+          "description": "One pass, the default.",
+          "type": "string",
+          "const": "once"
+        },
+        {
+          "description": "Repeat until the done criterion holds or a limit is hit.",
+          "type": "string",
+          "const": "loop"
+        },
+        {
+          "description": "Builder and critic per part, against a reference.",
+          "type": "string",
+          "const": "gauntlet"
+        }
+      ]
+    },
+    "Approval": {
+      "description": "The person's approval of one exact job text.",
+      "type": "object",
+      "properties": {
+        "approved_at_ms": {
+          "description": "Unix time in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "text_sha256": {
+          "description": "Hex-encoded SHA-256 of the approved job text, so a later edit invalidates it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "approved_at_ms",
+        "text_sha256"
+      ]
+    },
     "SessionStatus": {
       "description": "The status of one session.\n\n`DESIGN.md` § Datenmodelle lists this as: id, adapter, maschine, projekt, modell,\nzustand, laufzeit, kontext, budget, iteration, letzte_ausgabe, offene_frage,\nauftrag_id. Every field an adapter may not know carries its origin instead of a\nsilently plausible zero.",
       "type": "object",
@@ -724,16 +942,86 @@
           ]
         },
         {
-          "description": "Run one gate command of an approved job file, named by its position in the list.",
+          "description": "Writes a job file into a project. The file is not approved by writing it.",
+          "type": "object",
+          "properties": {
+            "project": {
+              "description": "Absolute path of the project directory.",
+              "type": "string"
+            },
+            "auftrag": {
+              "$ref": "#/$defs/Auftrag"
+            },
+            "request": {
+              "type": "string",
+              "const": "create_auftrag"
+            }
+          },
+          "required": [
+            "request",
+            "project",
+            "auftrag"
+          ]
+        },
+        {
+          "description": "Approves the exact content the person was shown.\n\nThe hash is what the shell computed over the canonical form of the file it\ndisplayed. The daemon canonicalises the file again and refuses if the two differ:\nthat is what ties the approval to the text somebody actually read.",
+          "type": "object",
+          "properties": {
+            "project": {
+              "type": "string"
+            },
+            "auftrag_id": {
+              "$ref": "#/$defs/AuftragId"
+            },
+            "expected_hash": {
+              "type": "string"
+            },
+            "request": {
+              "type": "string",
+              "const": "approve_auftrag"
+            }
+          },
+          "required": [
+            "request",
+            "project",
+            "auftrag_id",
+            "expected_hash"
+          ]
+        },
+        {
+          "description": "Run one gate command of an approved job file, named by its position in the list.\n\n`project`, `auftrag_id` and `expected_hash` are what make this safe, and a request\nwithout them is refused. They are optional in the schema only so that a client\nwritten against the earlier shape still parses; it will be told what is missing\nrather than silently running something.",
           "type": "object",
           "properties": {
             "session_id": {
+              "description": "The session the result belongs to, for the event. Not where the command runs.",
               "$ref": "#/$defs/SessionId"
             },
             "gate_index": {
               "type": "integer",
               "format": "uint32",
               "minimum": 0
+            },
+            "project": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "auftrag_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AuftragId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "expected_hash": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "request": {
               "type": "string",
