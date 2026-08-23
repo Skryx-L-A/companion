@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Auftrag",
+  "description": "The job file, stored in the project under `.companion/auftraege/<id>.json`.\n\n`DESIGN.md` § Datenmodelle lists this as: id, projekt, ziel, fertig_kriterium,\nreferenz, guardrails, gate_befehle, limits, loop_typ, modell, freigabe.",
+  "type": "object",
+  "properties": {
+    "approval": {
+      "description": "Absent until the person has approved the exact text. An unapproved job never\ncauses an outward action.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Approval"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "done_criterion": {
+      "type": "string"
+    },
+    "gate_commands": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/GateCommand"
+      }
+    },
+    "goal": {
+      "type": "string"
+    },
+    "guardrails": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "id": {
+      "$ref": "#/$defs/AuftragId"
+    },
+    "limits": {
+      "$ref": "#/$defs/Limits",
+      "default": {
+        "iterations": null,
+        "time_seconds": null,
+        "tokens": null
+      }
+    },
+    "loop_type": {
+      "$ref": "#/$defs/LoopType"
+    },
+    "model": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "project": {
+      "description": "Absolute path of the project directory.",
+      "type": "string"
+    },
+    "reference": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Reference"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "id",
+    "project",
+    "goal",
+    "done_criterion",
+    "loop_type"
+  ],
+  "$defs": {
+    "Approval": {
+      "description": "The person's approval of one exact job text.",
+      "type": "object",
+      "properties": {
+        "approved_at_ms": {
+          "description": "Unix time in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "text_sha256": {
+          "description": "Hex-encoded SHA-256 of the approved job text, so a later edit invalidates it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "approved_at_ms",
+        "text_sha256"
+      ]
+    },
+    "AuftragId": {
+      "description": "Identifies a job file under `.companion/auftraege/<id>.json`.",
+      "type": "string"
+    },
+    "GateCommand": {
+      "description": "One gate command, split into program and arguments.\n\n`DESIGN.md` § Sicherheit requires the daemon to run the approved text and nothing else,\nwithout shell evaluation of variables or substitutions. Storing the command already\nsplit is what makes that structural: there is no string for a shell to expand.",
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "program": {
+          "type": "string"
+        },
+        "working_dir": {
+          "description": "Working directory for the command. Relative paths are resolved against the project.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "program"
+      ]
+    },
+    "Limits": {
+      "description": "Where a run has to stop even if it is not finished.",
+      "type": "object",
+      "properties": {
+        "iterations": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "time_seconds": {
+          "description": "Wall-clock limit. `DESIGN.md` § Loops names this the stand-in wherever the adapter\nreports neither iterations nor tokens.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "LoopType": {
+      "description": "Which loop discipline the orchestrator runs.",
+      "oneOf": [
+        {
+          "description": "One pass, the default.",
+          "type": "string",
+          "const": "once"
+        },
+        {
+          "description": "Repeat until the done criterion holds or a limit is hit.",
+          "type": "string",
+          "const": "loop"
+        },
+        {
+          "description": "Builder and critic per part, against a reference.",
+          "type": "string",
+          "const": "gauntlet"
+        }
+      ]
+    },
+    "Reference": {
+      "description": "The reference a critic judges the result against.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "path"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "text"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        }
+      ]
+    }
+  }
+}

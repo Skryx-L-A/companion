@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AdapterCapabilities",
+  "description": "What one adapter can do. `DESIGN.md` § Sicherheit requires this to be honest about\nenforcement as well: a generic PTY adapter cannot restrict a foreign CLI, and the\nsettings page shows what a limit really means for that session.",
+  "type": "object",
+  "properties": {
+    "adapter": {
+      "$ref": "#/$defs/AdapterId"
+    },
+    "commands": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CommandKind"
+      }
+    },
+    "display_name": {
+      "description": "Human-readable name for the settings page.",
+      "type": "string"
+    },
+    "enforces_permission_modes": {
+      "description": "True when the adapter can hand a permission mode down into the session and have it\nhold. False for anything that only drives a terminal.",
+      "type": "boolean"
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/EventKind"
+      }
+    },
+    "status_fields": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/StatusField"
+      }
+    },
+    "supports_subagents": {
+      "description": "True when sessions of this adapter can run sub-agents, which is what a gauntlet\nloop needs.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "adapter",
+    "display_name",
+    "commands",
+    "events",
+    "status_fields",
+    "enforces_permission_modes",
+    "supports_subagents"
+  ],
+  "$defs": {
+    "AdapterId": {
+      "description": "Identifies a session adapter, for example `workbench` or `claude-code`.",
+      "type": "string"
+    },
+    "CommandKind": {
+      "description": "The commands an adapter can carry out.",
+      "type": "string",
+      "enum": [
+        "list",
+        "spawn",
+        "send",
+        "read",
+        "stop"
+      ]
+    },
+    "EventKind": {
+      "description": "The name of an event without its payload. Adapters use this in their capabilities to\nsay which events they can actually produce.",
+      "type": "string",
+      "enum": [
+        "session_started",
+        "session_ended",
+        "question_open",
+        "waiting_for_input",
+        "busy",
+        "idle",
+        "done",
+        "gate_result",
+        "context_level",
+        "budget_level",
+        "iteration",
+        "error"
+      ]
+    },
+    "StatusField": {
+      "description": "The optional fields of a session status. An adapter names the ones it can fill; every\nfield it leaves out stays `unknown` in the session list.",
+      "type": "string",
+      "enum": [
+        "project",
+        "model",
+        "runtime_ms",
+        "context",
+        "budget",
+        "iteration",
+        "last_output",
+        "open_question",
+        "auftrag_id"
+      ]
+    }
+  }
+}

@@ -1,0 +1,426 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SessionStatus",
+  "description": "The status of one session.\n\n`DESIGN.md` § Datenmodelle lists this as: id, adapter, maschine, projekt, modell,\nzustand, laufzeit, kontext, budget, iteration, letzte_ausgabe, offene_frage,\nauftrag_id. Every field an adapter may not know carries its origin instead of a\nsilently plausible zero.",
+  "type": "object",
+  "properties": {
+    "adapter": {
+      "$ref": "#/$defs/AdapterId"
+    },
+    "auftrag_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AuftragId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "budget": {
+      "$ref": "#/$defs/Provenance4"
+    },
+    "context": {
+      "$ref": "#/$defs/Provenance3"
+    },
+    "id": {
+      "$ref": "#/$defs/SessionId"
+    },
+    "iteration": {
+      "$ref": "#/$defs/Provenance5"
+    },
+    "last_output": {
+      "description": "Last output of the session, trimmed to what the shell shows without asking.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "machine": {
+      "description": "Machine the session runs on. `local` for this machine.",
+      "type": "string"
+    },
+    "model": {
+      "$ref": "#/$defs/Provenance"
+    },
+    "open_question": {
+      "description": "The question the session is currently blocked on, if any.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "project": {
+      "description": "Absolute path of the project directory the session works in.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "runtime_ms": {
+      "description": "Milliseconds since the session started.",
+      "$ref": "#/$defs/Provenance2"
+    },
+    "state": {
+      "$ref": "#/$defs/SessionState"
+    }
+  },
+  "required": [
+    "id",
+    "adapter",
+    "machine",
+    "model",
+    "state",
+    "runtime_ms",
+    "context",
+    "budget",
+    "iteration"
+  ],
+  "$defs": {
+    "AdapterId": {
+      "description": "Identifies a session adapter, for example `workbench` or `claude-code`.",
+      "type": "string"
+    },
+    "AuftragId": {
+      "description": "Identifies a job file under `.companion/auftraege/<id>.json`.",
+      "type": "string"
+    },
+    "BudgetUsage": {
+      "description": "How much of a subscription or spending budget a session has used up.",
+      "type": "object",
+      "properties": {
+        "resets_at_ms": {
+          "description": "Unix time in milliseconds at which the window resets, when known.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "used_fraction": {
+          "description": "Share of the current window in use, between 0.0 and 1.0.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "used_fraction"
+      ]
+    },
+    "ContextUsage": {
+      "description": "How much of the model context window a session has used up.",
+      "type": "object",
+      "properties": {
+        "used_fraction": {
+          "description": "Share of the window in use, between 0.0 and 1.0.",
+          "type": "number",
+          "format": "double"
+        },
+        "used_tokens": {
+          "description": "Tokens in the window, if the adapter knows the absolute number.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "used_fraction"
+      ]
+    },
+    "Provenance": {
+      "description": "A value together with where it came from.\n\n`DESIGN.md` § Session-Adapter requires every status field to carry its origin, and the\nsession list to show an unknown field as unknown rather than as empty or zero. Making\n`Unknown` a variant without a payload is what enforces that: there is no value to\nmistake for a measurement.",
+      "oneOf": [
+        {
+          "description": "Read from a structured channel: a hook, a status file, an adapter report.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "measured"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "Derived or guessed, for example a token count extrapolated from elapsed time.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "estimated"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "The adapter cannot supply this field at all.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "origin"
+          ]
+        }
+      ]
+    },
+    "Provenance2": {
+      "description": "A value together with where it came from.\n\n`DESIGN.md` § Session-Adapter requires every status field to carry its origin, and the\nsession list to show an unknown field as unknown rather than as empty or zero. Making\n`Unknown` a variant without a payload is what enforces that: there is no value to\nmistake for a measurement.",
+      "oneOf": [
+        {
+          "description": "Read from a structured channel: a hook, a status file, an adapter report.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "measured"
+            },
+            "value": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "Derived or guessed, for example a token count extrapolated from elapsed time.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "estimated"
+            },
+            "value": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "The adapter cannot supply this field at all.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "origin"
+          ]
+        }
+      ]
+    },
+    "Provenance3": {
+      "description": "A value together with where it came from.\n\n`DESIGN.md` § Session-Adapter requires every status field to carry its origin, and the\nsession list to show an unknown field as unknown rather than as empty or zero. Making\n`Unknown` a variant without a payload is what enforces that: there is no value to\nmistake for a measurement.",
+      "oneOf": [
+        {
+          "description": "Read from a structured channel: a hook, a status file, an adapter report.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "measured"
+            },
+            "value": {
+              "$ref": "#/$defs/ContextUsage"
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "Derived or guessed, for example a token count extrapolated from elapsed time.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "estimated"
+            },
+            "value": {
+              "$ref": "#/$defs/ContextUsage"
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "The adapter cannot supply this field at all.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "origin"
+          ]
+        }
+      ]
+    },
+    "Provenance4": {
+      "description": "A value together with where it came from.\n\n`DESIGN.md` § Session-Adapter requires every status field to carry its origin, and the\nsession list to show an unknown field as unknown rather than as empty or zero. Making\n`Unknown` a variant without a payload is what enforces that: there is no value to\nmistake for a measurement.",
+      "oneOf": [
+        {
+          "description": "Read from a structured channel: a hook, a status file, an adapter report.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "measured"
+            },
+            "value": {
+              "$ref": "#/$defs/BudgetUsage"
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "Derived or guessed, for example a token count extrapolated from elapsed time.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "estimated"
+            },
+            "value": {
+              "$ref": "#/$defs/BudgetUsage"
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "The adapter cannot supply this field at all.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "origin"
+          ]
+        }
+      ]
+    },
+    "Provenance5": {
+      "description": "A value together with where it came from.\n\n`DESIGN.md` § Session-Adapter requires every status field to carry its origin, and the\nsession list to show an unknown field as unknown rather than as empty or zero. Making\n`Unknown` a variant without a payload is what enforces that: there is no value to\nmistake for a measurement.",
+      "oneOf": [
+        {
+          "description": "Read from a structured channel: a hook, a status file, an adapter report.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "measured"
+            },
+            "value": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "Derived or guessed, for example a token count extrapolated from elapsed time.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "estimated"
+            },
+            "value": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "The adapter cannot supply this field at all.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "origin"
+          ]
+        }
+      ]
+    },
+    "SessionId": {
+      "description": "Identifies one session. Unique per machine, assigned by the adapter that owns the session.",
+      "type": "string"
+    },
+    "SessionState": {
+      "description": "What a session is doing right now.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "busy",
+            "idle",
+            "done",
+            "error"
+          ]
+        },
+        {
+          "description": "Waiting for input from the person, including an open question.",
+          "type": "string",
+          "const": "waiting"
+        }
+      ]
+    }
+  }
+}

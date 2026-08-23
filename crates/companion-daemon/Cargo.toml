@@ -1,0 +1,33 @@
+[package]
+name = "companion-daemon"
+description = "The companion daemon: one per machine, serving shells and docking orchestrators over a user-only Unix socket."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "companion-daemon"
+path = "src/main.rs"
+
+[dependencies]
+companion-core.workspace = true
+companion-protocol.workspace = true
+
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "sync",
+    "signal",
+    "time",
+] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

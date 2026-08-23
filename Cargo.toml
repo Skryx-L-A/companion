@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "AGPL-3.0-only"
+repository = "https://github.com/Skryx-L-A/companion"
+
+[workspace.dependencies]
+companion-protocol = { path = "crates/companion-protocol" }
+companion-core = { path = "crates/companion-core" }
+
+async-trait = "0.1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+schemars = "1.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
