@@ -38,6 +38,11 @@ or on `companion.sock` inside the configuration directory where there is no runt
 as on macOS. `COMPANION_CONFIG_DIR` moves everything somewhere else, which is what the tests
 use so a run never touches a real installation.
 
+The end-to-end pass lives outside this directory, in the private part of the repository:
+`tests/e2e-write/run.sh` builds a workbench of its own on a separate tmux socket, drives
+both adapters against stubs and runs a gate command, then takes everything down again. It
+never touches a running session or a real workbench.
+
 The JSON Schema of the wire types is generated from the Rust types and committed under
 `protocol/schema/`, so a shell can build against it without a Rust toolchain. A type change
 without a matching export fails the test suite; regenerate with
