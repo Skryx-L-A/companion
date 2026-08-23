@@ -10,7 +10,7 @@ use companion_adapter_workbench::{WorkbenchAdapter, WorkbenchConfig};
 use companion_core::adapter::AdapterSet;
 use companion_core::{FileTokenStore, Registry, TokenStore, paths};
 use companion_daemon::{ServerConfig, prepare_config, start};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 /// How often the workbench adapter re-reads its state files. Fast enough that a session
@@ -50,10 +50,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let tokens = FileTokenStore::new(paths::token_file_path()).load_or_create()?;
     let registry = Arc::new(Registry::open(&paths::registry_path())?);
 
+    // An empty list means every adapter this build has; a filled one is a choice, and
+    // until now it was read, logged and ignored.
+    let wanted = |id: &str| {
+        settings.enabled_adapters.is_empty()
+            || settings.enabled_adapters.iter().any(|name| name == id)
+    };
+
     let mut adapters = AdapterSet::new();
     let workbench = Arc::new(WorkbenchAdapter::new(WorkbenchConfig::default()));
-    adapters.insert(workbench.clone());
-    adapters.insert(Arc::new(ClaudeAdapter::new(ClaudeConfig::default())));
+    if wanted(companion_adapter_workbench::ADAPTER_ID) {
+        adapters.insert(workbench.clone());
+    }
+    if wanted(companion_adapter_claude::ADAPTER_ID) {
+        adapters.insert(Arc::new(ClaudeAdapter::new(ClaudeConfig::default())));
+    }
+    if adapters.is_empty() {
+        warn!("the settings enable no adapter this build has, so the daemon sees no sessions");
+    }
     info!(count = adapters.len(), "adapters registered");
 
     let config = ServerConfig {
@@ -63,12 +77,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let handle = start(config).await?;
     // The watcher lives exactly as long as this run: the handle stops it on the way out.
-    let watch = workbench.watch(WORKBENCH_POLL);
+    // No adapter, no watcher.
+    let watch =
+        wanted(companion_adapter_workbench::ADAPTER_ID).then(|| workbench.watch(WORKBENCH_POLL));
     info!(socket = %handle.socket_path().display(), "ready");
 
     tokio::signal::ctrl_c().await?;
     info!("stopping");
-    watch.stop();
+    if let Some(watch) = watch {
+        watch.stop();
+    }
     handle.shutdown().await;
     Ok(())
 }

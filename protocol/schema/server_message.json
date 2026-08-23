@@ -382,14 +382,13 @@
       ]
     },
     "SessionState": {
-      "description": "What a session is doing right now.",
+      "description": "What a session is doing right now.\n\n`DESIGN.md` § Session-Adapter wants unknown things shown as unknown rather than as\nsomething plausible, and this field is where an adapter is most tempted to guess. An\nadapter that only sees a live terminal knows the session exists, not what it is doing:\nthat is [`SessionState::Unknown`]. One whose session has simply vanished knows it is\nover but not how it went: that is [`SessionState::Lost`].",
       "oneOf": [
         {
           "type": "string",
           "enum": [
             "busy",
             "idle",
-            "done",
             "error"
           ]
         },
@@ -397,6 +396,21 @@
           "description": "Waiting for input from the person, including an open question.",
           "type": "string",
           "const": "waiting"
+        },
+        {
+          "description": "Finished its work. Only for an adapter that saw it finish.",
+          "type": "string",
+          "const": "done"
+        },
+        {
+          "description": "The session is there, but the adapter cannot tell what it is doing.",
+          "type": "string",
+          "const": "unknown"
+        },
+        {
+          "description": "The session is gone and the adapter never learned how it ended. Over, but not\nfinished: a crash and a clean end look the same from the outside.",
+          "type": "string",
+          "const": "lost"
         }
       ]
     },
@@ -716,13 +730,22 @@
     },
     "CommandKind": {
       "description": "The commands an adapter can carry out.",
-      "type": "string",
-      "enum": [
-        "list",
-        "spawn",
-        "send",
-        "read",
-        "stop"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "list",
+            "spawn",
+            "send",
+            "read",
+            "stop"
+          ]
+        },
+        {
+          "description": "Cut the running turn short without ending the session. `DESIGN.md`\n§ Session-Adapter keeps this apart from `send`, which queues behind the turn, and\nfrom `stop`, which ends the session.",
+          "type": "string",
+          "const": "interrupt"
+        }
       ]
     },
     "EventKind": {
@@ -746,17 +769,26 @@
     },
     "StatusField": {
       "description": "The optional fields of a session status. An adapter names the ones it can fill; every\nfield it leaves out stays `unknown` in the session list.",
-      "type": "string",
-      "enum": [
-        "project",
-        "model",
-        "runtime_ms",
-        "context",
-        "budget",
-        "iteration",
-        "last_output",
-        "open_question",
-        "auftrag_id"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "project",
+            "model",
+            "runtime_ms",
+            "context",
+            "budget",
+            "iteration",
+            "last_output",
+            "open_question",
+            "auftrag_id"
+          ]
+        },
+        {
+          "description": "Whether the adapter can say what a session is doing at all. An adapter that leaves\nthis out reports `unknown` and `lost` instead of guessing between busy and idle.",
+          "type": "string",
+          "const": "state"
+        }
       ]
     },
     "SendOutcome": {

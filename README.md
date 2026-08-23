@@ -52,11 +52,17 @@ COMPANION_UPDATE_SCHEMAS=1 cargo test -p companion-protocol
 `Notification` events. It reports to the daemon over the socket and always exits 0, so a
 hook can never block a session.
 
-It is installed into a project's `.claude/settings.json` additively: existing hooks stay
-untouched, ours is appended, installing twice changes nothing, and the uninstall removes
-only our own entry. The command written there is the hook binary next to the daemon that is
-running, taken from its own path rather than from a build directory, and quoted so a path
-with a space survives the shell.
+It is installed into a project's `.claude/settings.local.json` additively: existing hooks
+stay untouched, ours is appended, installing twice changes nothing, and the uninstall
+removes only our own entry. The local file is the default target because the command is an
+absolute path on this machine — in the shared `settings.json` it would land in the
+repository and hand every colleague a hook that points nowhere. The command itself is the
+hook binary next to the running daemon, taken from its own path rather than from a build
+directory, and quoted so a path with a space survives the shell.
+
+Because the binary connects once per event, the daemon recognises a reporter that comes
+back: a session whose connection has gone away is taken over by the next one instead of
+appearing a second time in the list.
 
 ### Crates
 

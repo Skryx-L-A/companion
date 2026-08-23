@@ -129,6 +129,10 @@ pub enum Request {
         session_id: SessionId,
         window: ReadWindow,
     },
+    /// Cut the running turn short. The session stays alive and can be talked to again.
+    Interrupt {
+        session_id: SessionId,
+    },
     Stop {
         session_id: SessionId,
     },
@@ -170,6 +174,7 @@ pub enum RequestKind {
     Spawn,
     Send,
     Read,
+    Interrupt,
     Stop,
     Capabilities,
     RunGate,
@@ -194,6 +199,7 @@ impl Request {
             Self::Spawn(_) => RequestKind::Spawn,
             Self::Send { .. } => RequestKind::Send,
             Self::Read { .. } => RequestKind::Read,
+            Self::Interrupt { .. } => RequestKind::Interrupt,
             Self::Stop { .. } => RequestKind::Stop,
             Self::Capabilities { .. } => RequestKind::Capabilities,
             Self::RunGate { .. } => RequestKind::RunGate,

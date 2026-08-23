@@ -137,11 +137,24 @@ impl ClaudeAdapter {
 
     /// Installs `Stop`, `SubagentStop` and `Notification` into a project's settings so an
     /// interactive session reports itself. Existing hooks are never replaced.
+    ///
+    /// The target is the local settings file by default, because the command is an absolute
+    /// path on this machine: written into the shared `settings.json` it would land in the
+    /// repository and hand every colleague a hook that points nowhere.
     pub fn install_hooks(
         project: &Path,
         hook_command: &str,
     ) -> Result<hooks::HookChange, hooks::HookError> {
-        hooks::install(&project.join(".claude/settings.json"), hook_command)
+        Self::install_hooks_in(project, hook_command, hooks::HookTarget::Local)
+    }
+
+    /// Installs into a chosen settings file of the project.
+    pub fn install_hooks_in(
+        project: &Path,
+        hook_command: &str,
+        target: hooks::HookTarget,
+    ) -> Result<hooks::HookChange, hooks::HookError> {
+        hooks::install(&target.path_in(project), hook_command)
     }
 
     /// Installs the hooks with the command of the daemon that is running right now.
@@ -164,8 +177,30 @@ impl ClaudeAdapter {
         project: &Path,
         hook_command: &str,
     ) -> Result<hooks::HookChange, hooks::HookError> {
-        hooks::uninstall(&project.join(".claude/settings.json"), hook_command)
+        Self::uninstall_hooks_in(project, hook_command, hooks::HookTarget::Local)
     }
+
+    /// Removes the entry from a chosen settings file of the project.
+    pub fn uninstall_hooks_in(
+        project: &Path,
+        hook_command: &str,
+        target: hooks::HookTarget,
+    ) -> Result<hooks::HookChange, hooks::HookError> {
+        hooks::uninstall(&target.path_in(project), hook_command)
+    }
+}
+
+/// Everything from a byte offset, rounded down to the nearest character boundary.
+///
+/// An offset that lands inside a multi-byte character used to yield an empty string while
+/// `next_offset` still pointed at the end, so the reader believed it was up to date and the
+/// text in between was gone. Rounding down repeats a few bytes at worst.
+pub(crate) fn slice_from(text: &str, offset: u64) -> String {
+    let mut start = (offset as usize).min(text.len());
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    text[start..].to_owned()
 }
 
 /// The message shape the CLI expects on stdin in `--input-format stream-json`.
@@ -331,18 +366,23 @@ async fn pump(
     // Closed stdout means the process is gone.
     match session {
         Some(id) => {
-            inner.sessions.lock().await.remove(&id);
-            inner.emit(
-                &id,
-                Event::SessionEnded {
-                    reason: if failed {
-                        EndReason::Crashed
-                    } else {
-                        EndReason::Finished
+            // A session that is no longer registered was stopped through `stop`, which
+            // already said so. Reporting a second, different ending here would contradict
+            // the first one.
+            let was_registered = inner.sessions.lock().await.remove(&id).is_some();
+            if was_registered {
+                inner.emit(
+                    &id,
+                    Event::SessionEnded {
+                        reason: if failed {
+                            EndReason::Crashed
+                        } else {
+                            EndReason::Finished
+                        },
+                        result_path: None,
                     },
-                    result_path: None,
-                },
-            );
+                );
+            }
         }
         None => {
             if let Some(sender) = started.take() {
@@ -505,7 +545,9 @@ impl SessionAdapter for ClaudeAdapter {
         status.project = Some(project.display().to_string());
         status.auftrag_id = options.auftrag_id;
         if let Some(model) = options.model {
-            status.model = Provenance::Measured(model);
+            // What was asked for, not yet what is running: the init line of the stream
+            // confirms it a moment later and lifts this to measured.
+            status.model = Provenance::Estimated(model);
         }
 
         let transcript = transcript::find(
@@ -593,15 +635,23 @@ impl SessionAdapter for ClaudeAdapter {
                 }
                 slice
             }
-            ReadWindow::FromOffset { offset } => {
-                text.get(offset as usize..).unwrap_or_default().to_owned()
-            }
+            ReadWindow::FromOffset { offset } => slice_from(&text, offset),
         };
 
         Ok(ReadChunk {
             next_offset: text.len() as u64,
             text: slice,
         })
+    }
+
+    async fn interrupt(&self, session: &SessionId) -> AdapterResult<()> {
+        // The contract exists, the implementation does not: the CLI in stream-json mode
+        // has no documented way to cut a turn short, and killing the process would be
+        // `stop` under another name. Saying so is better than doing the wrong thing.
+        if !self.inner.sessions.lock().await.contains_key(session) {
+            return Err(AdapterError::UnknownSession(session.clone()));
+        }
+        Err(AdapterError::NotSupported(CommandKind::Interrupt))
     }
 
     async fn stop(&self, session: &SessionId) -> AdapterResult<()> {
@@ -637,6 +687,16 @@ impl SessionAdapter for ClaudeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_offset_inside_a_character_rounds_down_instead_of_losing_the_text() {
+        let text = "abc\u{e4}\u{f6}\u{fc}def";
+        // Byte 4 sits inside the two-byte character that starts at byte 3.
+        assert_eq!(slice_from(text, 4), "\u{e4}\u{f6}\u{fc}def");
+        assert_eq!(slice_from(text, 3), "\u{e4}\u{f6}\u{fc}def");
+        assert_eq!(slice_from(text, 0), text);
+        assert_eq!(slice_from(text, 9_999), "");
+    }
 
     #[test]
     fn the_user_message_matches_what_the_cli_reads() {

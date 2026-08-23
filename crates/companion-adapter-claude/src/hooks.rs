@@ -18,6 +18,27 @@ pub const HOOK_EVENTS: [&str; 3] = ["Stop", "SubagentStop", "Notification"];
 /// Name of the binary Claude Code calls for those events.
 pub const HOOK_BINARY: &str = "companion-hook";
 
+/// Which settings file of a project the hook goes into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HookTarget {
+    /// `.claude/settings.local.json`: the file that is not checked in. The default,
+    /// because the hook command is an absolute path on this machine.
+    #[default]
+    Local,
+    /// `.claude/settings.json`: shared with everybody who clones the project. Only right
+    /// where the command is the same on every machine.
+    Shared,
+}
+
+impl HookTarget {
+    pub fn path_in(self, project: &Path) -> PathBuf {
+        match self {
+            Self::Local => project.join(".claude/settings.local.json"),
+            Self::Shared => project.join(".claude/settings.json"),
+        }
+    }
+}
+
 /// Seconds a hook may take before Claude Code gives up on it. The hook writes one line to
 /// a local socket, so this is generous.
 const HOOK_TIMEOUT_SECONDS: u64 = 5;
@@ -360,6 +381,19 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "{ this is not json",
             "the file must be left exactly as it was"
+        );
+    }
+
+    #[test]
+    fn the_hook_lands_in_the_file_that_is_not_checked_in() {
+        let project = Path::new("/tmp/project");
+        assert_eq!(
+            HookTarget::default().path_in(project),
+            project.join(".claude/settings.local.json")
+        );
+        assert_eq!(
+            HookTarget::Shared.path_in(project),
+            project.join(".claude/settings.json")
         );
     }
 

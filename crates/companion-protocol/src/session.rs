@@ -7,6 +7,12 @@ use crate::ids::{AdapterId, AuftragId, SessionId};
 use crate::provenance::Provenance;
 
 /// What a session is doing right now.
+///
+/// `DESIGN.md` § Session-Adapter wants unknown things shown as unknown rather than as
+/// something plausible, and this field is where an adapter is most tempted to guess. An
+/// adapter that only sees a live terminal knows the session exists, not what it is doing:
+/// that is [`SessionState::Unknown`]. One whose session has simply vanished knows it is
+/// over but not how it went: that is [`SessionState::Lost`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
@@ -14,8 +20,26 @@ pub enum SessionState {
     Idle,
     /// Waiting for input from the person, including an open question.
     Waiting,
+    /// Finished its work. Only for an adapter that saw it finish.
     Done,
     Error,
+    /// The session is there, but the adapter cannot tell what it is doing.
+    Unknown,
+    /// The session is gone and the adapter never learned how it ended. Over, but not
+    /// finished: a crash and a clean end look the same from the outside.
+    Lost,
+}
+
+impl SessionState {
+    /// Whether the session is over, however it ended.
+    pub fn is_final(self) -> bool {
+        matches!(self, Self::Done | Self::Error | Self::Lost)
+    }
+
+    /// Whether the adapter knows what the session is doing.
+    pub fn is_known(self) -> bool {
+        !matches!(self, Self::Unknown)
+    }
 }
 
 /// How much of the model context window a session has used up.

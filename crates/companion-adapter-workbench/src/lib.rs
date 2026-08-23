@@ -41,7 +41,12 @@ pub use files::{SessionFile, StoredSession, WorkerFile};
 pub const ADAPTER_ID: &str = "workbench";
 
 /// Separates a session from one of its workers in a session id.
-const WORKER_SEPARATOR: char = '#';
+///
+/// A slash, of all things, because it is the one character a session stem cannot contain:
+/// the workbench builds the stem by turning every slash of the project path into a dash.
+/// Any other separator could appear inside a project path and would split the id in the
+/// wrong place.
+const WORKER_SEPARATOR: char = '/';
 
 /// A change of at least this many percentage points is worth a `budget_level` event.
 /// Below that the value flickers with every request and would drown the event stream.
@@ -72,6 +77,10 @@ impl ProbeBudget {
 #[derive(Debug, Default, Clone)]
 struct Snapshot {
     sessions: BTreeMap<SessionId, SessionStatus>,
+    /// What went wrong while asking tmux, if anything. A failed question is not an empty
+    /// answer: without this the adapter would report every session as gone the moment tmux
+    /// hiccups.
+    tmux_error: Option<String>,
     /// When each session was last active, as the workbench writes it: an RFC 3339 stamp in
     /// UTC. Kept as the string it is, because in that shape lexical order is chronological
     /// order and the crate needs no date library for it.
@@ -119,14 +128,15 @@ impl WorkbenchAdapter {
     /// This is the whole event source of the adapter. It is public so a test can step it
     /// deterministically instead of waiting for a timer.
     pub async fn poll_once(&self) -> Vec<AdapterEvent> {
-        let snapshot = self.snapshot().await;
-        let previous = {
+        let previous = self.previous_snapshot();
+        let snapshot = self.snapshot(previous.as_ref()).await;
+        {
             let mut guard = self
                 .previous
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.replace(snapshot.clone())
-        };
+            *guard = Some(snapshot.clone());
+        }
 
         let events = match previous {
             // The first poll only establishes the baseline. Announcing every session that
@@ -157,24 +167,65 @@ impl WorkbenchAdapter {
         WatchHandle { task }
     }
 
-    async fn snapshot(&self) -> Snapshot {
+    fn previous_snapshot(&self) -> Option<Snapshot> {
+        self.previous
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// The state a session had in the previous poll, for the moments when tmux cannot be
+    /// asked. Keeping the last answer is honest; declaring everything gone is not.
+    fn carried_state(previous: Option<&Snapshot>, id: &SessionId) -> SessionState {
+        previous
+            .and_then(|snapshot| snapshot.sessions.get(id))
+            .map_or(SessionState::Unknown, |status| status.state)
+    }
+
+    async fn snapshot(&self, previous: Option<&Snapshot>) -> Snapshot {
         let budget = ProbeBudget::new(self.config.probe_budget);
         let (stored, broken) = files::read_sessions(&self.config.sessions_dir);
-        let panes = commands::list_panes(&self.config)
-            .await
-            .unwrap_or_else(|error| {
-                debug!(%error, "tmux not available, sessions count as gone");
-                Vec::new()
-            });
+
+        // A failed call and an empty answer mean very different things, so they stay apart
+        // here instead of collapsing into one empty list.
+        let (panes, tmux_error) = match commands::list_panes(&self.config).await {
+            Ok(panes) => (Some(panes), None),
+            Err(error) => {
+                debug!(%error, "tmux could not be asked, keeping the previous states");
+                (None, Some(error.to_string()))
+            }
+        };
 
         let live_tmux: BTreeSet<&str> = panes
             .iter()
+            .flatten()
             .map(|pane| pane.tmux_session.as_str())
             .collect();
         let live_workers: BTreeSet<&str> = panes
             .iter()
+            .flatten()
             .filter_map(|pane| pane.worker.as_deref())
             .collect();
+
+        // Which session a worker name belongs to when the same name appears in more than
+        // one: the most recently spawned one wins. Worker names collide across sessions in
+        // this workbench, and without this the older session would claim the newer one's
+        // result file as its own finish signal.
+        let mut result_owner: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
+        for entry in &stored {
+            for worker in &entry.session.workers {
+                let Some(name) = worker.name.as_deref().filter(|name| !name.is_empty()) else {
+                    continue;
+                };
+                let spawned = worker.spawned_at.as_deref().unwrap_or("");
+                match result_owner.get(name) {
+                    Some((_, seen)) if *seen >= spawned => {}
+                    _ => {
+                        result_owner.insert(name, (entry.stem.as_str(), spawned));
+                    }
+                }
+            }
+        }
 
         let mut sessions = BTreeMap::new();
         let mut results = BTreeMap::new();
@@ -194,16 +245,16 @@ impl WorkbenchAdapter {
             }
 
             let id = SessionId::new(entry.stem.clone());
-            let alive = tmux.as_deref().is_some_and(|name| live_tmux.contains(name));
-            let mut status = SessionStatus::new(
-                id.clone(),
-                self.id.clone(),
-                if alive {
-                    SessionState::Idle
-                } else {
-                    SessionState::Done
-                },
-            );
+            // A live pane says the session exists, not what it is doing; a missing one says
+            // it is over, not how it went. Anything more precise would be invented here.
+            let state = match &panes {
+                None => Self::carried_state(previous, &id),
+                Some(_) if tmux.as_deref().is_some_and(|name| live_tmux.contains(name)) => {
+                    SessionState::Unknown
+                }
+                Some(_) => SessionState::Lost,
+            };
+            let mut status = SessionStatus::new(id.clone(), self.id.clone(), state);
             status.project = session.dir.clone();
             status.model = match session.model.clone() {
                 Some(model) if !model.is_empty() => Provenance::Measured(model),
@@ -219,17 +270,13 @@ impl WorkbenchAdapter {
                     continue;
                 };
                 let worker_id = SessionId::new(format!("{}{WORKER_SEPARATOR}{name}", entry.stem));
-                let running = live_workers.contains(name.as_str());
+                let state = match &panes {
+                    None => Self::carried_state(previous, &worker_id),
+                    Some(_) if live_workers.contains(name.as_str()) => SessionState::Unknown,
+                    Some(_) => SessionState::Lost,
+                };
 
-                let mut status = SessionStatus::new(
-                    worker_id.clone(),
-                    self.id.clone(),
-                    if running {
-                        SessionState::Idle
-                    } else {
-                        SessionState::Done
-                    },
-                );
+                let mut status = SessionStatus::new(worker_id.clone(), self.id.clone(), state);
                 status.project = worker.dir.clone().or_else(|| session.dir.clone());
                 status.model = match worker.model.clone() {
                     Some(model) if !model.is_empty() => Provenance::Measured(model),
@@ -255,7 +302,13 @@ impl WorkbenchAdapter {
                 {
                     last_active.insert(worker_id.clone(), stamp);
                 }
-                if let Some(path) = files::newest_result_file(&self.config.results_dir, &name) {
+                // Only the session this worker actually belongs to claims its results.
+                let owns_results = result_owner
+                    .get(name.as_str())
+                    .is_none_or(|(stem, _)| *stem == entry.stem);
+                if owns_results
+                    && let Some(path) = files::newest_result_file(&self.config.results_dir, &name)
+                {
                     let path = path.display().to_string();
                     status.last_output = Some(format!("result file: {path}"));
                     results.insert(worker_id.clone(), path);
@@ -264,8 +317,11 @@ impl WorkbenchAdapter {
             }
         }
 
-        self.resolve_unknown_panes(&panes, &mut sessions, budget)
-            .await;
+        // Without a pane list there is nothing to resolve, and guessing would be worse.
+        if let Some(panes) = &panes {
+            self.resolve_unknown_panes(panes, &mut sessions, budget)
+                .await;
+        }
 
         let budget = self.budget().await;
         for status in sessions.values_mut() {
@@ -274,6 +330,7 @@ impl WorkbenchAdapter {
 
         Snapshot {
             sessions,
+            tmux_error,
             last_active,
             results,
             budget,
@@ -315,7 +372,8 @@ impl WorkbenchAdapter {
                 continue;
             }
 
-            let mut status = SessionStatus::new(id.clone(), self.id.clone(), SessionState::Idle);
+            // Its pane is alive, which says it exists and nothing else.
+            let mut status = SessionStatus::new(id.clone(), self.id.clone(), SessionState::Unknown);
             status.project = Some(dir.clone());
             if let Ok(listed) = commands::list_sessions(&self.config, &dir).await
                 && let Some(entry) = listed
@@ -386,6 +444,19 @@ impl Drop for WatchHandle {
     }
 }
 
+/// Everything from a byte offset, rounded down to the nearest character boundary.
+///
+/// An offset that lands inside a multi-byte character used to yield an empty string while
+/// `next_offset` still pointed at the end, so the reader believed it was up to date and the
+/// text in between was gone. Rounding down repeats a few bytes at worst.
+fn slice_from(text: &str, offset: u64) -> String {
+    let mut start = (offset as usize).min(text.len());
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    text[start..].to_owned()
+}
+
 /// What changed between two polls.
 fn diff(previous: &Snapshot, current: &Snapshot) -> Vec<AdapterEvent> {
     let mut events = Vec::new();
@@ -399,21 +470,28 @@ fn diff(previous: &Snapshot, current: &Snapshot) -> Vec<AdapterEvent> {
                 },
             )),
             Some(before) if before.state != status.state => {
-                events.push(AdapterEvent::for_session(
-                    id.clone(),
-                    match status.state {
-                        SessionState::Busy => Event::Busy,
-                        SessionState::Idle => Event::Idle,
-                        SessionState::Waiting => Event::WaitingForInput { hint: None },
-                        SessionState::Done => Event::Done {
-                            summary: None,
-                            result_path: current.results.get(id).cloned(),
-                        },
-                        SessionState::Error => Event::Error {
-                            message: "session reported an error".to_owned(),
-                        },
-                    },
-                ));
+                // Only two of the states this adapter can report are worth an event: a
+                // session that vanished, and one that is there again. It never learns
+                // busy, idle or waiting, so it never claims them.
+                if let Some(event) = match status.state {
+                    SessionState::Lost => Some(Event::SessionEnded {
+                        reason: EndReason::Lost,
+                        result_path: current.results.get(id).cloned(),
+                    }),
+                    SessionState::Done => Some(Event::Done {
+                        summary: None,
+                        result_path: current.results.get(id).cloned(),
+                    }),
+                    SessionState::Error => Some(Event::Error {
+                        message: "session reported an error".to_owned(),
+                    }),
+                    SessionState::Unknown
+                    | SessionState::Busy
+                    | SessionState::Idle
+                    | SessionState::Waiting => None,
+                } {
+                    events.push(AdapterEvent::for_session(id.clone(), event));
+                }
             }
             Some(_) => {}
         }
@@ -447,6 +525,14 @@ fn diff(previous: &Snapshot, current: &Snapshot) -> Vec<AdapterEvent> {
     if budget_moved(&previous.budget, &current.budget) {
         events.push(AdapterEvent::adapter_wide(Event::BudgetLevel {
             budget: current.budget.clone(),
+        }));
+    }
+
+    if let Some(error) = &current.tmux_error
+        && previous.tmux_error.is_none()
+    {
+        events.push(AdapterEvent::adapter_wide(Event::Error {
+            message: format!("tmux could not be asked, session states are stale: {error}"),
         }));
     }
 
@@ -491,15 +577,18 @@ impl SessionAdapter for WorkbenchAdapter {
             // Reading is limited to worker sessions, which are the ones that leave a result
             // file behind; a main session has no text channel that is not the terminal.
             commands: vec![CommandKind::List, CommandKind::Read],
+            // Busy and idle are missing on purpose: this adapter reads files and pane
+            // metadata, and neither says what a session is doing. Claiming those events
+            // would be a promise it cannot keep.
             events: vec![
                 EventKind::SessionStarted,
                 EventKind::SessionEnded,
-                EventKind::Busy,
-                EventKind::Idle,
                 EventKind::Done,
                 EventKind::BudgetLevel,
                 EventKind::Error,
             ],
+            // State is absent for the same reason: the adapter reports `unknown` and
+            // `lost`, never a guess between busy and idle.
             status_fields: vec![
                 StatusField::Project,
                 StatusField::Model,
@@ -513,16 +602,15 @@ impl SessionAdapter for WorkbenchAdapter {
     }
 
     async fn list(&self) -> AdapterResult<Vec<SessionStatus>> {
-        let snapshot = self.snapshot().await;
+        let previous = self.previous_snapshot();
+        let snapshot = self.snapshot(previous.as_ref()).await;
 
         // Running sessions first, then the finished ones with the most recent activity.
         // The daemon cuts the finished tail off at the client's limit and cannot know which
         // of them matter, so the order has to be right here, where the timestamps are.
         let mut sessions: Vec<SessionStatus> = snapshot.sessions.into_values().collect();
         sessions.sort_by(|left, right| {
-            let finished = |status: &SessionStatus| {
-                matches!(status.state, SessionState::Done | SessionState::Error)
-            };
+            let finished = |status: &SessionStatus| status.state.is_final();
             finished(left).cmp(&finished(right)).then_with(|| {
                 snapshot
                     .last_active
@@ -558,9 +646,7 @@ impl SessionAdapter for WorkbenchAdapter {
                 }
                 slice
             }
-            ReadWindow::FromOffset { offset } => {
-                text.get(offset as usize..).unwrap_or_default().to_owned()
-            }
+            ReadWindow::FromOffset { offset } => slice_from(&text, offset),
         };
 
         Ok(ReadChunk {
@@ -597,21 +683,63 @@ mod tests {
     }
 
     #[test]
+    fn an_offset_inside_a_character_rounds_down_instead_of_losing_the_text() {
+        let text = "Ergebnis: \u{fc}berpr\u{fc}ft";
+        let inside = text.find('\u{fc}').unwrap() + 1;
+        assert!(slice_from(text, inside as u64).starts_with('\u{fc}'));
+        assert_eq!(slice_from(text, 0), text);
+        assert_eq!(slice_from(text, 9_999), "");
+    }
+
+    #[test]
     fn a_new_session_is_announced_once() {
-        let events = diff(&snapshot(&[]), &snapshot(&[("a", SessionState::Idle)]));
+        let events = diff(&snapshot(&[]), &snapshot(&[("a", SessionState::Unknown)]));
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0].event, Event::SessionStarted { .. }));
     }
 
     #[test]
     fn an_unchanged_session_produces_nothing() {
-        let before = snapshot(&[("a", SessionState::Idle)]);
+        let before = snapshot(&[("a", SessionState::Unknown)]);
         assert!(diff(&before, &before).is_empty());
     }
 
     #[test]
+    fn a_pane_that_goes_away_ends_the_session_as_lost() {
+        let events = diff(
+            &snapshot(&[("a", SessionState::Unknown)]),
+            &snapshot(&[("a", SessionState::Lost)]),
+        );
+        assert!(matches!(
+            events[0].event,
+            Event::SessionEnded {
+                reason: EndReason::Lost,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_tmux_failure_is_reported_once_and_not_as_a_wave_of_endings() {
+        let before = snapshot(&[("a", SessionState::Unknown)]);
+        let mut current = before.clone();
+        current.tmux_error = Some("tmux: no server running".to_owned());
+
+        let events = diff(&before, &current);
+        assert_eq!(events.len(), 1, "saw {events:?}");
+        assert!(matches!(
+            &events[0].event,
+            Event::Error { message } if message.contains("stale")
+        ));
+        assert!(
+            diff(&current, &current).is_empty(),
+            "the same failure is not news twice"
+        );
+    }
+
+    #[test]
     fn a_session_that_disappears_ends_as_lost() {
-        let events = diff(&snapshot(&[("a", SessionState::Idle)]), &snapshot(&[]));
+        let events = diff(&snapshot(&[("a", SessionState::Unknown)]), &snapshot(&[]));
         assert!(matches!(
             events[0].event,
             Event::SessionEnded {
@@ -623,10 +751,10 @@ mod tests {
 
     #[test]
     fn a_new_result_file_finishes_the_worker() {
-        let before = snapshot(&[("a#worker", SessionState::Idle)]);
+        let before = snapshot(&[("a/worker", SessionState::Unknown)]);
         let mut current = before.clone();
         current.results.insert(
-            SessionId::new("a#worker"),
+            SessionId::new("a/worker"),
             "/tmp/results/worker/1.md".to_owned(),
         );
 
