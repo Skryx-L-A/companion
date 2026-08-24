@@ -38,7 +38,17 @@ pub enum GateError {
         #[source]
         source: std::io::Error,
     },
+    #[error(
+        "the working directory {dir} resolves outside the project {project}; a gate runs inside \
+         the project it belongs to"
+    )]
+    WorkingDirEscape { dir: String, project: String },
 }
+
+/// Environment variables a gate is allowed to see. Everything else is cleared, so a gate
+/// runs with a small, predictable environment instead of the whole daemon's — it never
+/// inherits variables that only the daemon needs.
+const GATE_ENV_ALLOW: [&str; 5] = ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR"];
 
 /// Runs the command and waits for it, at most `timeout` long.
 ///
@@ -49,16 +59,22 @@ pub async fn run(
     project: &Path,
     timeout: Duration,
 ) -> Result<GateOutcome, GateError> {
-    let working_dir = resolve_working_dir(command, project);
+    let working_dir = resolve_working_dir(command, project)?;
 
     let mut process = Command::new(&command.program);
     process
         .args(&command.args)
         .current_dir(&working_dir)
+        .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    for key in GATE_ENV_ALLOW {
+        if let Ok(value) = std::env::var(key) {
+            process.env(key, value);
+        }
+    }
 
     let child = process.spawn().map_err(|source| {
         if source.kind() == std::io::ErrorKind::NotFound {
@@ -107,18 +123,48 @@ pub async fn run(
 
 /// Where the command runs: what the job file says, resolved against the project when it is
 /// relative, and the project itself when the file says nothing.
-fn resolve_working_dir(command: &GateCommand, project: &Path) -> PathBuf {
-    match command.working_dir.as_deref() {
-        None => project.to_path_buf(),
-        Some(dir) => {
-            let path = Path::new(dir);
-            if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                project.join(path)
+///
+/// The resolved path has to stay inside the project. A `..` that climbs out, or an absolute
+/// path somewhere else, is refused rather than run: the approval binds a command to the
+/// project it belongs to, and a gate that runs elsewhere is not the gate that was approved.
+/// The check is lexical, so it holds whether or not the directory exists yet.
+fn resolve_working_dir(command: &GateCommand, project: &Path) -> Result<PathBuf, GateError> {
+    let Some(dir) = command.working_dir.as_deref() else {
+        return Ok(project.to_path_buf());
+    };
+    let path = Path::new(dir);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project.join(path)
+    };
+    let resolved = lexical_normalize(&joined);
+    let root = lexical_normalize(project);
+    if resolved.starts_with(&root) {
+        Ok(resolved)
+    } else {
+        Err(GateError::WorkingDirEscape {
+            dir: dir.to_owned(),
+            project: project.display().to_string(),
+        })
+    }
+}
+
+/// Resolves `.` and `..` without touching the file system, so a path can be checked for
+/// containment before the directory it names exists.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
             }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
         }
     }
+    out
 }
 
 fn push_trimmed(into: &mut String, bytes: &[u8]) {
@@ -241,20 +287,69 @@ mod tests {
         let mut command = command("/usr/bin/true", &[]);
         command.working_dir = Some("crates/core".to_owned());
         assert_eq!(
-            resolve_working_dir(&command, Path::new("/tmp/projekt")),
+            resolve_working_dir(&command, Path::new("/tmp/projekt")).unwrap(),
             Path::new("/tmp/projekt/crates/core")
-        );
-
-        command.working_dir = Some("/opt/anderswo".to_owned());
-        assert_eq!(
-            resolve_working_dir(&command, Path::new("/tmp/projekt")),
-            Path::new("/opt/anderswo")
         );
 
         command.working_dir = None;
         assert_eq!(
-            resolve_working_dir(&command, Path::new("/tmp/projekt")),
+            resolve_working_dir(&command, Path::new("/tmp/projekt")).unwrap(),
             Path::new("/tmp/projekt")
         );
+    }
+
+    #[test]
+    fn a_working_directory_outside_the_project_is_refused() {
+        let mut command = command("/usr/bin/true", &[]);
+
+        // An absolute path somewhere else.
+        command.working_dir = Some("/opt/anderswo".to_owned());
+        assert!(matches!(
+            resolve_working_dir(&command, Path::new("/tmp/projekt")),
+            Err(GateError::WorkingDirEscape { .. })
+        ));
+
+        // A relative path that climbs out with `..`.
+        command.working_dir = Some("../../etc".to_owned());
+        assert!(matches!(
+            resolve_working_dir(&command, Path::new("/tmp/projekt")),
+            Err(GateError::WorkingDirEscape { .. })
+        ));
+
+        // A `..` that stays inside is fine.
+        command.working_dir = Some("crates/../src".to_owned());
+        assert_eq!(
+            resolve_working_dir(&command, Path::new("/tmp/projekt")).unwrap(),
+            Path::new("/tmp/projekt/src")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gate_does_not_inherit_the_daemon_environment() {
+        // The test process always carries CARGO_* variables, and none of them is on the
+        // gate's allow list. If the gate inherited the daemon environment they would show up
+        // in `env`; with the environment cleared they cannot.
+        let outcome = run(
+            &command("/usr/bin/env", &[]),
+            Path::new("/tmp"),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        assert!(outcome.passed, "env should run: {outcome:?}");
+        let printed = outcome.output.unwrap_or_default();
+        assert!(
+            !printed.contains("CARGO"),
+            "the gate inherited the daemon environment: {printed}"
+        );
+        // Every line that is there names an allowed variable, nothing else.
+        for line in printed.lines() {
+            if let Some((key, _)) = line.split_once('=') {
+                assert!(
+                    GATE_ENV_ALLOW.contains(&key),
+                    "unexpected variable {key} reached the gate"
+                );
+            }
+        }
     }
 }

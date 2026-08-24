@@ -48,6 +48,10 @@ pub struct VoiceLimits {
     pub max_streams: usize,
     /// Deadline for one request against an endpoint.
     pub request_timeout: Duration,
+    /// How long a dictation may go without a chunk before it is dropped. A shell that opens
+    /// a dictation and then goes away without ending it must not hold one of the few stream
+    /// slots for the rest of the daemon's life.
+    pub max_idle: Duration,
 }
 
 impl Default for VoiceLimits {
@@ -62,9 +66,19 @@ impl Default for VoiceLimits {
             max_dictation: Duration::from_secs(180),
             max_streams: 4,
             request_timeout: Duration::from_secs(60),
+            // A dictation the shell keeps feeding stays open; one that falls silent for two
+            // minutes is abandoned and its slot is reclaimed.
+            max_idle: Duration::from_secs(120),
         }
     }
 }
+
+/// Plausible bounds on the audio a dictation declares. A rate far outside this is either a
+/// bug or a client trying to overflow the header arithmetic, and neither should open a
+/// dictation.
+const MIN_SAMPLE_RATE_HZ: u32 = 8_000;
+const MAX_SAMPLE_RATE_HZ: u32 = 48_000;
+const MAX_CHANNELS: u16 = 2;
 
 /// One open dictation.
 struct Dictation {
@@ -77,6 +91,11 @@ struct Dictation {
     /// Whether a partial is on its way to an endpoint right now. Without this a slow
     /// endpoint would collect a queue of windows that are already out of date.
     partial_running: bool,
+    /// The connection that opened this dictation, so its streams can be dropped when it
+    /// goes away.
+    owner: String,
+    /// When a chunk last arrived, so an abandoned dictation can be reclaimed.
+    last_activity_ms: u64,
 }
 
 impl Dictation {
@@ -123,11 +142,15 @@ impl VoiceEngine {
     }
 
     /// Opens a dictation and returns the id every chunk of it has to carry.
+    ///
+    /// `owner` is the connection that opened it, so [`Self::release_owner`] can drop the
+    /// dictations of a connection that goes away.
     pub fn begin(
         &self,
         sample_rate_hz: u32,
         channels: u16,
         language: Option<String>,
+        owner: String,
     ) -> Result<VoiceId, VoiceError> {
         // Refused here rather than at the first chunk: a shell that has no speech
         // recognition configured should learn that when it presses the button, not after it
@@ -137,8 +160,23 @@ impl VoiceEngine {
                 role: EndpointRole::Stt.as_str(),
             });
         }
+        if !(MIN_SAMPLE_RATE_HZ..=MAX_SAMPLE_RATE_HZ).contains(&sample_rate_hz) {
+            return Err(VoiceError::InvalidAudio {
+                detail: format!(
+                    "sample rate {sample_rate_hz} Hz is outside {MIN_SAMPLE_RATE_HZ}..={MAX_SAMPLE_RATE_HZ}"
+                ),
+            });
+        }
+        if channels == 0 || channels > MAX_CHANNELS {
+            return Err(VoiceError::InvalidAudio {
+                detail: format!("{channels} channels; between 1 and {MAX_CHANNELS} are usable"),
+            });
+        }
 
         let mut streams = self.lock_streams();
+        // Reclaim any dictation nobody has fed for a while before counting slots, so an
+        // abandoned one cannot keep a new one out.
+        self.drop_stale(&mut streams);
         if streams.len() >= self.limits.max_streams {
             return Err(VoiceError::TooMuch {
                 what: "open dictations",
@@ -155,9 +193,25 @@ impl VoiceEngine {
                 samples: Vec::new(),
                 partial_at: 0,
                 partial_running: false,
+                owner,
+                last_activity_ms: now_ms(),
             },
         );
         Ok(voice_id)
+    }
+
+    /// Drops every dictation a connection opened. Called when that connection goes away, so
+    /// a shell that opened a dictation and never ended it does not hold a slot for good.
+    pub fn release_owner(&self, owner: &str) {
+        self.lock_streams()
+            .retain(|_, dictation| dictation.owner != owner);
+    }
+
+    /// Removes dictations that have gone silent longer than the idle ceiling.
+    fn drop_stale(&self, streams: &mut HashMap<VoiceId, Dictation>) {
+        let now = now_ms();
+        let idle_ms = self.limits.max_idle.as_millis() as u64;
+        streams.retain(|_, dictation| now.saturating_sub(dictation.last_activity_ms) < idle_ms);
     }
 
     /// Takes one piece of recorded audio and, when enough new audio has arrived, starts a
@@ -187,6 +241,7 @@ impl VoiceEngine {
                 });
             }
             dictation.samples.extend_from_slice(&samples);
+            dictation.last_activity_ms = now_ms();
 
             let new_bytes = dictation.samples.len() - dictation.partial_at;
             let due = dictation.seconds(new_bytes) >= self.limits.partial_after.as_secs_f64();
@@ -465,7 +520,9 @@ mod tests {
     #[tokio::test]
     async fn a_dictation_without_a_configured_endpoint_is_refused_at_the_start() {
         let engine = engine(EndpointConfig::empty());
-        let error = engine.begin(16_000, 1, None).expect_err("must refuse");
+        let error = engine
+            .begin(16_000, 1, None, "test".to_owned())
+            .expect_err("must refuse");
         assert!(
             matches!(error, VoiceError::NoEndpoint { role: "stt" }),
             "{error}"
@@ -484,7 +541,7 @@ mod tests {
     #[tokio::test]
     async fn audio_that_is_not_base64_is_refused_and_nothing_is_buffered() {
         let engine = engine(dead_stt());
-        let voice_id = engine.begin(16_000, 1, None).unwrap();
+        let voice_id = engine.begin(16_000, 1, None, "test".to_owned()).unwrap();
         let error = engine
             .chunk(&voice_id, "this is not base64!!")
             .expect_err("must refuse");
@@ -504,7 +561,7 @@ mod tests {
             Arc::new(NoSecrets),
             limits,
         ));
-        let voice_id = engine.begin(16_000, 1, None).unwrap();
+        let voice_id = engine.begin(16_000, 1, None, "test".to_owned()).unwrap();
 
         // 16 kHz mono PCM16 is 32000 bytes per second, so this is two seconds.
         let two_seconds = BASE64.encode(vec![0u8; 64_000]);
@@ -526,8 +583,10 @@ mod tests {
             Arc::new(NoSecrets),
             limits,
         ));
-        engine.begin(16_000, 1, None).unwrap();
-        let error = engine.begin(16_000, 1, None).expect_err("must refuse");
+        engine.begin(16_000, 1, None, "test".to_owned()).unwrap();
+        let error = engine
+            .begin(16_000, 1, None, "test".to_owned())
+            .expect_err("must refuse");
         assert!(matches!(error, VoiceError::TooMuch { .. }), "{error}");
     }
 
@@ -535,7 +594,7 @@ mod tests {
     async fn a_dictation_whose_endpoint_is_dead_ends_in_an_error_event() {
         let engine = engine(dead_stt());
         let mut events = engine.bus.subscribe();
-        let voice_id = engine.begin(16_000, 1, None).unwrap();
+        let voice_id = engine.begin(16_000, 1, None, "test".to_owned()).unwrap();
         engine
             .chunk(&voice_id, &BASE64.encode(vec![0u8; 3200]))
             .unwrap();
@@ -579,10 +638,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_dictation_with_an_absurd_sample_rate_is_refused() {
+        let engine = engine(dead_stt());
+        let error = engine
+            .begin(3_000_000_000, 1, None, "test".to_owned())
+            .expect_err("must refuse");
+        assert!(matches!(error, VoiceError::InvalidAudio { .. }), "{error}");
+
+        let error = engine
+            .begin(16_000, 9, None, "test".to_owned())
+            .expect_err("must refuse");
+        assert!(matches!(error, VoiceError::InvalidAudio { .. }), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_goes_away_frees_its_dictation_slots() {
+        let limits = VoiceLimits {
+            max_streams: 1,
+            ..VoiceLimits::default()
+        };
+        let engine = Arc::new(VoiceEngine::new(
+            EventBus::new(64),
+            Arc::new(dead_stt()),
+            Arc::new(NoSecrets),
+            limits,
+        ));
+        engine.begin(16_000, 1, None, "conn-a".to_owned()).unwrap();
+        // The one slot is taken, so another connection is turned away.
+        assert!(engine.begin(16_000, 1, None, "conn-b".to_owned()).is_err());
+        // Connection A goes away; its dictation is dropped and the slot is free again.
+        engine.release_owner("conn-a");
+        assert!(engine.begin(16_000, 1, None, "conn-b".to_owned()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_dictation_nobody_feeds_is_reclaimed_after_the_idle_ceiling() {
+        let limits = VoiceLimits {
+            max_streams: 1,
+            max_idle: Duration::from_millis(1),
+            ..VoiceLimits::default()
+        };
+        let engine = Arc::new(VoiceEngine::new(
+            EventBus::new(64),
+            Arc::new(dead_stt()),
+            Arc::new(NoSecrets),
+            limits,
+        ));
+        engine
+            .begin(16_000, 1, None, "abandoned".to_owned())
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        // The abandoned dictation is older than the idle ceiling, so opening a new one
+        // reclaims its slot instead of being refused.
+        assert!(
+            engine.begin(16_000, 1, None, "fresh".to_owned()).is_ok(),
+            "the stale dictation was not reclaimed"
+        );
+    }
+
+    #[tokio::test]
     async fn ids_of_a_dictation_and_of_a_spoken_answer_never_collide() {
         let engine = engine(dead_stt());
-        let first = engine.begin(16_000, 1, None).unwrap();
-        let second = engine.begin(16_000, 1, None).unwrap();
+        let first = engine.begin(16_000, 1, None, "test".to_owned()).unwrap();
+        let second = engine.begin(16_000, 1, None, "test".to_owned()).unwrap();
         assert_ne!(first, second);
         assert!(first.as_str().starts_with("voice-"));
     }

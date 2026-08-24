@@ -32,11 +32,19 @@ impl GateCommand {
     ///
     /// Arguments that contain a space or anything a reader could misread are quoted, so
     /// two different commands can never produce the same approval text: `prog "a b"` and
-    /// `prog a b` are one argument and two, and they have to look that way. This form is
+    /// `prog a b` are one argument and two, and they have to look that way. A working
+    /// directory is shown as a leading `(in <dir>)`, because the command runs there and two
+    /// commands that differ only in where they run must not read the same. This form is
     /// display only and never handed to a shell; what runs is the structured form, and the
     /// approval binds to that.
     pub fn display(&self) -> String {
-        let mut out = quote_for_display(&self.program);
+        let mut out = String::new();
+        if let Some(dir) = &self.working_dir {
+            out.push_str("(in ");
+            out.push_str(&quote_for_display(dir));
+            out.push_str(") ");
+        }
+        out.push_str(&quote_for_display(&self.program));
         for arg in &self.args {
             out.push(' ');
             out.push_str(&quote_for_display(arg));
@@ -142,6 +150,27 @@ mod tests {
         assert_eq!(one_argument.display(), r#"prog "a b""#);
         assert_eq!(two_arguments.display(), "prog a b");
         assert_ne!(one_argument.display(), two_arguments.display());
+    }
+
+    #[test]
+    fn the_working_directory_is_visible_and_distinguishes_two_commands() {
+        let here = GateCommand {
+            program: "cargo".to_owned(),
+            args: vec!["test".to_owned()],
+            working_dir: None,
+        };
+        let elsewhere = GateCommand {
+            program: "cargo".to_owned(),
+            args: vec!["test".to_owned()],
+            working_dir: Some("crates/core".to_owned()),
+        };
+        assert_eq!(here.display(), "cargo test");
+        assert_eq!(elsewhere.display(), "(in crates/core) cargo test");
+        assert_ne!(
+            here.display(),
+            elsewhere.display(),
+            "the working directory has to change the shown text"
+        );
     }
 
     #[test]
