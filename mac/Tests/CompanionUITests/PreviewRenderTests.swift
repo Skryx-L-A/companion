@@ -2,6 +2,7 @@
 
 import AppKit
 import CompanionProtocol
+import CompanionWakeword
 import SwiftUI
 import XCTest
 
@@ -431,10 +432,34 @@ final class PreviewRenderTests: XCTestCase {
                 daemonStatus: "verbunden",
                 daemonDetail: "Rolle human, Daemon 0.1.0, Lauf d601e4ec",
                 microphoneStatus: "freigegeben",
-                voiceStatus: "kann Sprache")
+                voiceStatus: "kann Sprache",
+                wakewordStatus: "angelernt, aber nicht eingeschaltet",
+                hasWakewordModel: true,
+                onTrainWakeword: {},
+                onDeleteWakeword: {},
+                onSetWakewordEnabled: { _ in })
                 .padding(20)
                 .background(Color(nsColor: .windowBackgroundColor))
-            try render(view, size: CGSize(width: 540, height: 1320), to: name, appearance: appearance)
+            // Tall enough for the whole page: the wakeword section and the switch for
+            // sending what was heard both came in after the first number here.
+            try render(view, size: CGSize(width: 540, height: 1560), to: name, appearance: appearance)
+        }
+    }
+
+    /// The enrollment window, empty and half filled, in both appearances. The level meter and
+    /// the four slots are drawn shapes, which is exactly where a hardwired colour hides.
+    func testRendersWakewordEnrollment() throws {
+        for (name, appearance) in [
+            ("wakeword-enrollment-dark.png", NSAppearance(named: .darkAqua)),
+            ("wakeword-enrollment-light.png", NSAppearance(named: .aqua)),
+        ] {
+            let enrollment = WakewordEnrollment(
+                store: WakewordStore(directory: URL(fileURLWithPath: NSTemporaryDirectory())),
+                word: "Companion",
+                capture: { FakeCapture() },
+                authorization: FakeMicrophonePermission())
+            let view = WakewordEnrollmentView(enrollment: enrollment, onClose: {})
+            try render(view, size: CGSize(width: 500, height: 460), to: name, appearance: appearance)
         }
     }
 

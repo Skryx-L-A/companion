@@ -26,8 +26,11 @@ public enum WorkMode: String, Sendable, CaseIterable, Codable {
     }
 }
 
-/// How speech input is meant to start. Voice itself is phase 1b; the quick start only
-/// records the answer so the later phase has it.
+/// How speech input is meant to start.
+///
+/// The wakeword is the one that needs two more things before it does anything: a word trained
+/// in the settings, and the always-on microphone armed there. `DESIGN.md` section Voice calls
+/// that second step high-risk, so it never rides along with a quick-start answer.
 public enum VoiceTrigger: String, Sendable, CaseIterable, Codable {
     case pushToTalk
     case click
@@ -48,7 +51,7 @@ public enum VoiceTrigger: String, Sendable, CaseIterable, Codable {
         case .click:
             return "Ein Klick auf die Figur startet und beendet die Aufnahme."
         case .wakeword:
-            return "Das Mikrofon hoert dauerhaft auf ein Weckwort. Das ist die datenintensivste Variante."
+            return "Das Mikrofon hoert dauerhaft auf ein Weckwort. Das Wort wird in den Einstellungen angelernt und dort auch eingeschaltet, mit Datenschutzhinweis."
         }
     }
 }

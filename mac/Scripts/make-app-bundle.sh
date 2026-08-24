@@ -12,6 +12,8 @@ CONFIGURATION="${1:-release}"
 PACKAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PACKAGE_DIR"
 
+# SwiftPM cannot build the Rust wakeword library; without it the link fails.
+./Scripts/build-wakeword.sh "$CONFIGURATION"
 swift build -c "$CONFIGURATION"
 BIN_PATH="$(swift build -c "$CONFIGURATION" --show-bin-path)"
 APP_DIR="$BIN_PATH/companion.app"
