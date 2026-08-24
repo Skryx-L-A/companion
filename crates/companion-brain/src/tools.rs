@@ -12,14 +12,15 @@
 //! not exist.
 
 use async_trait::async_trait;
-use companion_core::{Autonomy, Registry, now_ms};
+use companion_core::adapter::AdapterEvent;
+use companion_core::{Autonomy, EventBus, Registry, now_ms};
 use companion_protocol::{
-    AUFTRAG_SCHEMA_VERSION, Auftrag, AuftragId, GateCommand, Limits, LoopType, Reference,
-    SelfAnswer, SendOutcome, SessionId, SessionStatus,
+    AUFTRAG_SCHEMA_VERSION, AdapterId, Auftrag, AuftragId, Event, GateCommand, Limits, LoopType,
+    Reference, SelfAnswer, SendOutcome, SessionId, SessionStatus,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::prompt::data_block;
@@ -106,6 +107,9 @@ pub struct ToolBox {
     sessions: Arc<dyn SessionAccess>,
     registry: Arc<Registry>,
     autonomy: Autonomy,
+    /// Where a question goes when the `ask` rung hands it to the person instead of
+    /// answering it.
+    bus: EventBus,
 }
 
 impl ToolBox {
@@ -113,11 +117,13 @@ impl ToolBox {
         sessions: Arc<dyn SessionAccess>,
         registry: Arc<Registry>,
         autonomy: Autonomy,
+        bus: EventBus,
     ) -> Self {
         Self {
             sessions,
             registry,
             autonomy,
+            bus,
         }
     }
 
@@ -493,6 +499,14 @@ impl ToolBox {
             Err(outcome) => return outcome,
         };
 
+        // The middle rung: `ask` answers only what is unambiguous, and unambiguous is
+        // defined mechanically — the answer stands verbatim in the approved job file of
+        // that session. Everything else goes to the person instead, as the setting
+        // promises. Without this check `ask` and `act` would be the same setting.
+        if self.autonomy == Autonomy::Ask && !answer_stands_in_auftrag(&session, &text) {
+            return self.forward_to_person(&session);
+        }
+
         let id = SessionId::new(session_id.clone());
         let outcome = match self.sessions.answer(&id, &text).await {
             Ok(outcome) => outcome,
@@ -524,6 +538,38 @@ impl ToolBox {
             format!(
                 "Die Antwort ging an {session_id} und wurde {delivery}. Sie steht mit Frage, \
                  Antwort und Quelle ({source}) im Register."
+            ),
+        )
+    }
+
+    /// Hands the open question of a session to the person instead of answering it.
+    ///
+    /// The question goes out as a `question_open` event of the brain, so every shell shows
+    /// it the same way it shows a question the session asked itself. The model gets plain
+    /// text saying the question was passed on — not an error, because nothing went wrong.
+    fn forward_to_person(&self, session: &SessionStatus) -> ToolOutcome {
+        let question = session
+            .open_question
+            .clone()
+            .unwrap_or_else(|| "(die Sitzung hat keine offene Frage vermerkt)".to_owned());
+        self.bus.publish(
+            AdapterId::new(crate::BRAIN_ADAPTER),
+            AdapterEvent::for_session(
+                session.id.clone(),
+                Event::QuestionOpen {
+                    question_id: format!("brain-forward-{}", now_ms()),
+                    question,
+                },
+            ),
+        );
+        ToolOutcome::new(
+            format!("Frage von {} an den Menschen weitergereicht", session.id),
+            format!(
+                "Die Antwort steht nicht woertlich in der Auftragsdatei der Sitzung {}. In der \
+                 Stufe ask entscheidet das der Mensch: die Frage wurde ihm weitergereicht. \
+                 Antworte der Sitzung nicht erneut; sag dem Menschen, dass die Frage bei ihm \
+                 liegt.",
+                session.id
             ),
         )
     }
@@ -622,6 +668,33 @@ fn details(session: &SessionStatus) -> String {
     lines.join("\n")
 }
 
+/// Whether an answer stands verbatim in the job file of a session.
+///
+/// This is the mechanical reading of "unambiguous" for the `ask` rung: the answer is a
+/// literal part of the goal, the done criterion, a guardrail or the reference text of the
+/// session's job file. A session without a job file, or one whose file cannot be read,
+/// fails the check — what cannot be verified goes to the person.
+fn answer_stands_in_auftrag(session: &SessionStatus, answer: &str) -> bool {
+    let (Some(project), Some(auftrag_id)) = (&session.project, &session.auftrag_id) else {
+        return false;
+    };
+    let Ok(auftrag) = companion_core::auftrag::read(Path::new(project), auftrag_id) else {
+        return false;
+    };
+
+    let answer = answer.trim();
+    if answer.is_empty() {
+        return false;
+    }
+    auftrag.goal.contains(answer)
+        || auftrag.done_criterion.contains(answer)
+        || auftrag
+            .guardrails
+            .iter()
+            .any(|guardrail| guardrail.contains(answer))
+        || matches!(&auftrag.reference, Some(Reference::Text { text }) if text.contains(answer))
+}
+
 fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or("").trim()
 }
@@ -648,7 +721,8 @@ fn string_argument(arguments: &Value, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use companion_protocol::{AdapterId, SessionState};
+    use companion_protocol::SessionState;
+    use std::sync::Mutex;
 
     struct NoSessions;
 
@@ -674,6 +748,7 @@ mod tests {
             Arc::new(NoSessions),
             Arc::new(Registry::open_in_memory().expect("in-memory register")),
             autonomy,
+            EventBus::new(16),
         )
     }
 
@@ -804,6 +879,178 @@ mod tests {
         assert!(text.contains("Modell: unbekannt"), "{text}");
         assert!(text.contains("Kontext: unbekannt"), "{text}");
         assert!(!text.contains("0 Prozent"), "no plausible zero: {text}");
+    }
+
+    /// One session with a project and a job file, recording what was answered to it.
+    struct OneSession {
+        status: SessionStatus,
+        answered: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl SessionAccess for OneSession {
+        async fn sessions(&self) -> Result<Vec<SessionStatus>, String> {
+            Ok(vec![self.status.clone()])
+        }
+        async fn read(&self, _session_id: &SessionId, _lines: u32) -> Result<String, String> {
+            Ok(String::new())
+        }
+        async fn answer(&self, _session_id: &SessionId, text: &str) -> Result<SendOutcome, String> {
+            self.answered
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(text.to_owned());
+            Ok(SendOutcome::Delivered)
+        }
+    }
+
+    /// A project directory with one approved-shape job file whose guardrail holds the
+    /// verbatim answer, plus the toolbox that sees exactly that session.
+    fn ask_fixture(name: &str) -> (PathBuf, Arc<OneSession>, ToolBox, EventBus) {
+        let project =
+            std::env::temp_dir().join(format!("companion-ask-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&project);
+        std::fs::create_dir_all(&project).expect("the test project is writable");
+
+        let auftrag_id = AuftragId::new("entwurf-test");
+        let auftrag = Auftrag {
+            schema_version: AUFTRAG_SCHEMA_VERSION,
+            id: auftrag_id.clone(),
+            project: project.display().to_string(),
+            goal: "die Testsuite gruen bekommen".to_owned(),
+            done_criterion: "cargo test laeuft durch".to_owned(),
+            reference: None,
+            guardrails: vec!["arbeite auf dem Zweig wb/core-brain".to_owned()],
+            gate_commands: Vec::new(),
+            limits: Limits::default(),
+            loop_type: LoopType::Once,
+            model: None,
+            approval: None,
+        };
+        companion_core::auftrag::write(&project, &auftrag).expect("the job file is written");
+
+        let mut status = SessionStatus::new(
+            SessionId::new("fake-1"),
+            AdapterId::new("fake"),
+            SessionState::Waiting,
+        );
+        status.project = Some(project.display().to_string());
+        status.auftrag_id = Some(auftrag_id);
+        status.open_question = Some("auf welchem Zweig soll ich arbeiten?".to_owned());
+
+        let sessions = Arc::new(OneSession {
+            status,
+            answered: Mutex::new(Vec::new()),
+        });
+        let bus = EventBus::new(16);
+        let toolbox = ToolBox::new(
+            Arc::clone(&sessions) as Arc<dyn SessionAccess>,
+            Arc::new(Registry::open_in_memory().expect("in-memory register")),
+            Autonomy::Ask,
+            bus.clone(),
+        );
+        (project, sessions, toolbox, bus)
+    }
+
+    fn answer_call(text: &str) -> ToolCall {
+        call(
+            "answer_orchestrator",
+            &serde_json::json!({
+                "session_id": "fake-1",
+                "text": text,
+                "source": "Auftragsdatei",
+            })
+            .to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn in_ask_a_verbatim_answer_from_the_job_file_is_delivered() {
+        let (project, sessions, toolbox, bus) = ask_fixture("verbatim");
+        let mut events = bus.subscribe();
+
+        let outcome = toolbox
+            .run(&answer_call("arbeite auf dem Zweig wb/core-brain"))
+            .await;
+
+        assert!(outcome.summary.contains("zugestellt"), "{outcome:?}");
+        let answered = sessions
+            .answered
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert_eq!(answered, vec!["arbeite auf dem Zweig wb/core-brain"]);
+        assert!(
+            events.try_recv().is_err(),
+            "a delivered answer forwards nothing to the person"
+        );
+
+        std::fs::remove_dir_all(&project).unwrap();
+    }
+
+    #[tokio::test]
+    async fn in_ask_an_answer_the_job_file_does_not_carry_goes_to_the_person() {
+        let (project, sessions, toolbox, bus) = ask_fixture("forward");
+        let mut events = bus.subscribe();
+
+        let outcome = toolbox
+            .run(&answer_call("nimm einfach irgendeinen Zweig"))
+            .await;
+
+        assert!(outcome.summary.contains("weitergereicht"), "{outcome:?}");
+        assert!(
+            !outcome.content.starts_with("FEHLER:"),
+            "forwarding is not an error: {outcome:?}"
+        );
+        assert!(outcome.content.contains("weitergereicht"), "{outcome:?}");
+        assert!(
+            sessions
+                .answered
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty(),
+            "nothing reached the session"
+        );
+
+        let envelope = events
+            .try_recv()
+            .expect("the question went out as an event");
+        assert_eq!(envelope.adapter.as_str(), crate::BRAIN_ADAPTER);
+        assert_eq!(
+            envelope.session_id.as_ref().map(|id| id.as_str()),
+            Some("fake-1")
+        );
+        let Event::QuestionOpen { question, .. } = envelope.event else {
+            panic!("expected question_open, got {:?}", envelope.event);
+        };
+        assert_eq!(question, "auf welchem Zweig soll ich arbeiten?");
+
+        std::fs::remove_dir_all(&project).unwrap();
+    }
+
+    #[tokio::test]
+    async fn in_ask_a_session_without_a_job_file_cannot_be_answered_for() {
+        let (project, sessions, toolbox, bus) = ask_fixture("nofile");
+        std::fs::remove_dir_all(&project).unwrap();
+        let mut events = bus.subscribe();
+
+        let outcome = toolbox
+            .run(&answer_call("arbeite auf dem Zweig wb/core-brain"))
+            .await;
+
+        assert!(outcome.summary.contains("weitergereicht"), "{outcome:?}");
+        assert!(
+            sessions
+                .answered
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty(),
+            "what cannot be verified is not answered"
+        );
+        assert!(
+            events.try_recv().is_ok(),
+            "the question still reaches the person"
+        );
     }
 
     #[test]

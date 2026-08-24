@@ -38,9 +38,9 @@ pub const BRAIN_ADAPTER: &str = "brain";
 pub struct BrainLimits {
     /// How many times the model may ask for tools before it has to answer.
     ///
-    /// Four is enough for the chain the tools were built for — list, details, read, answer
-    /// — and short enough that a model which keeps asking is stopped rather than left to
-    /// spend the subscription.
+    /// Six covers the chain the tools were built for — list, details, read, answer — with
+    /// headroom for one extra lookup on the way, and stays short enough that a model which
+    /// keeps asking is stopped rather than left to spend the subscription.
     pub max_tool_rounds: u32,
     /// How many earlier messages the next answer sees.
     pub max_history: usize,
@@ -53,7 +53,7 @@ pub struct BrainLimits {
 impl Default for BrainLimits {
     fn default() -> Self {
         Self {
-            max_tool_rounds: 4,
+            max_tool_rounds: 6,
             max_history: 20,
             request_timeout: Duration::from_secs(120),
             cli_timeout: Duration::from_secs(180),
@@ -128,8 +128,15 @@ impl Brain {
         let http = reqwest::Client::builder()
             .timeout(config.limits.request_timeout)
             .build()
-            .unwrap_or_default();
-        let tools = Arc::new(ToolBox::new(sessions, registry, config.autonomy));
+            // A default client would silently have no request timeout, so a broken build
+            // is a loud start-up failure instead of a chat that can hang forever.
+            .expect("the HTTP client for the chat endpoints could not be built");
+        let tools = Arc::new(ToolBox::new(
+            sessions,
+            registry,
+            config.autonomy,
+            bus.clone(),
+        ));
         Self {
             bus,
             endpoints,
