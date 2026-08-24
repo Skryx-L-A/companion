@@ -21,6 +21,9 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
         statusItem.button?.image = StatusItemIcon.image(needsAttention: false)
         statusItem.button?.setAccessibilityLabel("Companion")
         let menu = NSMenu()
+        // Rebuilt on every opening, so the enabled state is decided there and not guessed by
+        // the automatic validation.
+        menu.autoenablesItems = false
         menu.delegate = self
         statusItem.menu = menu
     }
@@ -61,6 +64,14 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
             action: #selector(toggleSessions), keyEquivalent: "")
         sessions.target = self
         menu.addItem(sessions)
+
+        let auftrag = NSMenuItem(
+            title: "Neuer Auftrag...", action: #selector(newAuftrag), keyEquivalent: "n")
+        auftrag.target = self
+        // Greyed out rather than hidden while there is no daemon: the way to a job is where
+        // it always is, and the state says why it cannot be taken right now.
+        auftrag.isEnabled = controller.onNewAuftrag != nil
+        menu.addItem(auftrag)
 
         menu.addItem(.separator())
 
@@ -107,6 +118,10 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func toggleSessions() {
         if !settings.isFigureVisible { controller.setFigureVisible(true) }
         controller.toggleSessionList()
+    }
+
+    @objc private func newAuftrag() {
+        controller.onNewAuftrag?()
     }
 
     @objc private func selectCorner(_ sender: NSMenuItem) {

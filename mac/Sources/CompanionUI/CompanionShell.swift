@@ -26,6 +26,8 @@ public final class CompanionShell {
     private let socketPath: String
     private var statusItem: StatusItemController?
     private let settingsWindow = SettingsWindowController()
+    private let auftragWindow = AuftragWindowController()
+    private let excerptWindows = ExcerptWindowController()
     /// Sequence number of the last event, so a gap can be noticed.
     private var lastSequence: UInt64?
     private var isListPending = false
@@ -45,6 +47,14 @@ public final class CompanionShell {
     public func start(connectToDaemon: Bool = true, onboarding: OnboardingPolicy = .auto) {
         overlay.onSubmit = { [weak self] text in self?.send(text) }
         overlay.onAnswer = { [weak self] question, text in self?.answer(question, with: text) }
+        overlay.sessionActions = SessionActions(
+            read: { [weak self] id in self?.readExcerpt(of: id) },
+            interrupt: { [weak self] id in self?.interrupt(id) },
+            stop: { [weak self] id in self?.confirmStop(id) },
+            runGate: { [weak self] id, index in self?.runGate(id, index: index) })
+        if connectToDaemon {
+            overlay.onNewAuftrag = { [weak self] in self?.openAuftragWindow() }
+        }
         overlay.start()
 
         let statusItem = StatusItemController(controller: overlay) { [weak self] in
@@ -85,6 +95,10 @@ public final class CompanionShell {
         client.stop()
         statusItem?.remove()
         statusItem = nil
+        // Windows this shell opened are closed by it; a window left behind would outlive the
+        // connection that fills it.
+        auftragWindow.close()
+        excerptWindows.closeAll()
         overlay.stop()
     }
 
@@ -160,8 +174,7 @@ public final class CompanionShell {
     /// The menu bar mark has one source, so a figure event cannot clear a mark that the
     /// session list still has a reason for.
     private func refreshAttentionIndicator() {
-        statusItem?.setNeedsAttention(
-            overlay.model.openQuestionCount > 0 || overlay.model.figureState == .alert)
+        statusItem?.setNeedsAttention(overlay.model.needsAttention)
     }
 
     // MARK: - Sending
@@ -431,6 +444,219 @@ public final class CompanionShell {
                 return "Der Daemon kennt diese Session nicht mehr."
             default:
                 return error.message
+            }
+        }
+    }
+}
+
+// MARK: - Jobs
+
+/// Writing, approving and starting a job.
+///
+/// `DESIGN.md` section Sicherheit: an outward action comes from an input of the person or
+/// from a job file they approved, never from text an orchestrator produced. That is why every
+/// method here is reached from a menu item or a button, and why the approval carries the hash
+/// the shell computed over what it displayed rather than the one the daemon reported.
+extension CompanionShell: AuftragService {
+    /// Opens the job window, prefilled with the project the person is looking at.
+    func openAuftragWindow() {
+        let project = overlay.model.selectedSession?.status.project
+            ?? overlay.model.sessions.compactMap { $0.status.project }.first
+            ?? ""
+        auftragWindow.show(service: self, project: project)
+    }
+
+    public func createAuftrag(
+        _ auftrag: Auftrag, completion: @escaping (Result<CreatedAuftrag, ActionFailure>) -> Void
+    ) {
+        client.request(.createAuftrag(project: auftrag.project, auftrag: auftrag)) {
+            [weak self] result in
+            guard let self else { return }
+            completion(self.auftragResult(result))
+        }
+    }
+
+    public func approveAuftrag(
+        project: String, auftragId: AuftragId, expectedHash: String,
+        completion: @escaping (Result<CreatedAuftrag, ActionFailure>) -> Void
+    ) {
+        client.request(.approveAuftrag(
+            project: project, auftragId: auftragId, expectedHash: expectedHash)
+        ) { [weak self] result in
+            guard let self else { return }
+            let outcome = self.auftragResult(result)
+            guard case .success(let created) = outcome else {
+                return completion(outcome)
+            }
+            // The answer is the file the daemon read back. It has to be the job that was
+            // approved, because its gate lines are what the session list will offer from
+            // here on: a job kept under the approved hash but showing other commands would
+            // be exactly the confusion the hash exists against.
+            guard created.auftrag.contentHash == expectedHash else {
+                return completion(.failure(ActionFailure(
+                    "Der Daemon hat einen anderen Auftrag zurueckgemeldet als den freigegebenen. Es wird nichts gestartet.")))
+            }
+            // Remembered so the session list can offer the gates of this job, and so the
+            // gate request can name the hash that was approved.
+            self.overlay.model.approvedAuftraege[created.auftrag.id] = ApprovedAuftrag(
+                auftrag: created.auftrag, hash: expectedHash, path: created.path)
+            self.systemMessage(
+                "Der Auftrag \(created.auftrag.id) ist freigegeben. Datei: \(created.path)")
+            completion(outcome)
+        }
+    }
+
+    public func spawn(
+        project: String, auftragId: AuftragId, model: String?,
+        completion: @escaping (Result<SessionId?, ActionFailure>) -> Void
+    ) {
+        let request = SpawnRequest(
+            adapter: auftragAdapterId, project: project, auftragId: auftragId, model: model)
+        client.request(.spawn(request)) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(.session(let status)):
+                // The row goes in through the one place that owns the session list, so the
+                // sorting and the deduplication are the same as for a real event. The
+                // bookkeeping of the envelope is unused there and stays empty: this is an
+                // answer, not an event, and it must not take part in the gap check.
+                self.applyToSessions(EventEnvelope(
+                    sequence: 0, runId: self.client.welcome?.runId ?? "", timestampMs: 0,
+                    adapter: status.adapter, sessionId: status.id,
+                    event: .sessionStarted(status: status)))
+                self.overlay.model.selectedSessionId = status.id
+                self.systemMessage("Die Session \(status.id) laeuft mit dem Auftrag \(auftragId).")
+                completion(.success(status.id))
+            case .success(let body):
+                completion(.failure(ActionFailure("Unerwartete Antwort auf den Start: \(body).")))
+            case .failure(let failure):
+                completion(.failure(ActionFailure(self.describe(failure))))
+            }
+        }
+    }
+
+    private func auftragResult(
+        _ result: Result<ResponseBody, DaemonClient.RequestFailure>
+    ) -> Result<CreatedAuftrag, ActionFailure> {
+        switch result {
+        case .success(.auftrag(let auftrag, let hash, let path, let gateDisplay)):
+            return .success(CreatedAuftrag(
+                auftrag: auftrag, daemonHash: hash, path: path, daemonGateDisplay: gateDisplay))
+        case .success(let body):
+            return .failure(ActionFailure("Unerwartete Antwort auf den Auftrag: \(body)."))
+        case .failure(let failure):
+            return .failure(ActionFailure(describe(failure)))
+        }
+    }
+}
+
+// MARK: - Session actions
+
+extension CompanionShell {
+    /// Reads the last lines of a session into a window of its own.
+    func readExcerpt(of sessionId: SessionId) {
+        let title = overlay.model.title(forSessionId: sessionId)
+        let model = excerptWindows.show(sessionId: sessionId, title: title) { [weak self] in
+            self?.readExcerpt(of: sessionId)
+        }
+        model.isLoading = true
+        model.notice = nil
+        client.request(.read(sessionId: sessionId, window: .tail(lines: 200))) {
+            [weak self] result in
+            guard let self else { return }
+            model.isLoading = false
+            switch result {
+            case .success(.chunk(let text, let nextOffset)):
+                model.text = text
+                model.nextOffset = nextOffset
+            case .success(let body):
+                model.notice = "Unerwartete Antwort auf das Lesen: \(body)."
+            case .failure(let failure):
+                model.notice = self.describe(failure)
+            }
+        }
+    }
+
+    /// Cuts the running turn short. The session stays and can be talked to again, so this
+    /// needs no question.
+    func interrupt(_ sessionId: SessionId) {
+        let name = overlay.model.title(forSessionId: sessionId)
+        client.request(.interrupt(sessionId: sessionId)) { [weak self] result in
+            guard let self else { return }
+            if case .failure(let failure) = result {
+                self.systemMessage("\(name) liess sich nicht unterbrechen. \(self.describe(failure))")
+            }
+        }
+    }
+
+    /// Asks before ending a session.
+    ///
+    /// Stopping is not reversible: what the session had in its context is gone, and a running
+    /// turn is cut off in the middle. The Mac asks that with an alert whose default button is
+    /// the harmless one, so Return does not end anything.
+    func confirmStop(_ sessionId: SessionId) {
+        let name = overlay.model.title(forSessionId: sessionId)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Session \(name) beenden?"
+        alert.informativeText = """
+            Der laufende Zug wird abgebrochen und die Session verschwindet aus der Liste. Was \
+            sie im Kontext hatte, ist danach weg.
+            """
+        // The first button is the default one, so Return picks the harmless answer. The
+        // destructive one gets no key equivalent at all: ending a session is a click, never
+        // a keystroke somebody made on the way past.
+        alert.addButton(withTitle: "Abbrechen")
+        let stopButton = alert.addButton(withTitle: "Beenden")
+        stopButton.hasDestructiveAction = true
+        stopButton.keyEquivalent = ""
+
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        stopSession(sessionId, name: name)
+    }
+
+    private func stopSession(_ sessionId: SessionId, name: String) {
+        client.request(.stop(sessionId: sessionId)) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.systemMessage("\(name) wurde beendet.")
+            case .failure(let failure):
+                self.systemMessage("\(name) liess sich nicht beenden. \(self.describe(failure))")
+            }
+        }
+    }
+
+    /// Runs one gate of the job this session was started from.
+    ///
+    /// The request names the project, the job and the hash that was approved. Without an
+    /// approval this shell holds itself there is nothing to name, so nothing is sent: the
+    /// daemon would refuse it, and refusing here says why in words.
+    func runGate(_ sessionId: SessionId, index: Int) {
+        let name = overlay.model.title(forSessionId: sessionId)
+        guard let session = overlay.model.session(withId: sessionId),
+              let approved = overlay.model.approvedAuftrag(for: session) else {
+            systemMessage(
+                "Zu \(name) liegt in dieser Sitzung kein freigegebener Auftrag. Ohne die Freigabe laeuft kein Gate.")
+            return
+        }
+        guard index >= 0, index < approved.gateDisplay.count else {
+            systemMessage("Das Gate \(index + 1) steht nicht im Auftrag \(approved.id).")
+            return
+        }
+
+        let line = approved.gateDisplay[index]
+        systemMessage("Gate \(index + 1) von \(approved.id) laeuft: \(line)")
+        client.request(.runGate(
+            sessionId: sessionId, gateIndex: UInt32(index), project: approved.project,
+            auftragId: approved.id, expectedHash: approved.hash)
+        ) { [weak self] result in
+            guard let self else { return }
+            // Success is an ack; what the gate did arrives as a `gate_result` event with the
+            // exit code, so nothing is reported twice here.
+            if case .failure(let failure) = result {
+                self.systemMessage("Das Gate \(line) wurde nicht ausgefuehrt. \(self.describe(failure))")
             }
         }
     }

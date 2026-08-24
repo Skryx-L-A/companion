@@ -32,8 +32,24 @@ public final class OverlayModel {
     /// How many messages the shell had to ignore because it did not know them. Shown rather
     /// than swallowed, so a version drift between daemon and shell stays visible.
     public var ignoredCount = 0
+    /// The gate lines of every job this shell has approved in this run, by job id.
+    ///
+    /// `DESIGN.md` section Sicherheit: a gate runs only out of an approved job, and the
+    /// request carries the hash that was approved. The shell offers a gate exactly where it
+    /// holds that approval itself; a job somebody approved in an earlier run is not in here,
+    /// and the menu says so rather than sending a request that would be refused.
+    public var approvedAuftraege: [AuftragId: ApprovedAuftrag] = [:]
 
     public init() {}
+
+    /// Whether the companion is asking for a look: a session has an open question, or the
+    /// figure is in its alert state.
+    ///
+    /// One source for both marks. The figure and the menu bar item read the same value, so a
+    /// figure event cannot clear a mark the session list still has a reason for.
+    public var needsAttention: Bool {
+        openQuestionCount > 0 || figureState == .alert
+    }
 
     public var openQuestionCount: Int {
         var ids = Set(sessions.filter(\.needsAttention).map(\.id))
@@ -58,6 +74,12 @@ public final class OverlayModel {
 
     public func session(withId id: SessionId) -> SessionSnapshot? {
         sessions.first { $0.id == id }
+    }
+
+    /// The job this session was started from, when this shell approved it.
+    public func approvedAuftrag(for session: SessionSnapshot) -> ApprovedAuftrag? {
+        guard let auftragId = session.status.auftragId else { return nil }
+        return approvedAuftraege[auftragId]
     }
 
     /// The name the chat uses for a session, falling back to the raw id for a session that

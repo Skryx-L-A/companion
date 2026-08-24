@@ -77,7 +77,13 @@ public enum Event: Sendable, Equatable {
     /// The session reports its work as finished. `sessionEnded` may or may not follow.
     case done(summary: String?, resultPath: String?)
     /// A gate command from the job file ran and either passed or failed.
-    case gateResult(command: String, passed: Bool, output: String?)
+    ///
+    /// `command` is the quoted display line the person approved; `program` and `args` are the
+    /// form that actually ran, with no shell and no string to misread. Both are kept: the
+    /// line is what a reader recognises, the pair is what happened.
+    case gateResult(
+        command: String, program: String?, args: [String], exitCode: Int32?, passed: Bool,
+        output: String?)
     case contextLevel(context: Provenance<ContextUsage>)
     case budgetLevel(budget: Provenance<BudgetUsage>)
     case iteration(iteration: Provenance<UInt32>)
@@ -119,6 +125,9 @@ extension Event: Codable {
         case hint
         case summary
         case command
+        case program
+        case args
+        case exitCode = "exit_code"
         case passed
         case output
         case context
@@ -155,6 +164,9 @@ extension Event: Codable {
         case .gateResult:
             self = .gateResult(
                 command: try container.decode(String.self, forKey: .command),
+                program: try container.decodeIfPresent(String.self, forKey: .program),
+                args: try container.decodeIfPresent([String].self, forKey: .args) ?? [],
+                exitCode: try container.decodeIfPresent(Int32.self, forKey: .exitCode),
                 passed: try container.decode(Bool.self, forKey: .passed),
                 output: try container.decodeIfPresent(String.self, forKey: .output))
         case .contextLevel:
@@ -200,9 +212,14 @@ extension Event: Codable {
             try container.encode(EventKind.done.rawValue, forKey: .event)
             try container.encode(summary, forKey: .summary)
             try container.encode(resultPath, forKey: .resultPath)
-        case .gateResult(let command, let passed, let output):
+        case .gateResult(let command, let program, let args, let exitCode, let passed, let output):
             try container.encode(EventKind.gateResult.rawValue, forKey: .event)
             try container.encode(command, forKey: .command)
+            // The three additive fields are left out while they are empty, the way the daemon
+            // does it, so a line written here still matches one it would send.
+            try container.encodeIfPresent(program, forKey: .program)
+            if !args.isEmpty { try container.encode(args, forKey: .args) }
+            try container.encodeIfPresent(exitCode, forKey: .exitCode)
             try container.encode(passed, forKey: .passed)
             try container.encode(output, forKey: .output)
         case .contextLevel(let context):

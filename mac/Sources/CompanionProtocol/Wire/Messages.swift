@@ -186,8 +186,19 @@ public enum Request: Sendable, Equatable {
     case interrupt(sessionId: SessionId)
     /// A single adapter, or all of them when nil.
     case capabilities(adapter: AdapterId?)
+    /// Writes a job file into a project. Writing it is not approving it.
+    case createAuftrag(project: String, auftrag: Auftrag)
+    /// Approves the exact content the person was shown, named by the hash of its canonical
+    /// form. The daemon canonicalises the file again and refuses if the two differ.
+    case approveAuftrag(project: String, auftragId: AuftragId, expectedHash: String)
     /// Run one gate command of an approved job file, named by its position in the list.
-    case runGate(sessionId: SessionId, gateIndex: UInt32)
+    ///
+    /// Project, job id and hash are not optional here although the schema allows leaving
+    /// them out: the daemon refuses a gate without them, so a type that permitted it would
+    /// only invite a call that cannot work.
+    case runGate(
+        sessionId: SessionId, gateIndex: UInt32, project: String, auftragId: AuftragId,
+        expectedHash: String)
 
     /// The name the daemon dispatches on.
     public var name: String {
@@ -199,6 +210,8 @@ public enum Request: Sendable, Equatable {
         case .stop: return "stop"
         case .interrupt: return "interrupt"
         case .capabilities: return "capabilities"
+        case .createAuftrag: return "create_auftrag"
+        case .approveAuftrag: return "approve_auftrag"
         case .runGate: return "run_gate"
         }
     }
@@ -241,6 +254,8 @@ extension ClientMessage: Encodable {
         case auftragId = "auftrag_id"
         case model
         case prompt
+        case auftrag
+        case expectedHash = "expected_hash"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -275,9 +290,19 @@ extension ClientMessage: Encodable {
                 try container.encode(sessionId, forKey: .sessionId)
             case .capabilities(let adapter):
                 try container.encode(adapter, forKey: .adapter)
-            case .runGate(let sessionId, let gateIndex):
+            case .createAuftrag(let project, let auftrag):
+                try container.encode(project, forKey: .project)
+                try container.encode(auftrag, forKey: .auftrag)
+            case .approveAuftrag(let project, let auftragId, let expectedHash):
+                try container.encode(project, forKey: .project)
+                try container.encode(auftragId, forKey: .auftragId)
+                try container.encode(expectedHash, forKey: .expectedHash)
+            case .runGate(let sessionId, let gateIndex, let project, let auftragId, let expectedHash):
                 try container.encode(sessionId, forKey: .sessionId)
                 try container.encode(gateIndex, forKey: .gateIndex)
+                try container.encode(project, forKey: .project)
+                try container.encode(auftragId, forKey: .auftragId)
+                try container.encode(expectedHash, forKey: .expectedHash)
             }
         }
     }
@@ -400,6 +425,9 @@ public enum ResponseBody: Sendable, Equatable {
     case chunk(text: String, nextOffset: UInt64)
     case capabilities([AdapterCapabilities])
     case sent(outcome: SendOutcome)
+    /// A job file together with the two things a person needs in order to approve it: the
+    /// exact text they are shown, and the hash of the canonical form of it.
+    case auftrag(auftrag: Auftrag, hash: String, path: String, gateDisplay: [String])
     /// The request was carried out and has nothing to return.
     case ack
     /// A body a newer daemon knows and this shell does not.
@@ -415,6 +443,10 @@ extension ResponseBody: Codable {
         case nextOffset = "next_offset"
         case adapters
         case outcome
+        case auftrag
+        case hash
+        case path
+        case gateDisplay = "gate_display"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -433,6 +465,12 @@ extension ResponseBody: Codable {
             self = .capabilities(try container.decode([AdapterCapabilities].self, forKey: .adapters))
         case "sent":
             self = .sent(outcome: try container.decode(SendOutcome.self, forKey: .outcome))
+        case "auftrag":
+            self = .auftrag(
+                auftrag: try container.decode(Auftrag.self, forKey: .auftrag),
+                hash: try container.decode(String.self, forKey: .hash),
+                path: try container.decode(String.self, forKey: .path),
+                gateDisplay: try container.decodeIfPresent([String].self, forKey: .gateDisplay) ?? [])
         case "ack":
             self = .ack
         default:
@@ -459,6 +497,12 @@ extension ResponseBody: Codable {
         case .sent(let outcome):
             try container.encode("sent", forKey: .body)
             try container.encode(outcome, forKey: .outcome)
+        case .auftrag(let auftrag, let hash, let path, let gateDisplay):
+            try container.encode("auftrag", forKey: .body)
+            try container.encode(auftrag, forKey: .auftrag)
+            try container.encode(hash, forKey: .hash)
+            try container.encode(path, forKey: .path)
+            try container.encode(gateDisplay, forKey: .gateDisplay)
         case .ack:
             try container.encode("ack", forKey: .body)
         case .unrecognised(let body):

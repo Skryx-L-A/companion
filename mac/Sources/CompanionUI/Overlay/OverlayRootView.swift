@@ -30,6 +30,7 @@ struct OverlayRootView: View {
                 SessionListView(
                     model: model,
                     onSelect: { controller.selectSession($0) },
+                    actions: controller.sessionActions,
                     onClose: { controller.toggleSessionList() })
                     .frame(width: box.width, height: box.height)
                     .offset(x: box.minX, y: box.minY)
@@ -105,6 +106,8 @@ struct FigureView: View {
         Button(model.isSessionListOpen ? "Sessionliste schliessen" : "Sessionliste zeigen") {
             controller.toggleSessionList()
         }
+        Button("Neuer Auftrag...") { controller.onNewAuftrag?() }
+            .disabled(controller.onNewAuftrag == nil)
         Divider()
         Menu("Ecke") {
             ForEach(ScreenCorner.allCases, id: \.self) { corner in

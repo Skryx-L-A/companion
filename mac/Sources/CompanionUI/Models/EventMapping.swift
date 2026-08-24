@@ -49,10 +49,14 @@ public enum EventMapping {
             if let summary, !summary.isEmpty { line += " \(summary)" }
             if let resultPath, !resultPath.isEmpty { line += " Ergebnisdatei: \(resultPath)" }
             return line
-        case .gateResult(let command, let passed, let output):
+        case .gateResult(let command, _, _, let exitCode, let passed, let output):
             var line = passed
                 ? "Das Gate \(command) ist durchgelaufen."
                 : "Das Gate \(command) ist fehlgeschlagen."
+            // A gate that a signal or a deadline ended has no exit code, and saying so is
+            // the point: the reader must not read "0" into a run that never returned one.
+            line += exitCode.map { " Exit-Code \($0)." }
+                ?? " Es gibt keinen Exit-Code, der Befehl wurde abgebrochen."
             if let output, !output.isEmpty { line += " \(output)" }
             return line
         case .error(let message):

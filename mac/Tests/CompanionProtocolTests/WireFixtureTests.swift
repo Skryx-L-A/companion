@@ -168,6 +168,10 @@ final class ServerMessageFixtureTests: XCTestCase {
                 seen.insert("ack")
             case .session:
                 seen.insert("session")
+            case .auftrag:
+                // No fixture line for a job file yet; `AuftragHashTests` covers that body
+                // against values the Rust side produced.
+                seen.insert("auftrag")
             case .sessions, .unrecognised:
                 break
             }
@@ -209,10 +213,13 @@ final class ClientMessageFixtureTests: XCTestCase {
             .request(RequestEnvelope(id: 7, request: .interrupt(
                 sessionId: "-Users-me-AI-companion"))),
             .request(RequestEnvelope(id: 5, request: .capabilities(adapter: "workbench"))),
-            .request(RequestEnvelope(id: 6, request: .runGate(
-                sessionId: "-Users-me-AI-companion", gateIndex: 0))),
         ]
-        XCTAssertEqual(mine.count, expected.count, "one fixture line per request the shell sends")
+        // One line short of the fixture on purpose: the last line is `run_gate` in the shape
+        // it had before the approval was tied to a hash, with project, job id and hash all
+        // absent. The daemon refuses that shape, so the shell no longer produces it; what it
+        // does produce is checked in the test below against the same fixture line.
+        XCTAssertEqual(
+            mine.count + 1, expected.count, "one fixture line per request the shell sends")
 
         for (index, message) in mine.enumerated() {
             let written = try JSONSerialization.jsonObject(with: try WireCodec.encode(message))
@@ -221,6 +228,40 @@ final class ClientMessageFixtureTests: XCTestCase {
                 written as? NSDictionary, golden as? NSDictionary,
                 "line \(index + 1) does not match what the daemon expects")
         }
+    }
+
+    /// A gate request carries what makes it safe, and it carries it on top of the fields the
+    /// fixture already has.
+    ///
+    /// `DESIGN.md` section Sicherheit: `run_gate` names the project, the job and the hash that
+    /// was approved, and the daemon refuses it without them. The fixture line still shows the
+    /// older shape; everything in it has to be in what the shell sends, and the three fields
+    /// have to be there as well.
+    func testAGateRequestCarriesTheApprovedHash() throws {
+        let fixture = try RepositoryLayout.lines(of: "client_messages.jsonl")
+        let golden = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: try XCTUnwrap(fixture.last))
+                as? [String: Any])
+        XCTAssertEqual(golden["request"] as? String, "run_gate", "the last fixture line moved")
+
+        let written = try XCTUnwrap(
+            try JSONSerialization.jsonObject(
+                with: try WireCodec.encode(.request(RequestEnvelope(
+                    id: 6,
+                    request: .runGate(
+                        sessionId: "-Users-me-AI-companion", gateIndex: 0,
+                        project: "/Users/me/AI/companion",
+                        auftragId: "2026-08-24-mac-shell",
+                        expectedHash: "e74d0b86"))))) as? [String: Any])
+
+        for (key, value) in golden {
+            XCTAssertEqual(
+                written[key] as? NSObject, value as? NSObject,
+                "the field \(key) of the fixture is missing or different")
+        }
+        XCTAssertEqual(written["project"] as? String, "/Users/me/AI/companion")
+        XCTAssertEqual(written["auftrag_id"] as? String, "2026-08-24-mac-shell")
+        XCTAssertEqual(written["expected_hash"] as? String, "e74d0b86")
     }
 
     /// Without options the request stays the bare `list`, and the daemon fills in its own
