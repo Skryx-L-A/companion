@@ -69,10 +69,11 @@ final class WakewordFixtureTests: XCTestCase {
     /// Speech that is not the word. The confusables in the fixture set are deliberate —
     /// "compassion", "champion", "expansion" — so this is the hard direction, not the easy one.
     ///
-    /// The bound is one false accept across the set rather than none: the threshold the engine
-    /// calibrates is a trade, and a test demanding a perfect score would be a test that gets
-    /// deleted the first time somebody tunes it honestly. What the bound catches is a change
-    /// that makes the wakeword fire at speech in general.
+    /// Measured on 2026-08-24 with the fixtures of that day: 0 false accepts out of 40 clips
+    /// for the voice `samantha`. The bound is nevertheless one rather than zero, because the
+    /// threshold the engine calibrates is a trade, and a test demanding a perfect score is a
+    /// test that gets deleted the first time somebody tunes it honestly. What the bound
+    /// catches is a change that makes the wakeword fire at speech in general.
     func testUnrelatedSpeechMostlyLeavesItAlone() throws {
         let voice = "samantha"
         let modelPath = try train(
