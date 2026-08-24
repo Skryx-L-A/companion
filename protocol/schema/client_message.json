@@ -1241,6 +1241,28 @@
           ]
         },
         {
+          "description": "The person says something to the companion.\n\nThe answer arrives as `chat_delta`, `chat_tool` and `chat_done` events, not in the\nresponse: a client that waited for the answer here would block for the whole turn,\ntool calls included. Only the human role may send this — an answer is written by\nthe model that speaks for the person, and a docked orchestrator that could ask for\none would be talking to the companion in the person's name.",
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "voice": {
+              "description": "Whether the answer should also be spoken. `chat_done` says whether it was.",
+              "type": "boolean",
+              "default": false
+            },
+            "request": {
+              "type": "string",
+              "const": "chat_message"
+            }
+          },
+          "required": [
+            "request",
+            "text"
+          ]
+        },
+        {
           "description": "Measures the configured endpoints and returns what the probe found.",
           "type": "object",
           "properties": {

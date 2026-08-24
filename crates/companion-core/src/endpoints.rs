@@ -139,6 +139,11 @@ pub enum EndpointError {
     KeyInSettings { id: String },
     #[error("profile {id} is a cli profile and cli profiles use no key")]
     KeyOnCliProfile { id: String },
+    #[error(
+        "profile {id} carries a credential in its url; a key belongs in the keychain under a \
+         name, not in the address, where it would land in logs and error events"
+    )]
+    CredentialInUrl { id: String },
     #[error("no endpoint is configured for role {role}")]
     NoEndpoint { role: &'static str },
 }
@@ -249,6 +254,11 @@ impl EndpointConfig {
                     id: profile.id.clone(),
                 });
             }
+            if !profile.protocol.is_cli() && url_has_userinfo(&profile.url) {
+                return Err(EndpointError::CredentialInUrl {
+                    id: profile.id.clone(),
+                });
+            }
             if let Some(key_ref) = &profile.key_ref {
                 if profile.protocol.is_cli() {
                     return Err(EndpointError::KeyOnCliProfile {
@@ -283,6 +293,24 @@ impl EndpointConfig {
 /// prefixes real keys announce themselves with. It cannot recognise every key, and it does
 /// not have to — it has to catch the one mistake that actually happens, which is pasting
 /// the key into the settings file where the name belongs.
+/// Whether an HTTP url carries a `user:pass@` (or `user@`) credential in its authority.
+///
+/// Such a credential would be sent on every request and would surface verbatim in logs and
+/// error events. Keys belong in the keychain under a name, so a url that hides one is
+/// refused. The check looks only at the authority — the part between `://` and the next
+/// `/`, `?` or `#` — so an `@` inside a path or query does not trip it.
+fn url_has_userinfo(url: &str) -> bool {
+    let after_scheme = match url.split_once("://") {
+        Some((_, rest)) => rest,
+        None => url,
+    };
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    authority.contains('@')
+}
+
 fn is_name_not_key(candidate: &str) -> bool {
     if candidate.is_empty() || candidate.len() > MAX_KEY_REF_LEN {
         return false;
@@ -408,6 +436,33 @@ mod tests {
                 id: "nowhere".to_owned()
             })
         );
+    }
+
+    #[test]
+    fn a_key_hidden_in_the_url_is_refused() {
+        let profile = EndpointProfile {
+            id: "cloud".to_owned(),
+            protocol: EndpointProtocol::OpenaiCompat,
+            url: "https://user:sk-secret@api.example.com/v1".to_owned(),
+            key_ref: None,
+            model: None,
+            args: Vec::new(),
+        };
+        let config = EndpointConfig::empty().with_profile(profile);
+        assert_eq!(
+            config.validate(),
+            Err(EndpointError::CredentialInUrl {
+                id: "cloud".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn an_at_sign_in_a_path_is_not_taken_for_a_credential() {
+        assert!(!url_has_userinfo("http://127.0.0.1:8765/models/@latest"));
+        assert!(!url_has_userinfo("http://127.0.0.1:8765/"));
+        assert!(url_has_userinfo("https://user:pass@host/v1"));
+        assert!(url_has_userinfo("https://token@host"));
     }
 
     #[test]

@@ -840,7 +840,10 @@
         "stt_partial",
         "stt_final",
         "tts_chunk",
-        "tts_done"
+        "tts_done",
+        "chat_delta",
+        "chat_tool",
+        "chat_done"
       ]
     },
     "StatusField": {
@@ -1283,7 +1286,7 @@
       ]
     },
     "Event": {
-      "description": "Everything an adapter can report about a session, plus what the voice pipeline reports\nabout a dictation or a spoken answer.\n\nThe first thirteen variants are the event list from `DESIGN.md` § Session-Adapter, in\nthat order. The four voice events after them were added in phase 1b and belong to no\nsession: they carry a [`VoiceId`] instead, and their envelope has no session id. They\nare additive, so they do not raise [`crate::PROTOCOL_VERSION`] — `DESIGN.md`\n§ Architektur, Protokoll-Kompatibilität: a client that does not know them ignores them\nand counts them.",
+      "description": "Everything an adapter can report about a session, plus what the voice pipeline reports\nabout a dictation or a spoken answer.\n\nThe first thirteen variants are the event list from `DESIGN.md` § Session-Adapter, in\nthat order. The four voice events after them were added in phase 1b and belong to no\nsession: they carry a [`VoiceId`] instead, and their envelope has no session id. The\nthree chat events at the end are the answer of the companion itself and belong to no\nsession either. All of them are additive, so they do not raise\n[`crate::PROTOCOL_VERSION`] — `DESIGN.md` § Architektur, Protokoll-Kompatibilität: a\nclient that does not know them ignores them and counts them.",
       "oneOf": [
         {
           "type": "object",
@@ -1651,6 +1654,65 @@
           "required": [
             "event",
             "voice_id"
+          ]
+        },
+        {
+          "description": "A piece of the answer the companion is writing, in the order it was produced.\n\nAppended to whatever the earlier pieces of the same answer said; unlike\n[`Self::SttPartial`] it never replaces them. There is no id on the three chat\nevents because the daemon answers one message at a time: a second `chat_message`\nwhile an answer is still being written is refused rather than interleaved.",
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "event": {
+              "type": "string",
+              "const": "chat_delta"
+            }
+          },
+          "required": [
+            "event",
+            "text"
+          ]
+        },
+        {
+          "description": "The companion used one of its tools.\n\n`summary` is a short line for the panel, never the whole tool result: the result\ngoes to the model, the person sees what was done.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "event": {
+              "type": "string",
+              "const": "chat_tool"
+            }
+          },
+          "required": [
+            "event",
+            "name",
+            "summary"
+          ]
+        },
+        {
+          "description": "The answer is complete.\n\n`text` is the whole answer, so a client that missed a delta does not have to piece\nit together, and `spoken` says whether it was also said out loud. An answer that\nfailed part way ends here as well, with what there was: the error arrives as\n[`Self::Error`] next to it, the same way a failed dictation does.",
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "spoken": {
+              "type": "boolean"
+            },
+            "event": {
+              "type": "string",
+              "const": "chat_done"
+            }
+          },
+          "required": [
+            "event",
+            "text",
+            "spoken"
           ]
         }
       ]

@@ -286,6 +286,7 @@ mod tests {
             RequestKind::Interrupt,
             RequestKind::Stop,
             RequestKind::RunGate,
+            RequestKind::ChatMessage,
             RequestKind::List,
             RequestKind::Read,
             RequestKind::Capabilities,

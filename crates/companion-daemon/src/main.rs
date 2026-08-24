@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use companion_adapter_claude::{ClaudeAdapter, ClaudeConfig};
 use companion_adapter_workbench::{WorkbenchAdapter, WorkbenchConfig};
+use companion_brain::{BrainConfig, BrainLimits};
 use companion_core::adapter::AdapterSet;
 use companion_core::{FileSecretStore, FileTokenStore, Registry, TokenStore, paths};
-use companion_daemon::{ServerConfig, VoiceSetup, prepare_config, start};
+use companion_daemon::{BrainSetup, ServerConfig, VoiceSetup, prepare_config, start};
 use companion_voice::VoiceLimits;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -96,15 +97,28 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         roles = endpoints.roles.len(),
         "endpoints ready"
     );
+    let secrets = Arc::new(FileSecretStore::new(paths::secrets_path()));
     let voice = Some(VoiceSetup {
-        endpoints,
-        secrets: Arc::new(FileSecretStore::new(paths::secrets_path())),
+        endpoints: Arc::clone(&endpoints),
+        secrets: secrets.clone(),
         limits: VoiceLimits::default(),
+    });
+    // The autonomy setting is read here, once, the same way the endpoints and the adapter
+    // list are: a change to it takes effect on the next start.
+    let brain = Some(BrainSetup {
+        endpoints,
+        secrets,
+        config: BrainConfig {
+            config_dir: paths::config_dir(),
+            autonomy: settings.autonomy,
+            limits: BrainLimits::default(),
+        },
     });
 
     let config = ServerConfig {
         adapters,
         voice,
+        brain,
         ..ServerConfig::new(paths::socket_path(), tokens, registry)
     };
 

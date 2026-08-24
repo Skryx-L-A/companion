@@ -258,6 +258,33 @@ impl Registry {
             .optional()?)
     }
 
+    /// Appends one self-answer to the row of a session, creating the row if there is none.
+    ///
+    /// `DESIGN.md` § Verhalten requires every question the companion answered itself to be
+    /// readable afterwards, with question, answer and source. The append is a
+    /// read-modify-write under the same lock as every other write, so two answers arriving
+    /// at once cannot overwrite one another.
+    pub fn append_self_answer(
+        &self,
+        session_id: &SessionId,
+        answer: &SelfAnswer,
+    ) -> Result<(), RegistryError> {
+        let mut entry = self.get(session_id)?.unwrap_or_else(|| RegistryEntry {
+            schema_version: REGISTRY_SCHEMA_VERSION,
+            session_id: session_id.clone(),
+            auftrag_id: None,
+            project: None,
+            started_at_ms: crate::now_ms(),
+            ended_at_ms: None,
+            result_path: None,
+            open_points: Vec::new(),
+            self_answers: Vec::new(),
+            cost: Provenance::<Cost>::Unknown,
+        });
+        entry.self_answers.push(answer.clone());
+        self.upsert(&entry)
+    }
+
     pub fn get(&self, session_id: &SessionId) -> Result<Option<RegistryEntry>, RegistryError> {
         self.lock()
             .query_row(
@@ -354,6 +381,58 @@ mod tests {
                 usd: None,
             }),
         }
+    }
+
+    #[test]
+    fn self_answers_pile_up_instead_of_replacing_one_another() {
+        let registry = Registry::open_in_memory().unwrap();
+        let session = SessionId::new("reported:0/core-brain");
+        let first = SelfAnswer {
+            question: "darf ich pushen".to_owned(),
+            answer: "nein, der Orchestrator entscheidet".to_owned(),
+            source: "guardrails".to_owned(),
+            answered_at_ms: 1_700_000_000_000,
+        };
+        let second = SelfAnswer {
+            question: "welcher Zweig".to_owned(),
+            answer: "wb/core-brain".to_owned(),
+            source: "auftrag".to_owned(),
+            answered_at_ms: 1_700_000_060_000,
+        };
+
+        // The first one creates the row: an answer given before any adapter reported the
+        // session must not be lost just because there is nothing to append to yet.
+        registry.append_self_answer(&session, &first).unwrap();
+        registry.append_self_answer(&session, &second).unwrap();
+
+        let stored = registry.get(&session).unwrap().expect("the row exists");
+        assert_eq!(stored.self_answers, vec![first, second]);
+    }
+
+    #[test]
+    fn a_self_answer_keeps_what_the_row_already_held() {
+        let registry = Registry::open_in_memory().unwrap();
+        let existing = entry("reported:1/session");
+        registry.upsert(&existing).unwrap();
+
+        let answer = SelfAnswer {
+            question: "Budget".to_owned(),
+            answer: "bleibt beim Auftrag".to_owned(),
+            source: "auftrag".to_owned(),
+            answered_at_ms: 1_700_000_002_000,
+        };
+        registry
+            .append_self_answer(&existing.session_id, &answer)
+            .unwrap();
+
+        let stored = registry.get(&existing.session_id).unwrap().unwrap();
+        assert_eq!(stored.project, existing.project);
+        assert_eq!(stored.open_points, existing.open_points);
+        assert_eq!(
+            stored.self_answers.len(),
+            2,
+            "the old answer is still there"
+        );
     }
 
     #[test]

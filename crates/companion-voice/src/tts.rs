@@ -172,16 +172,8 @@ async fn say(
     }
 
     let mut command = Command::new(&profile.url);
-    command.args(&profile.args);
-    if let Some(voice) = request.voice {
-        command.arg("-v").arg(voice);
-    }
     command
-        .arg("-o")
-        .arg(&target)
-        .arg("--file-format=WAVE")
-        .arg(format!("--data-format={SAY_DATA_FORMAT}"))
-        .arg(request.text)
+        .args(say_args(&profile.args, &target, request))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -237,6 +229,28 @@ async fn say(
         on_chunk(piece);
     }
     Ok(AudioFormat::Wav)
+}
+
+/// The full argument list for one `say` run.
+///
+/// The text goes after a `--` separator so `say` speaks it verbatim instead of reading a
+/// leading dash as an option: a text like `-f <path>` would otherwise make `say` read that
+/// file, and a text starting with `--` would fail outright. Split out so the ordering can be
+/// checked without starting the program.
+fn say_args(fixed: &[String], target: &Path, request: &TtsRequest<'_>) -> Vec<std::ffi::OsString> {
+    use std::ffi::OsString;
+    let mut args: Vec<OsString> = fixed.iter().map(OsString::from).collect();
+    if let Some(voice) = request.voice {
+        args.push("-v".into());
+        args.push(voice.into());
+    }
+    args.push("-o".into());
+    args.push(target.as_os_str().to_owned());
+    args.push("--file-format=WAVE".into());
+    args.push(format!("--data-format={SAY_DATA_FORMAT}").into());
+    args.push("--".into());
+    args.push(request.text.into());
+    args
 }
 
 /// A private path for one `say` run.
@@ -297,6 +311,33 @@ mod tests {
         assert!(
             !program_is_runnable(Path::new("/usr/bin")),
             "a directory is not a program"
+        );
+    }
+
+    #[test]
+    fn the_text_is_separated_from_the_options_by_a_double_dash() {
+        use std::ffi::OsString;
+        let request = TtsRequest {
+            text: "-f /etc/hosts",
+            voice: None,
+        };
+        let args = say_args(&[], Path::new("/tmp/out.wav"), &request);
+
+        // The dash-led text must sit after a `--`, and nothing may follow it, so `say`
+        // cannot read it as `-f <path>`.
+        let sep = args
+            .iter()
+            .position(|a| a == &OsString::from("--"))
+            .expect("a -- separator must be present");
+        assert_eq!(
+            args.last(),
+            Some(&OsString::from("-f /etc/hosts")),
+            "the text is the final argument"
+        );
+        assert_eq!(
+            sep,
+            args.len() - 2,
+            "nothing stands between -- and the text"
         );
     }
 
