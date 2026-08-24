@@ -115,12 +115,8 @@ final class ServerMessageFixtureTests: XCTestCase {
             }
             return envelope.event.kind
         }
-        // The four voice kinds are not in here: no adapter produces them, and the fixture
-        // writer of the protocol crate does not write a line for them yet. They are decoded
-        // against hand-written lines in `VoiceEventWireTests` until it does.
-        let fromAdaptersAndBus = EventKind.allCases.filter { !$0.isVoice }
-        XCTAssertEqual(Set(kinds), Set(fromAdaptersAndBus), "one fixture per event kind")
-        XCTAssertEqual(kinds.count, 13)
+        XCTAssertEqual(Set(kinds), Set(EventKind.allCases), "one fixture per event kind")
+        XCTAssertEqual(kinds.count, EventKind.allCases.count)
     }
 
     func testEventEnvelopeCarriesTheBookkeeping() throws {

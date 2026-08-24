@@ -17,7 +17,7 @@ use companion_protocol::{
     AdapterCapabilities, ClientMessage, CommandKind, ContextUsage, EndReason, ErrorCode, Event,
     EventEnvelope, EventKind, Hello, PROTOCOL_VERSION, ProtocolError, Provenance, ReadWindow,
     Request, RequestEnvelope, Response, ResponseBody, ResponseResult, SendOutcome, ServerMessage,
-    SessionState, SessionStatus, StatusField, Welcome,
+    AudioFormat, SessionState, SessionStatus, StatusField, VoiceId, Welcome,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -144,6 +144,25 @@ fn server_messages() -> Vec<ServerMessage> {
             message: "tmux nicht erreichbar".to_owned(),
         },
         Event::EventsDropped { missed: 4 },
+        Event::SttPartial {
+            voice_id: VoiceId::from("v-1"),
+            text: "starte die".to_owned(),
+        },
+        Event::SttFinal {
+            voice_id: VoiceId::from("v-1"),
+            text: "starte die Testsuite".to_owned(),
+            endpoint: Some("whisper-lokal".to_owned()),
+        },
+        Event::TtsChunk {
+            voice_id: VoiceId::from("v-2"),
+            sequence: 0,
+            format: AudioFormat::Wav,
+            audio_base64: "UklGRg==".to_owned(),
+        },
+        Event::TtsDone {
+            voice_id: VoiceId::from("v-2"),
+            endpoint: None,
+        },
     ];
     assert_eq!(
         events.len(),
