@@ -5,7 +5,8 @@
 //! This is the adapter for harnesses that have no hooks, no status files and no protocol
 //! of their own. It starts the configured program on a pty, keeps its output in a capped
 //! ring buffer, writes lines to its input and ends it with a SIGTERM followed by a
-//! SIGKILL. That is the whole list, and the capabilities say so.
+//! SIGKILL, both aimed at the process group so forked helpers go with it. That is the
+//! whole list, and the capabilities say so.
 //!
 //! What it deliberately does not do is guess. `DESIGN.md` § Session-Adapter wants a
 //! structured channel as the source of truth and leaves the terminal image as display
@@ -254,14 +255,34 @@ fn watch(
     debug!(session = %session, ?state, "pty session ended");
 }
 
-/// Sends a SIGTERM to a process, so a CLI gets the chance to clean up before the SIGKILL.
+/// Sends a signal to everything the session started.
+///
+/// The child is the leader of its own process group (the pty spawn calls `setsid`), so the
+/// group id is its pid, and signalling the group reaches the CLI *and* whatever it forked —
+/// a CLI that spawns workers would otherwise leave them running headless after `stop`. When
+/// the group cannot be signalled, the single pid is tried, so a program that changed its
+/// group still gets the signal itself.
 #[cfg(unix)]
-fn request_stop(pid: u32) -> std::io::Result<()> {
-    use nix::sys::signal::{Signal, kill};
+fn signal_session(pid: u32, signal: nix::sys::signal::Signal) -> std::io::Result<()> {
+    use nix::sys::signal::{kill, killpg};
     use nix::unistd::Pid;
 
-    kill(Pid::from_raw(pid as i32), Signal::SIGTERM)
+    let pid = Pid::from_raw(pid as i32);
+    killpg(pid, signal)
+        .or_else(|_| kill(pid, signal))
         .map_err(|error| std::io::Error::from_raw_os_error(error as i32))
+}
+
+/// Sends a SIGTERM, so a CLI gets the chance to clean up before the SIGKILL.
+#[cfg(unix)]
+fn request_stop(pid: u32) -> std::io::Result<()> {
+    signal_session(pid, nix::sys::signal::Signal::SIGTERM)
+}
+
+/// The hard end of the whole process group. Best effort: the pty killer follows either way.
+#[cfg(unix)]
+fn force_stop(pid: u32) {
+    let _ = signal_session(pid, nix::sys::signal::Signal::SIGKILL);
 }
 
 /// Nothing to send on a system without signals; `stop` falls through to the hard kill.
@@ -272,6 +293,10 @@ fn request_stop(_pid: u32) -> std::io::Result<()> {
         "this system has no SIGTERM",
     ))
 }
+
+/// Without process groups the pty killer is all there is.
+#[cfg(not(unix))]
+fn force_stop(_pid: u32) {}
 
 #[async_trait]
 impl SessionAdapter for PtyAdapter {
@@ -493,10 +518,15 @@ impl SessionAdapter for PtyAdapter {
             tokio::time::sleep(step).await;
             waited += step;
         }
-        if !finished.load(Ordering::SeqCst)
-            && let Err(error) = killer.kill()
-        {
-            warn!(%error, session = %session, "the program could not be killed");
+        if !finished.load(Ordering::SeqCst) {
+            // The whole group first, so forked helpers die with their parent; the pty
+            // killer after it still reaps the direct child.
+            if let Some(pid) = pid {
+                force_stop(pid);
+            }
+            if let Err(error) = killer.kill() {
+                warn!(%error, session = %session, "the program could not be killed");
+            }
         }
 
         self.inner.emit(
