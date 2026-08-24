@@ -302,6 +302,24 @@
           ]
         },
         {
+          "description": "The settings document, as the daemon is working with it right now.",
+          "type": "object",
+          "properties": {
+            "settings": {
+              "description": "Boxed to keep the size of every other response down.",
+              "$ref": "#/$defs/Settings"
+            },
+            "body": {
+              "type": "string",
+              "const": "settings"
+            }
+          },
+          "required": [
+            "body",
+            "settings"
+          ]
+        },
+        {
           "description": "The request was carried out and has nothing to return.",
           "type": "object",
           "properties": {
@@ -843,7 +861,8 @@
         "tts_done",
         "chat_delta",
         "chat_tool",
-        "chat_done"
+        "chat_done",
+        "settings_changed"
       ]
     },
     "StatusField": {
@@ -1178,6 +1197,384 @@
         }
       ]
     },
+    "Settings": {
+      "description": "Everything the daemon reads out of its settings file.",
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 1
+        },
+        "tool_boundary": {
+          "description": "Boundary for the companion's own tools, everything that is not high risk.\n`DESIGN.md` § Ersteinrichtung, point 13.",
+          "$ref": "#/$defs/ToolBoundary",
+          "default": "ask"
+        },
+        "agent_boundary": {
+          "description": "Boundary a spawned session runs under. `DESIGN.md` § Ersteinrichtung, point 2.\n\nA second field rather than the same one, because the two are different questions:\nwhat the companion may do itself, and what it may let an agent do.",
+          "$ref": "#/$defs/ToolBoundary",
+          "default": "ask"
+        },
+        "high_risk": {
+          "$ref": "#/$defs/HighRiskSettings",
+          "default": {
+            "mail": "ask",
+            "push": "ask",
+            "publish": "ask"
+          }
+        },
+        "enabled_adapters": {
+          "description": "Adapters the daemon should load. Empty means every adapter it was built with,\nwith one exception: an adapter that is opt-in stays off until it is named here by\nits id. The generic terminal adapter ([`PTY_ADAPTER_ID`]) is the one, because\n`DESIGN.md` § Sicherheit says a permission level cannot restrict a foreign CLI —\nnobody is to end up with one by accident.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "pty_command": {
+          "description": "The command the generic terminal adapter runs, program first, arguments after.\nEmpty is the default and means it starts nothing: there is no sensible default\nprogram for \"any CLI\".",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "notification_channels": {
+          "description": "Where the person is told about something. The figure alone by default: every other\nchannel either makes noise or leaves the machine.\n`DESIGN.md` § Ersteinrichtung, point 12.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NotificationChannel"
+          },
+          "default": [
+            "figure"
+          ]
+        },
+        "forward_done": {
+          "description": "Whether a finished session is worth telling the person about. On by default, because\na run that is done is the one thing somebody is actually waiting for.",
+          "type": "boolean",
+          "default": true
+        },
+        "done_handling": {
+          "description": "What happens with a finished run beyond telling the person.\n`DESIGN.md` § Ersteinrichtung, point 11. [`Self::forward_done`] says whether the\nperson hears about it at all, this says what else runs.",
+          "$ref": "#/$defs/DoneHandling",
+          "default": "forward"
+        },
+        "autonomy": {
+          "$ref": "#/$defs/Autonomy",
+          "default": "observe"
+        },
+        "inventory_allowed": {
+          "description": "Whether the companion may read what is installed — skills, tools, MCP servers,\nworkflows. `DESIGN.md` § Ersteinrichtung, point 4, and § Sicherheit: reading a\nworking directory is reading somebody's work, so it stays off until it is allowed.",
+          "type": "boolean",
+          "default": false
+        },
+        "budget_limit_percent": {
+          "description": "Share of the budget at which the companion stops starting anything new, in per cent.\nZero means no limit. `DESIGN.md` § Ersteinrichtung, point 7.",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255,
+          "default": 0
+        },
+        "skill_level": {
+          "description": "`DESIGN.md` § Ersteinrichtung, point 10.",
+          "$ref": "#/$defs/SkillLevel",
+          "default": "recommended"
+        },
+        "conversation_style": {
+          "description": "`DESIGN.md` § Ersteinrichtung, point 8: how much he says.",
+          "$ref": "#/$defs/ConversationStyle",
+          "default": "terse"
+        },
+        "address_form": {
+          "description": "`DESIGN.md` § Ersteinrichtung, point 8: how he addresses the person.",
+          "$ref": "#/$defs/AddressForm",
+          "default": "informal"
+        },
+        "figure_name": {
+          "description": "`DESIGN.md` § Ersteinrichtung, point 8: what the figure is called. The companion\nwrites in this name, which is why it is the daemon's and not only the window's.",
+          "type": "string",
+          "default": "Companion"
+        },
+        "endpoints": {
+          "description": "The provider profiles and which role uses which of them. Keys live in the keychain;\na profile here holds only the name of one.\n`DESIGN.md` § Ersteinrichtung, point 9.",
+          "$ref": "#/$defs/EndpointConfig",
+          "default": {
+            "profiles": [
+              {
+                "id": "macos-say",
+                "protocol": "cli",
+                "url": "/usr/bin/say"
+              }
+            ],
+            "roles": {
+              "tts": {
+                "primary": "macos-say"
+              }
+            }
+          }
+        }
+      }
+    },
+    "ToolBoundary": {
+      "description": "How far the companion may act on its own with a class of tools.",
+      "oneOf": [
+        {
+          "description": "Read, never write.",
+          "type": "string",
+          "const": "read_only"
+        },
+        {
+          "description": "Ask before every use. The default everywhere.",
+          "type": "string",
+          "const": "ask"
+        },
+        {
+          "description": "Act without asking.",
+          "type": "string",
+          "const": "full"
+        }
+      ]
+    },
+    "HighRiskSettings": {
+      "description": "The three tool classes that reach outside the machine. `DESIGN.md` § Sicherheit puts\nthem on `ask` and lets only the person raise them, with a warning.",
+      "type": "object",
+      "properties": {
+        "mail": {
+          "$ref": "#/$defs/ToolBoundary"
+        },
+        "push": {
+          "$ref": "#/$defs/ToolBoundary"
+        },
+        "publish": {
+          "$ref": "#/$defs/ToolBoundary"
+        }
+      },
+      "required": [
+        "mail",
+        "push",
+        "publish"
+      ]
+    },
+    "NotificationChannel": {
+      "description": "Where the companion may reach a person. `DESIGN.md` § Ersteinrichtung, point 12.",
+      "oneOf": [
+        {
+          "description": "The character on the screen. The only channel that never leaves the machine, and\ntherefore the only one that is on by default.",
+          "type": "string",
+          "const": "figure"
+        },
+        {
+          "description": "A short sound next to the figure.",
+          "type": "string",
+          "const": "sound"
+        },
+        {
+          "description": "Said out loud, over the configured speech output.",
+          "type": "string",
+          "const": "speech"
+        },
+        {
+          "description": "A notification of the operating system, seen even when the figure is covered.",
+          "type": "string",
+          "const": "system_notification"
+        },
+        {
+          "description": "A push message to a phone.",
+          "type": "string",
+          "const": "push"
+        },
+        {
+          "description": "An email.",
+          "type": "string",
+          "const": "mail"
+        }
+      ]
+    },
+    "DoneHandling": {
+      "description": "What happens when a session reports that it is done.\n`DESIGN.md` § Ersteinrichtung, point 11.",
+      "oneOf": [
+        {
+          "description": "The person is told, and nothing else happens. The sparing default.",
+          "type": "string",
+          "const": "forward"
+        },
+        {
+          "description": "The gate commands of the job file run, and their verdict is reported with it.",
+          "type": "string",
+          "const": "gate"
+        },
+        {
+          "description": "A second session reviews the result before the person sees it.",
+          "type": "string",
+          "const": "reviewer"
+        }
+      ]
+    },
+    "Autonomy": {
+      "description": "How far the companion acts on its own when a session reports something.\n`DESIGN.md` § Ersteinrichtung, point 3.",
+      "oneOf": [
+        {
+          "description": "Watch and report, decide nothing. The default.",
+          "type": "string",
+          "const": "observe"
+        },
+        {
+          "description": "Answer what is unambiguous, ask about the rest.",
+          "type": "string",
+          "const": "ask"
+        },
+        {
+          "description": "Answer and act within the guardrails of the job file.",
+          "type": "string",
+          "const": "act"
+        }
+      ]
+    },
+    "SkillLevel": {
+      "description": "How much of the skill package goes into a recognised harness.\n`DESIGN.md` § Ersteinrichtung, point 10.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "all"
+          ]
+        },
+        {
+          "description": "Nothing is installed.",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "The obligatory core.",
+          "type": "string",
+          "const": "recommended"
+        },
+        {
+          "description": "The core and the checked extensions.",
+          "type": "string",
+          "const": "many"
+        }
+      ]
+    },
+    "ConversationStyle": {
+      "description": "How much the companion says. `DESIGN.md` § Ersteinrichtung, point 8.",
+      "type": "string",
+      "enum": [
+        "terse",
+        "detailed"
+      ]
+    },
+    "AddressForm": {
+      "description": "How the companion addresses the person. `DESIGN.md` § Ersteinrichtung, point 8.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "formal"
+          ]
+        },
+        {
+          "description": "German \"du\", English first name.",
+          "type": "string",
+          "const": "informal"
+        }
+      ]
+    },
+    "EndpointConfig": {
+      "description": "The endpoint part of the settings: the profiles, and which role uses which of them.",
+      "type": "object",
+      "properties": {
+        "profiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EndpointProfile"
+          },
+          "default": [
+            {
+              "id": "macos-say",
+              "protocol": "cli",
+              "url": "/usr/bin/say"
+            }
+          ]
+        },
+        "roles": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/RoleBinding"
+          },
+          "default": {
+            "tts": {
+              "primary": "macos-say"
+            }
+          }
+        }
+      }
+    },
+    "EndpointProfile": {
+      "description": "One provider profile: how to reach a backend, and under which name its key lives.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Name the role bindings and the settings page use.",
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/EndpointProtocol"
+        },
+        "url": {
+          "description": "Base URL for a protocol that speaks HTTP, for example\n`http://127.0.0.1:8765`. For [`EndpointProtocol::Cli`] it is the absolute path of\nthe program instead.",
+          "type": "string"
+        },
+        "key_ref": {
+          "description": "Name under which the key lives in the the secret store of the daemon, never the\nkey itself. Absent for a local endpoint that needs none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "description": "Model this profile uses. `DESIGN.md` § Endpoints wants the settings page to show it\nfor every profile.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "args": {
+          "description": "Fixed arguments for a CLI profile, in front of whatever the driver adds.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "protocol",
+        "url"
+      ]
+    },
+    "RoleBinding": {
+      "description": "Which profile serves a role, and which ones to try when it fails.",
+      "type": "object",
+      "properties": {
+        "primary": {
+          "type": "string"
+        },
+        "fallback": {
+          "description": "Tried in order after the primary one failed.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "primary"
+      ]
+    },
     "ProtocolError": {
       "description": "An error with a message that is safe to show.",
       "type": "object",
@@ -1286,7 +1683,7 @@
       ]
     },
     "Event": {
-      "description": "Everything an adapter can report about a session, plus what the voice pipeline reports\nabout a dictation or a spoken answer.\n\nThe first thirteen variants are the event list from `DESIGN.md` § Session-Adapter, in\nthat order. The four voice events after them were added in phase 1b and belong to no\nsession: they carry a [`VoiceId`] instead, and their envelope has no session id. The\nthree chat events at the end are the answer of the companion itself and belong to no\nsession either. All of them are additive, so they do not raise\n[`crate::PROTOCOL_VERSION`] — `DESIGN.md` § Architektur, Protokoll-Kompatibilität: a\nclient that does not know them ignores them and counts them.",
+      "description": "Everything an adapter can report about a session, plus what the voice pipeline reports\nabout a dictation or a spoken answer.\n\nThe first thirteen variants are the event list from `DESIGN.md` § Session-Adapter, in\nthat order. The four voice events after them were added in phase 1b and belong to no\nsession: they carry a [`VoiceId`] instead, and their envelope has no session id. The\nthree chat events after them are the answer of the companion itself and belong to no\nsession either. The last one says that the settings document changed and belongs to the\ndaemon rather than to anything it drives. All of them are additive, so they do not raise\n[`crate::PROTOCOL_VERSION`] — `DESIGN.md` § Architektur, Protokoll-Kompatibilität: a\nclient that does not know them ignores them and counts them.",
       "oneOf": [
         {
           "type": "object",
@@ -1713,6 +2110,19 @@
             "event",
             "text",
             "spoken"
+          ]
+        },
+        {
+          "description": "The settings document changed, so whatever a client has of it is stale.\n\nIt carries nothing: the document says what this machine may do without asking, and\nonly the person's shell may read that (`get_settings` is refused to the role\n`agent`). A client that may read it re-reads it; one that may not learns nothing it\ndid not already know.",
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "settings_changed"
+            }
+          },
+          "required": [
+            "event"
           ]
         }
       ]

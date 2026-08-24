@@ -10,9 +10,11 @@ pub mod server;
 
 use std::path::Path;
 
-use companion_core::{Settings, SettingsError, paths};
+use companion_core::{Settings, SettingsError, paths, settings};
 
-pub use server::{BrainSetup, Limits, ServerConfig, ServerError, ServerHandle, VoiceSetup, start};
+pub use server::{
+    BrainSetup, Limits, ServerConfig, ServerError, ServerHandle, SettingsSetup, VoiceSetup, start,
+};
 
 /// Version of the daemon binary, reported in the handshake.
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -33,5 +35,5 @@ pub fn prepare_config(config_dir: &Path) -> Result<(Settings, bool), SettingsErr
     })?;
     let settings_path = config_dir.join("settings.json");
     let created = !settings_path.exists();
-    Ok((Settings::load_or_create(&settings_path)?, created))
+    Ok((settings::load_or_create(&settings_path)?, created))
 }

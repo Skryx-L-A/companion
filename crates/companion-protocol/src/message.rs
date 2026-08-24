@@ -10,6 +10,7 @@ use crate::event::EventEnvelope;
 use crate::ids::{AdapterId, AuftragId, SessionId, VoiceId};
 use crate::role::ClientRole;
 use crate::session::SessionStatus;
+use crate::settings::Settings;
 
 /// Matches a response to the request that caused it. Chosen by the client, unique per
 /// connection.
@@ -259,6 +260,30 @@ pub enum Request {
         #[serde(default)]
         role: Option<EndpointRole>,
     },
+    /// The settings document the daemon is working with.
+    ///
+    /// Only the person's shell may ask. The document carries no key — a profile holds the
+    /// name of a keychain entry and nothing else — but it does say what this machine is
+    /// allowed to do without asking, and that is not something a docked orchestrator gets
+    /// to read.
+    GetSettings,
+    /// Replaces the settings document.
+    ///
+    /// The daemon checks it the same way it checks the file at load time and writes it
+    /// atomically with mode 0600, or refuses the whole document and changes nothing. A
+    /// change that *raises* a permission needs `confirm_high_risk`, and only a person can
+    /// give it: `DESIGN.md` § Sicherheit puts mail, push and publish on `ask` and says only
+    /// the person may put them on `full`, with a warning. The companion itself has no tool
+    /// that sends this request, which is what keeps that promise on the daemon side rather
+    /// than in a prompt.
+    SetSettings {
+        /// Boxed to keep the size of every other request down.
+        settings: Box<Settings>,
+        /// True only where a person confirmed the warning for the raise this document
+        /// contains. Absent means false, so an older client can never raise anything.
+        #[serde(default)]
+        confirm_high_risk: bool,
+    },
 }
 
 /// The name of a request without its payload, which is what the role check works on.
@@ -286,6 +311,8 @@ pub enum RequestKind {
     TtsSpeak,
     ChatMessage,
     ProbeEndpoints,
+    GetSettings,
+    SetSettings,
 }
 
 impl Request {
@@ -319,6 +346,8 @@ impl Request {
             Self::TtsSpeak { .. } => RequestKind::TtsSpeak,
             Self::ChatMessage { .. } => RequestKind::ChatMessage,
             Self::ProbeEndpoints { .. } => RequestKind::ProbeEndpoints,
+            Self::GetSettings => RequestKind::GetSettings,
+            Self::SetSettings { .. } => RequestKind::SetSettings,
         }
     }
 }
@@ -408,6 +437,11 @@ pub enum ResponseBody {
     /// What the latency probe found, one entry per profile it measured.
     Endpoints {
         endpoints: Vec<EndpointHealth>,
+    },
+    /// The settings document, as the daemon is working with it right now.
+    Settings {
+        /// Boxed to keep the size of every other response down.
+        settings: Box<Settings>,
     },
     /// The request was carried out and has nothing to return.
     Ack,

@@ -319,6 +319,21 @@ mod tests {
     }
 
     #[test]
+    fn only_the_person_reads_and_writes_the_settings() {
+        // DESIGN.md, Sicherheit: an outward-going action comes from the person or from a
+        // job file they approved, never from what an orchestrator said. Changing a setting
+        // is named there explicitly, and reading the document is where the machine says
+        // what it may do without asking.
+        for kind in [RequestKind::GetSettings, RequestKind::SetSettings] {
+            assert!(
+                !permits(ClientRole::Agent, kind),
+                "agent must not do {kind:?}"
+            );
+            assert!(permits(ClientRole::Human, kind), "human needs {kind:?}");
+        }
+    }
+
+    #[test]
     fn tokens_never_appear_in_debug_output() {
         let tokens = Tokens {
             human: "s3cr3t-human".to_owned(),

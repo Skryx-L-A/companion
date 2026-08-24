@@ -5,4 +5,6 @@
 {"type":"request","id":4,"request":"stop","session_id":"-Users-me-AI-companion"}
 {"type":"request","id":7,"request":"interrupt","session_id":"-Users-me-AI-companion"}
 {"type":"request","id":5,"request":"capabilities","adapter":"workbench"}
+{"type":"request","id":8,"request":"get_settings"}
+{"type":"request","id":9,"request":"set_settings","settings":{"schema_version":1,"tool_boundary":"read_only","agent_boundary":"ask","high_risk":{"mail":"ask","push":"ask","publish":"ask"},"enabled_adapters":["workbench","claude-code"],"pty_command":[],"notification_channels":["figure","system_notification"],"forward_done":true,"done_handling":"gate","autonomy":"observe","inventory_allowed":true,"budget_limit_percent":80,"skill_level":"many","conversation_style":"terse","address_form":"informal","figure_name":"Companion","endpoints":{"profiles":[{"id":"lokal-whisper","protocol":"whisper_server","url":"http://127.0.0.1:8765","model":"ggml-large-v3"},{"id":"macos-say","protocol":"cli","url":"/usr/bin/say"}],"roles":{"stt":{"primary":"lokal-whisper","fallback":["macos-say"]},"tts":{"primary":"macos-say"}}}},"confirm_high_risk":false}
 {"type":"request","id":6,"request":"run_gate","session_id":"-Users-me-AI-companion","gate_index":0}

@@ -28,8 +28,9 @@ pub enum EndReason {
 /// The first thirteen variants are the event list from `DESIGN.md` § Session-Adapter, in
 /// that order. The four voice events after them were added in phase 1b and belong to no
 /// session: they carry a [`VoiceId`] instead, and their envelope has no session id. The
-/// three chat events at the end are the answer of the companion itself and belong to no
-/// session either. All of them are additive, so they do not raise
+/// three chat events after them are the answer of the companion itself and belong to no
+/// session either. The last one says that the settings document changed and belongs to the
+/// daemon rather than to anything it drives. All of them are additive, so they do not raise
 /// [`crate::PROTOCOL_VERSION`] — `DESIGN.md` § Architektur, Protokoll-Kompatibilität: a
 /// client that does not know them ignores them and counts them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -158,6 +159,13 @@ pub enum Event {
         text: String,
         spoken: bool,
     },
+    /// The settings document changed, so whatever a client has of it is stale.
+    ///
+    /// It carries nothing: the document says what this machine may do without asking, and
+    /// only the person's shell may read that (`get_settings` is refused to the role
+    /// `agent`). A client that may read it re-reads it; one that may not learns nothing it
+    /// did not already know.
+    SettingsChanged,
 }
 
 /// The name of an event without its payload. Adapters use this in their capabilities to
@@ -187,14 +195,15 @@ pub enum EventKind {
     ChatDelta,
     ChatTool,
     ChatDone,
+    SettingsChanged,
 }
 
 impl EventKind {
-    /// Every event kind the protocol defines, including the one only the daemon produces,
+    /// Every event kind the protocol defines, including the two only the daemon produces,
     /// the four the voice pipeline produces and the three the companion's own answer
     /// produces. An adapter names the subset it can really deliver in its capabilities; no
-    /// adapter delivers a voice or a chat event.
-    pub const ALL: [EventKind; 20] = [
+    /// adapter delivers a voice, a chat or a daemon event.
+    pub const ALL: [EventKind; 21] = [
         Self::SessionStarted,
         Self::SessionEnded,
         Self::QuestionOpen,
@@ -215,15 +224,17 @@ impl EventKind {
         Self::ChatDelta,
         Self::ChatTool,
         Self::ChatDone,
+        Self::SettingsChanged,
     ];
 
     /// The kinds a session adapter can actually produce.
     ///
-    /// [`Self::EventsDropped`] is not among them: only the daemon knows about a gap of its
-    /// own making. Neither are the four voice kinds and the three chat kinds, which come
-    /// from the voice pipeline and from the companion itself and belong to no session. An
-    /// adapter names its own subset of this in its capabilities, and having the line here
-    /// means no adapter has to remember the exclusions.
+    /// The two daemon kinds are not among them: only the daemon knows about a gap of its
+    /// own making, and only it takes a new settings document. Neither are the four voice
+    /// kinds and the three chat kinds, which come from the voice pipeline and from the
+    /// companion itself and belong to no session. An adapter names its own subset of this
+    /// in its capabilities, and having the line here means no adapter has to remember the
+    /// exclusions.
     pub const ADAPTER_EVENTS: [EventKind; 12] = [
         Self::SessionStarted,
         Self::SessionEnded,
@@ -251,6 +262,12 @@ impl EventKind {
     pub fn is_chat(self) -> bool {
         matches!(self, Self::ChatDelta | Self::ChatTool | Self::ChatDone)
     }
+
+    /// Whether only the daemon itself produces this kind: a gap of its own making, and a
+    /// settings document that somebody replaced. No adapter and no endpoint ever sends one.
+    pub fn is_daemon(self) -> bool {
+        matches!(self, Self::EventsDropped | Self::SettingsChanged)
+    }
 }
 
 impl Event {
@@ -276,6 +293,7 @@ impl Event {
             Self::ChatDelta { .. } => EventKind::ChatDelta,
             Self::ChatTool { .. } => EventKind::ChatTool,
             Self::ChatDone { .. } => EventKind::ChatDone,
+            Self::SettingsChanged => EventKind::SettingsChanged,
         }
     }
 }
@@ -306,7 +324,7 @@ mod tests {
     #[test]
     fn every_variant_maps_to_its_kind() {
         // Guards against a new event variant that nobody added to EventKind::ALL.
-        assert_eq!(EventKind::ALL.len(), 20);
+        assert_eq!(EventKind::ALL.len(), 21);
         // And against a new kind that lands in neither of the two groups.
         let unassigned = EventKind::ALL
             .into_iter()
@@ -314,7 +332,7 @@ mod tests {
                 !EventKind::ADAPTER_EVENTS.contains(kind)
                     && !kind.is_voice()
                     && !kind.is_chat()
-                    && *kind != EventKind::EventsDropped
+                    && !kind.is_daemon()
             })
             .count();
         assert_eq!(unassigned, 0, "every event kind has to be classified");

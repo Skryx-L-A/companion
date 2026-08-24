@@ -14,10 +14,12 @@ use std::fs;
 use std::path::PathBuf;
 
 use companion_protocol::{
-    AdapterCapabilities, AudioFormat, ClientMessage, CommandKind, ContextUsage, EndReason,
-    ErrorCode, Event, EventEnvelope, EventKind, Hello, PROTOCOL_VERSION, ProtocolError, Provenance,
-    ReadWindow, Request, RequestEnvelope, Response, ResponseBody, ResponseResult, SendOutcome,
-    ServerMessage, SessionState, SessionStatus, StatusField, VoiceId, Welcome,
+    AdapterCapabilities, AudioFormat, ClientMessage, CommandKind, ContextUsage, DoneHandling,
+    EndReason, EndpointConfig, EndpointProfile, EndpointProtocol, EndpointRole, ErrorCode, Event,
+    EventEnvelope, EventKind, Hello, NotificationChannel, PROTOCOL_VERSION, ProtocolError,
+    Provenance, ReadWindow, Request, RequestEnvelope, Response, ResponseBody, ResponseResult,
+    RoleBinding, SendOutcome, ServerMessage, SessionState, SessionStatus, Settings, SkillLevel,
+    StatusField, ToolBoundary, VoiceId, Welcome,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -85,6 +87,41 @@ fn lost_status() -> SessionStatus {
         "claude-code".into(),
         SessionState::Lost,
     )
+}
+
+/// A settings document with something in every field the shell has to read, so a shell that
+/// only ever saw the defaults is still checked against a filled one.
+fn settings() -> Settings {
+    Settings {
+        tool_boundary: ToolBoundary::ReadOnly,
+        agent_boundary: ToolBoundary::Ask,
+        enabled_adapters: vec!["workbench".to_owned(), "claude-code".to_owned()],
+        notification_channels: vec![
+            NotificationChannel::Figure,
+            NotificationChannel::SystemNotification,
+        ],
+        done_handling: DoneHandling::Gate,
+        inventory_allowed: true,
+        budget_limit_percent: 80,
+        skill_level: SkillLevel::Many,
+        figure_name: "Companion".to_owned(),
+        endpoints: EndpointConfig::empty()
+            .with_profile(EndpointProfile {
+                id: "lokal-whisper".to_owned(),
+                protocol: EndpointProtocol::WhisperServer,
+                url: "http://127.0.0.1:8765".to_owned(),
+                key_ref: None,
+                model: Some("ggml-large-v3".to_owned()),
+                args: Vec::new(),
+            })
+            .with_profile(EndpointProfile::say())
+            .with_role(
+                EndpointRole::Stt,
+                RoleBinding::new("lokal-whisper").with_fallback("macos-say"),
+            )
+            .with_role(EndpointRole::Tts, RoleBinding::new("macos-say")),
+        ..Settings::default()
+    }
 }
 
 fn envelope(sequence: u64, session: Option<&str>, event: Event) -> ServerMessage {
@@ -174,6 +211,7 @@ fn server_messages() -> Vec<ServerMessage> {
             voice_id: VoiceId::from("v-2"),
             endpoint: None,
         },
+        Event::SettingsChanged,
     ];
     assert_eq!(
         events.len(),
@@ -231,6 +269,12 @@ fn server_messages() -> Vec<ServerMessage> {
         ServerMessage::Response(Response {
             id: 6,
             result: ResponseResult::Ok(ResponseBody::Ack),
+        }),
+        ServerMessage::Response(Response {
+            id: 8,
+            result: ResponseResult::Ok(ResponseBody::Settings {
+                settings: Box::new(settings()),
+            }),
         }),
         ServerMessage::Response(Response {
             id: 7,
@@ -295,6 +339,17 @@ fn client_messages() -> Vec<ClientMessage> {
             id: 5,
             request: Request::Capabilities {
                 adapter: Some("workbench".into()),
+            },
+        }),
+        ClientMessage::Request(RequestEnvelope {
+            id: 8,
+            request: Request::GetSettings,
+        }),
+        ClientMessage::Request(RequestEnvelope {
+            id: 9,
+            request: Request::SetSettings {
+                settings: Box::new(settings()),
+                confirm_high_risk: false,
             },
         }),
         ClientMessage::Request(RequestEnvelope {

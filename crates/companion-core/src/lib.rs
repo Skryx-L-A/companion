@@ -26,12 +26,12 @@ pub use adapter::{
 pub use auftrag::{AuftragError, canonical_bytes, hash_of};
 pub use auth::{Authenticator, FileTokenStore, TokenStore, Tokens, generate_token, permits};
 pub use bus::EventBus;
-pub use endpoints::{EndpointConfig, EndpointError, EndpointProfile, RoleBinding};
+pub use endpoints::{EndpointConfig, EndpointError, EndpointProfile, RoleBinding, SAY_PROFILE_ID};
 pub use registry::{ApprovalRecord, Registry, RegistryError};
 pub use secrets::{FileSecretStore, NoSecrets, SecretError, SecretStore};
 pub use settings::{
-    AdapterDefault, Autonomy, HighRiskSettings, NotificationChannel, Settings, SettingsError,
-    ToolBoundary,
+    AdapterDefault, AddressForm, Autonomy, ConversationStyle, DoneHandling, HighRiskSettings,
+    InvalidSettings, NotificationChannel, Settings, SettingsError, SkillLevel, ToolBoundary,
 };
 
 /// Unix time in milliseconds. Every timestamp on the wire uses this.

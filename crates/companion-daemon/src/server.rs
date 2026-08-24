@@ -14,8 +14,8 @@ use std::time::Duration;
 use companion_brain::{Brain, BrainConfig, BrainError, SessionAccess, Speaker};
 use companion_core::adapter::{AdapterEvent, AdapterResult, AdapterSet, SpawnOptions};
 use companion_core::{
-    AdapterError, Authenticator, EndpointConfig, EventBus, Registry, SecretStore, Tokens, now_ms,
-    permits,
+    AdapterError, Authenticator, EndpointConfig, EventBus, Registry, SecretStore, Settings,
+    SettingsError, Tokens, now_ms, permits, settings,
 };
 use companion_protocol::{
     AdapterCapabilities, AdapterId, AuftragId, ClientMessage, ClientRole, Cost, EndReason,
@@ -38,6 +38,10 @@ use crate::DAEMON_VERSION;
 /// Adapter id under which the status of a docked orchestrator is published. Such a session
 /// has no adapter of its own: the orchestrator reports it over the socket.
 const REPORTED_ADAPTER: &str = "reported";
+
+/// Adapter id the `settings_changed` event carries. Like the voice and the brain, the
+/// settings are not a session adapter; the envelope needs a name and this is theirs.
+const SETTINGS_ADAPTER: &str = "settings";
 
 /// Separates the namespace of a connection from the session id it chose.
 const NAMESPACE_SEPARATOR: char = '/';
@@ -129,6 +133,15 @@ pub struct BrainSetup {
     pub config: BrainConfig,
 }
 
+/// The settings file this daemon works on.
+///
+/// A path plus the document that was read from it, so the server does not read the file
+/// again on every `get_settings` and does not have to guess what a failed read means.
+pub struct SettingsSetup {
+    pub path: PathBuf,
+    pub current: Settings,
+}
+
 /// Everything the server needs to run. The caller builds it, so a test can hand in its own
 /// adapters and an in-memory register.
 pub struct ServerConfig {
@@ -145,6 +158,10 @@ pub struct ServerConfig {
     /// The endpoints, keys and settings the companion's own model works with, or `None`
     /// for a daemon that only watches sessions and says nothing itself.
     pub brain: Option<BrainSetup>,
+    /// The settings file, or `None` for a daemon started without one. Such a daemon
+    /// answers `get_settings` and `set_settings` with `not_supported` rather than
+    /// pretending to keep a document nobody could read back.
+    pub settings: Option<SettingsSetup>,
 }
 
 impl ServerConfig {
@@ -158,6 +175,7 @@ impl ServerConfig {
             limits: Limits::default(),
             voice: None,
             brain: None,
+            settings: None,
         }
     }
 }
@@ -203,6 +221,10 @@ struct ServerState {
     /// The account the daemon runs under, read from the socket it just created. A peer
     /// from any other account is refused before the handshake.
     owner_uid: Option<u32>,
+    /// The settings document and the file it belongs to, when this daemon was started with
+    /// one. Under a lock, because two connections may write it at the same moment and the
+    /// second one has to see what the first one left behind.
+    settings: Option<Mutex<SettingsSetup>>,
 }
 
 /// What one connection is allowed to do and under which name it reports.
@@ -328,6 +350,7 @@ pub async fn start(config: ServerConfig) -> Result<ServerHandle, ServerError> {
         voice,
         brain: OnceLock::new(),
         owner_uid,
+        settings: config.settings.map(Mutex::new),
     });
 
     if let Some(setup) = brain_setup {
@@ -1195,7 +1218,60 @@ async fn handle(
             let endpoints = state.voice()?.probe(role).await;
             Ok(ResponseBody::Endpoints { endpoints })
         }
+
+        Request::GetSettings => {
+            let file = state.settings()?.lock().expect("settings lock");
+            Ok(ResponseBody::Settings {
+                settings: Box::new(file.current.clone()),
+            })
+        }
+
+        Request::SetSettings {
+            settings,
+            confirm_high_risk,
+        } => {
+            let next = *settings;
+            // Everything is checked before anything is written: a document that fails here
+            // leaves the file and the running daemon exactly as they were.
+            next.validate()
+                .map_err(|error| ProtocolError::new(ErrorCode::BadRequest, error.to_string()))?;
+
+            let mut file = state.settings()?.lock().expect("settings lock");
+            let raised = file.current.high_risk_changes(&next);
+            if !raised.is_empty() && !confirm_high_risk {
+                // DESIGN.md, Sicherheit: only the person raises one of these, with the
+                // warning in front of them. The refusal names what it was, so the shell can
+                // put that sentence into the warning instead of inventing one.
+                return Err(ProtocolError::new(
+                    ErrorCode::Forbidden,
+                    format!(
+                        "this change raises a high-risk setting and only a person may do                          that, after the warning: {}. Send set_settings again with                          confirm_high_risk once somebody confirmed it.",
+                        raised.join("; ")
+                    ),
+                ));
+            }
+
+            settings::save(&next, &file.path).map_err(settings_error)?;
+            file.current = next;
+            // Written and in force. The lock goes before the event, so a client that reads
+            // the document because of the event cannot be answered from the old one.
+            drop(file);
+            state.bus.publish(
+                AdapterId::new(SETTINGS_ADAPTER),
+                AdapterEvent::adapter_wide(Event::SettingsChanged),
+            );
+            Ok(ResponseBody::Ack)
+        }
     }
+}
+
+/// Turns a failed write of the settings file into something the client can act on.
+///
+/// A document that does not fit the schema never reaches this: it is refused before the
+/// file is touched. What is left is the file itself — a full disk, a directory somebody
+/// removed — and that is the daemon's problem, not the client's.
+fn settings_error(error: SettingsError) -> ProtocolError {
+    ProtocolError::new(ErrorCode::Internal, error.to_string())
 }
 
 /// Turns a refusal of the voice pipeline into one the client understands.
@@ -1439,6 +1515,16 @@ impl ServerState {
             ProtocolError::new(
                 ErrorCode::NotSupported,
                 "this daemon runs without a model of its own",
+            )
+        })
+    }
+
+    /// The settings file, or the refusal a daemon started without one owes the client.
+    fn settings(&self) -> Result<&Mutex<SettingsSetup>, ProtocolError> {
+        self.settings.as_ref().ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::NotSupported,
+                "this daemon runs without a settings file",
             )
         })
     }

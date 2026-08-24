@@ -95,7 +95,8 @@
         "tts_done",
         "chat_delta",
         "chat_tool",
-        "chat_done"
+        "chat_done",
+        "settings_changed"
       ]
     },
     "StatusField": {

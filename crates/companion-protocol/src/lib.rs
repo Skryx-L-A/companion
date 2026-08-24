@@ -14,6 +14,7 @@
 mod auftrag;
 mod capabilities;
 mod endpoint;
+mod endpoint_config;
 mod event;
 mod ids;
 mod message;
@@ -21,10 +22,14 @@ mod provenance;
 mod registry;
 mod role;
 mod session;
+mod settings;
 
 pub use auftrag::{Approval, Auftrag, GateCommand, Limits, LoopType, Reference};
 pub use capabilities::{AdapterCapabilities, CommandKind, StatusField};
 pub use endpoint::{AudioFormat, EndpointHealth, EndpointProtocol, EndpointRole};
+pub use endpoint_config::{
+    EndpointConfig, EndpointError, EndpointProfile, RoleBinding, SAY_PROFILE_ID,
+};
 pub use event::{EndReason, Event, EventEnvelope, EventKind};
 pub use ids::{AdapterId, AuftragId, SessionId, VoiceId};
 pub use message::{
@@ -36,6 +41,11 @@ pub use provenance::{Origin, Provenance};
 pub use registry::{Cost, RegistryEntry, SelfAnswer};
 pub use role::ClientRole;
 pub use session::{BudgetUsage, ContextUsage, SessionState, SessionStatus};
+pub use settings::{
+    AdapterDefault, AddressForm, Autonomy, ConversationStyle, DEFAULT_FIGURE_NAME, DoneHandling,
+    HighRiskSettings, InvalidSettings, MAX_FIGURE_NAME_LEN, NotificationChannel, PTY_ADAPTER_ID,
+    SETTINGS_SCHEMA_VERSION, Settings, SkillLevel, ToolBoundary,
+};
 
 /// Version of the wire protocol.
 ///

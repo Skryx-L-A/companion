@@ -832,6 +832,414 @@
         }
       ]
     },
+    "Settings": {
+      "description": "Everything the daemon reads out of its settings file.",
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 1
+        },
+        "tool_boundary": {
+          "description": "Boundary for the companion's own tools, everything that is not high risk.\n`DESIGN.md` § Ersteinrichtung, point 13.",
+          "$ref": "#/$defs/ToolBoundary",
+          "default": "ask"
+        },
+        "agent_boundary": {
+          "description": "Boundary a spawned session runs under. `DESIGN.md` § Ersteinrichtung, point 2.\n\nA second field rather than the same one, because the two are different questions:\nwhat the companion may do itself, and what it may let an agent do.",
+          "$ref": "#/$defs/ToolBoundary",
+          "default": "ask"
+        },
+        "high_risk": {
+          "$ref": "#/$defs/HighRiskSettings",
+          "default": {
+            "mail": "ask",
+            "push": "ask",
+            "publish": "ask"
+          }
+        },
+        "enabled_adapters": {
+          "description": "Adapters the daemon should load. Empty means every adapter it was built with,\nwith one exception: an adapter that is opt-in stays off until it is named here by\nits id. The generic terminal adapter ([`PTY_ADAPTER_ID`]) is the one, because\n`DESIGN.md` § Sicherheit says a permission level cannot restrict a foreign CLI —\nnobody is to end up with one by accident.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "pty_command": {
+          "description": "The command the generic terminal adapter runs, program first, arguments after.\nEmpty is the default and means it starts nothing: there is no sensible default\nprogram for \"any CLI\".",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "notification_channels": {
+          "description": "Where the person is told about something. The figure alone by default: every other\nchannel either makes noise or leaves the machine.\n`DESIGN.md` § Ersteinrichtung, point 12.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NotificationChannel"
+          },
+          "default": [
+            "figure"
+          ]
+        },
+        "forward_done": {
+          "description": "Whether a finished session is worth telling the person about. On by default, because\na run that is done is the one thing somebody is actually waiting for.",
+          "type": "boolean",
+          "default": true
+        },
+        "done_handling": {
+          "description": "What happens with a finished run beyond telling the person.\n`DESIGN.md` § Ersteinrichtung, point 11. [`Self::forward_done`] says whether the\nperson hears about it at all, this says what else runs.",
+          "$ref": "#/$defs/DoneHandling",
+          "default": "forward"
+        },
+        "autonomy": {
+          "$ref": "#/$defs/Autonomy",
+          "default": "observe"
+        },
+        "inventory_allowed": {
+          "description": "Whether the companion may read what is installed — skills, tools, MCP servers,\nworkflows. `DESIGN.md` § Ersteinrichtung, point 4, and § Sicherheit: reading a\nworking directory is reading somebody's work, so it stays off until it is allowed.",
+          "type": "boolean",
+          "default": false
+        },
+        "budget_limit_percent": {
+          "description": "Share of the budget at which the companion stops starting anything new, in per cent.\nZero means no limit. `DESIGN.md` § Ersteinrichtung, point 7.",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255,
+          "default": 0
+        },
+        "skill_level": {
+          "description": "`DESIGN.md` § Ersteinrichtung, point 10.",
+          "$ref": "#/$defs/SkillLevel",
+          "default": "recommended"
+        },
+        "conversation_style": {
+          "description": "`DESIGN.md` § Ersteinrichtung, point 8: how much he says.",
+          "$ref": "#/$defs/ConversationStyle",
+          "default": "terse"
+        },
+        "address_form": {
+          "description": "`DESIGN.md` § Ersteinrichtung, point 8: how he addresses the person.",
+          "$ref": "#/$defs/AddressForm",
+          "default": "informal"
+        },
+        "figure_name": {
+          "description": "`DESIGN.md` § Ersteinrichtung, point 8: what the figure is called. The companion\nwrites in this name, which is why it is the daemon's and not only the window's.",
+          "type": "string",
+          "default": "Companion"
+        },
+        "endpoints": {
+          "description": "The provider profiles and which role uses which of them. Keys live in the keychain;\na profile here holds only the name of one.\n`DESIGN.md` § Ersteinrichtung, point 9.",
+          "$ref": "#/$defs/EndpointConfig",
+          "default": {
+            "profiles": [
+              {
+                "id": "macos-say",
+                "protocol": "cli",
+                "url": "/usr/bin/say"
+              }
+            ],
+            "roles": {
+              "tts": {
+                "primary": "macos-say"
+              }
+            }
+          }
+        }
+      }
+    },
+    "ToolBoundary": {
+      "description": "How far the companion may act on its own with a class of tools.",
+      "oneOf": [
+        {
+          "description": "Read, never write.",
+          "type": "string",
+          "const": "read_only"
+        },
+        {
+          "description": "Ask before every use. The default everywhere.",
+          "type": "string",
+          "const": "ask"
+        },
+        {
+          "description": "Act without asking.",
+          "type": "string",
+          "const": "full"
+        }
+      ]
+    },
+    "HighRiskSettings": {
+      "description": "The three tool classes that reach outside the machine. `DESIGN.md` § Sicherheit puts\nthem on `ask` and lets only the person raise them, with a warning.",
+      "type": "object",
+      "properties": {
+        "mail": {
+          "$ref": "#/$defs/ToolBoundary"
+        },
+        "push": {
+          "$ref": "#/$defs/ToolBoundary"
+        },
+        "publish": {
+          "$ref": "#/$defs/ToolBoundary"
+        }
+      },
+      "required": [
+        "mail",
+        "push",
+        "publish"
+      ]
+    },
+    "NotificationChannel": {
+      "description": "Where the companion may reach a person. `DESIGN.md` § Ersteinrichtung, point 12.",
+      "oneOf": [
+        {
+          "description": "The character on the screen. The only channel that never leaves the machine, and\ntherefore the only one that is on by default.",
+          "type": "string",
+          "const": "figure"
+        },
+        {
+          "description": "A short sound next to the figure.",
+          "type": "string",
+          "const": "sound"
+        },
+        {
+          "description": "Said out loud, over the configured speech output.",
+          "type": "string",
+          "const": "speech"
+        },
+        {
+          "description": "A notification of the operating system, seen even when the figure is covered.",
+          "type": "string",
+          "const": "system_notification"
+        },
+        {
+          "description": "A push message to a phone.",
+          "type": "string",
+          "const": "push"
+        },
+        {
+          "description": "An email.",
+          "type": "string",
+          "const": "mail"
+        }
+      ]
+    },
+    "DoneHandling": {
+      "description": "What happens when a session reports that it is done.\n`DESIGN.md` § Ersteinrichtung, point 11.",
+      "oneOf": [
+        {
+          "description": "The person is told, and nothing else happens. The sparing default.",
+          "type": "string",
+          "const": "forward"
+        },
+        {
+          "description": "The gate commands of the job file run, and their verdict is reported with it.",
+          "type": "string",
+          "const": "gate"
+        },
+        {
+          "description": "A second session reviews the result before the person sees it.",
+          "type": "string",
+          "const": "reviewer"
+        }
+      ]
+    },
+    "Autonomy": {
+      "description": "How far the companion acts on its own when a session reports something.\n`DESIGN.md` § Ersteinrichtung, point 3.",
+      "oneOf": [
+        {
+          "description": "Watch and report, decide nothing. The default.",
+          "type": "string",
+          "const": "observe"
+        },
+        {
+          "description": "Answer what is unambiguous, ask about the rest.",
+          "type": "string",
+          "const": "ask"
+        },
+        {
+          "description": "Answer and act within the guardrails of the job file.",
+          "type": "string",
+          "const": "act"
+        }
+      ]
+    },
+    "SkillLevel": {
+      "description": "How much of the skill package goes into a recognised harness.\n`DESIGN.md` § Ersteinrichtung, point 10.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "all"
+          ]
+        },
+        {
+          "description": "Nothing is installed.",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "The obligatory core.",
+          "type": "string",
+          "const": "recommended"
+        },
+        {
+          "description": "The core and the checked extensions.",
+          "type": "string",
+          "const": "many"
+        }
+      ]
+    },
+    "ConversationStyle": {
+      "description": "How much the companion says. `DESIGN.md` § Ersteinrichtung, point 8.",
+      "type": "string",
+      "enum": [
+        "terse",
+        "detailed"
+      ]
+    },
+    "AddressForm": {
+      "description": "How the companion addresses the person. `DESIGN.md` § Ersteinrichtung, point 8.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "formal"
+          ]
+        },
+        {
+          "description": "German \"du\", English first name.",
+          "type": "string",
+          "const": "informal"
+        }
+      ]
+    },
+    "EndpointConfig": {
+      "description": "The endpoint part of the settings: the profiles, and which role uses which of them.",
+      "type": "object",
+      "properties": {
+        "profiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EndpointProfile"
+          },
+          "default": [
+            {
+              "id": "macos-say",
+              "protocol": "cli",
+              "url": "/usr/bin/say"
+            }
+          ]
+        },
+        "roles": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/RoleBinding"
+          },
+          "default": {
+            "tts": {
+              "primary": "macos-say"
+            }
+          }
+        }
+      }
+    },
+    "EndpointProfile": {
+      "description": "One provider profile: how to reach a backend, and under which name its key lives.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Name the role bindings and the settings page use.",
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/EndpointProtocol"
+        },
+        "url": {
+          "description": "Base URL for a protocol that speaks HTTP, for example\n`http://127.0.0.1:8765`. For [`EndpointProtocol::Cli`] it is the absolute path of\nthe program instead.",
+          "type": "string"
+        },
+        "key_ref": {
+          "description": "Name under which the key lives in the the secret store of the daemon, never the\nkey itself. Absent for a local endpoint that needs none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "description": "Model this profile uses. `DESIGN.md` § Endpoints wants the settings page to show it\nfor every profile.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "args": {
+          "description": "Fixed arguments for a CLI profile, in front of whatever the driver adds.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "protocol",
+        "url"
+      ]
+    },
+    "EndpointProtocol": {
+      "description": "How the daemon talks to an endpoint.\n\n`DESIGN.md` § Endpoints separates two execution models: an API profile, where the\ndaemon speaks the interface itself and can stream, and a CLI profile, where it drives\n`claude -p` or `codex exec` and uses the subscription without a key. [`Self::Cli`] is\nthat second model; every other variant is the first.",
+      "oneOf": [
+        {
+          "description": "The OpenAI HTTP shape: `/v1/chat/completions`, `/v1/audio/transcriptions`,\n`/v1/audio/speech`. What most local servers and most providers speak.",
+          "type": "string",
+          "const": "openai_compat"
+        },
+        {
+          "description": "The Anthropic Messages API.",
+          "type": "string",
+          "const": "anthropic"
+        },
+        {
+          "description": "Ollama's own API under `/api`.",
+          "type": "string",
+          "const": "ollama"
+        },
+        {
+          "description": "A `whisper.cpp` server: `/inference` with a multipart upload, plain text back.",
+          "type": "string",
+          "const": "whisper_server"
+        },
+        {
+          "description": "A local program the daemon starts, no HTTP and no key.",
+          "type": "string",
+          "const": "cli"
+        }
+      ]
+    },
+    "RoleBinding": {
+      "description": "Which profile serves a role, and which ones to try when it fails.",
+      "type": "object",
+      "properties": {
+        "primary": {
+          "type": "string"
+        },
+        "fallback": {
+          "description": "Tried in order after the primary one failed.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "primary"
+      ]
+    },
     "RequestEnvelope": {
       "description": "A request with the id its response will carry.",
       "type": "object",
@@ -1285,6 +1693,42 @@
           },
           "required": [
             "request"
+          ]
+        },
+        {
+          "description": "The settings document the daemon is working with.\n\nOnly the person's shell may ask. The document carries no key — a profile holds the\nname of a keychain entry and nothing else — but it does say what this machine is\nallowed to do without asking, and that is not something a docked orchestrator gets\nto read.",
+          "type": "object",
+          "properties": {
+            "request": {
+              "type": "string",
+              "const": "get_settings"
+            }
+          },
+          "required": [
+            "request"
+          ]
+        },
+        {
+          "description": "Replaces the settings document.\n\nThe daemon checks it the same way it checks the file at load time and writes it\natomically with mode 0600, or refuses the whole document and changes nothing. A\nchange that *raises* a permission needs `confirm_high_risk`, and only a person can\ngive it: `DESIGN.md` § Sicherheit puts mail, push and publish on `ask` and says only\nthe person may put them on `full`, with a warning. The companion itself has no tool\nthat sends this request, which is what keeps that promise on the daemon side rather\nthan in a prompt.",
+          "type": "object",
+          "properties": {
+            "settings": {
+              "description": "Boxed to keep the size of every other request down.",
+              "$ref": "#/$defs/Settings"
+            },
+            "confirm_high_risk": {
+              "description": "True only where a person confirmed the warning for the raise this document\ncontains. Absent means false, so an older client can never raise anything.",
+              "type": "boolean",
+              "default": false
+            },
+            "request": {
+              "type": "string",
+              "const": "set_settings"
+            }
+          },
+          "required": [
+            "request",
+            "settings"
           ]
         }
       ]

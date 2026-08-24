@@ -5,6 +5,7 @@
 {"type":"response","id":4,"status":"ok","payload":{"body":"capabilities","adapters":[{"adapter":"workbench","display_name":"Claude Code Workbench","commands":["list","read","interrupt"],"events":["session_started","session_ended"],"status_fields":["project","model"],"enforces_permission_modes":false,"supports_subagents":true}]}}
 {"type":"response","id":5,"status":"ok","payload":{"body":"sent","outcome":"queued"}}
 {"type":"response","id":6,"status":"ok","payload":{"body":"ack"}}
+{"type":"response","id":8,"status":"ok","payload":{"body":"settings","settings":{"schema_version":1,"tool_boundary":"read_only","agent_boundary":"ask","high_risk":{"mail":"ask","push":"ask","publish":"ask"},"enabled_adapters":["workbench","claude-code"],"pty_command":[],"notification_channels":["figure","system_notification"],"forward_done":true,"done_handling":"gate","autonomy":"observe","inventory_allowed":true,"budget_limit_percent":80,"skill_level":"many","conversation_style":"terse","address_form":"informal","figure_name":"Companion","endpoints":{"profiles":[{"id":"lokal-whisper","protocol":"whisper_server","url":"http://127.0.0.1:8765","model":"ggml-large-v3"},{"id":"macos-say","protocol":"cli","url":"/usr/bin/say"}],"roles":{"stt":{"primary":"lokal-whisper","fallback":["macos-say"]},"tts":{"primary":"macos-say"}}}}}}
 {"type":"response","id":7,"status":"error","payload":{"code":"not_supported","message":"workbench sessions are driven by the workbench itself"}}
 {"type":"events_dropped","missed":9,"after_sequence":17}
 {"type":"rejected","code":"unauthorized","message":"unknown token"}
@@ -28,3 +29,4 @@
 {"type":"event","sequence":18,"run_id":"run-7","timestamp_ms":1770000000000,"adapter":"workbench","session_id":"-Users-me-AI-companion","event":{"event":"stt_final","voice_id":"v-1","text":"starte die Testsuite","endpoint":"whisper-lokal"}}
 {"type":"event","sequence":19,"run_id":"run-7","timestamp_ms":1770000000000,"adapter":"workbench","session_id":"-Users-me-AI-companion","event":{"event":"tts_chunk","voice_id":"v-2","sequence":0,"format":"wav","audio_base64":"UklGRg=="}}
 {"type":"event","sequence":20,"run_id":"run-7","timestamp_ms":1770000000000,"adapter":"workbench","session_id":"-Users-me-AI-companion","event":{"event":"tts_done","voice_id":"v-2"}}
+{"type":"event","sequence":21,"run_id":"run-7","timestamp_ms":1770000000000,"adapter":"workbench","session_id":"-Users-me-AI-companion","event":{"event":"settings_changed"}}

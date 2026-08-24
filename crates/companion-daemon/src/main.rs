@@ -14,7 +14,9 @@ use companion_core::adapter::AdapterSet;
 use companion_core::{
     AdapterDefault, FileSecretStore, FileTokenStore, Registry, TokenStore, paths,
 };
-use companion_daemon::{BrainSetup, ServerConfig, VoiceSetup, prepare_config, start};
+use companion_daemon::{
+    BrainSetup, ServerConfig, SettingsSetup, VoiceSetup, prepare_config, start,
+};
 use companion_voice::VoiceLimits;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -132,10 +134,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
     });
 
+    // The document the shell reads and writes over the socket. It is the same one that was
+    // just read, so nothing is read twice and nothing can disagree with what the adapters
+    // and the endpoints above were built from.
+    let settings = Some(SettingsSetup {
+        path: paths::settings_path(),
+        // Cloned rather than moved, because the adapter selection above still holds it.
+        current: settings.clone(),
+    });
+
     let config = ServerConfig {
         adapters,
         voice,
         brain,
+        settings,
         ..ServerConfig::new(paths::socket_path(), tokens, registry)
     };
 
