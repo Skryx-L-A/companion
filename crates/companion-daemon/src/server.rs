@@ -8,9 +8,10 @@ use std::future::Future;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
+use companion_brain::{Brain, BrainConfig, BrainError, SessionAccess, Speaker};
 use companion_core::adapter::{AdapterEvent, AdapterResult, AdapterSet, SpawnOptions};
 use companion_core::{
     AdapterError, Authenticator, EndpointConfig, EventBus, Registry, SecretStore, Tokens, now_ms,
@@ -19,9 +20,9 @@ use companion_core::{
 use companion_protocol::{
     AdapterCapabilities, AdapterId, AuftragId, ClientMessage, ClientRole, Cost, EndReason,
     ErrorCode, Event, EventEnvelope, PROTOCOL_VERSION, ProtocolError, Provenance,
-    REGISTRY_SCHEMA_VERSION, RegistryEntry, Request, RequestEnvelope, Response, ResponseBody,
-    ResponseResult, ServerMessage, SessionId, SessionState, SessionStatus, UNSOLICITED_REQUEST_ID,
-    Welcome,
+    REGISTRY_SCHEMA_VERSION, ReadWindow, RegistryEntry, Request, RequestEnvelope, Response,
+    ResponseBody, ResponseResult, SendOutcome, ServerMessage, SessionId, SessionState,
+    SessionStatus, UNSOLICITED_REQUEST_ID, Welcome,
 };
 use companion_voice::{VoiceEngine, VoiceError, VoiceLimits};
 use thiserror::Error;
@@ -116,6 +117,18 @@ pub struct VoiceSetup {
     pub limits: VoiceLimits,
 }
 
+/// What the companion's own model needs.
+///
+/// A setup rather than a built [`Brain`], for the same reason as [`VoiceSetup`]: the brain
+/// publishes onto the event bus and reaches back into the session list, and both of those
+/// only exist once [`start`] has built them. A daemon started without this answers
+/// `chat_message` with `not_supported`.
+pub struct BrainSetup {
+    pub endpoints: Arc<EndpointConfig>,
+    pub secrets: Arc<dyn SecretStore>,
+    pub config: BrainConfig,
+}
+
 /// Everything the server needs to run. The caller builds it, so a test can hand in its own
 /// adapters and an in-memory register.
 pub struct ServerConfig {
@@ -129,6 +142,9 @@ pub struct ServerConfig {
     /// The endpoints and keys the voice pipeline works with, or `None` for a daemon
     /// without speech.
     pub voice: Option<VoiceSetup>,
+    /// The endpoints, keys and settings the companion's own model works with, or `None`
+    /// for a daemon that only watches sessions and says nothing itself.
+    pub brain: Option<BrainSetup>,
 }
 
 impl ServerConfig {
@@ -141,6 +157,7 @@ impl ServerConfig {
             event_capacity: 1024,
             limits: Limits::default(),
             voice: None,
+            brain: None,
         }
     }
 }
@@ -178,6 +195,11 @@ struct ServerState {
     connections: AtomicU64,
     /// The voice pipeline, when this daemon was started with one.
     voice: Option<Arc<VoiceEngine>>,
+    /// The companion's own model, when this daemon was started with one.
+    ///
+    /// Filled in right after the state exists, because the brain reads the session list
+    /// through this very state and the two would otherwise have to be built at once.
+    brain: OnceLock<Arc<Brain>>,
     /// The account the daemon runs under, read from the socket it just created. A peer
     /// from any other account is refused before the handshake.
     owner_uid: Option<u32>,
@@ -249,6 +271,8 @@ impl ServerHandle {
 
 /// Binds the socket and starts accepting.
 pub async fn start(config: ServerConfig) -> Result<ServerHandle, ServerError> {
+    let brain_setup = config.brain;
+    let registry = Arc::clone(&config.registry);
     let listener = bind(&config.socket_path)?;
     let bus = EventBus::new(config.event_capacity);
     let owner_uid = fs::metadata(&config.socket_path)
@@ -302,8 +326,31 @@ pub async fn start(config: ServerConfig) -> Result<ServerHandle, ServerError> {
         reported: Mutex::new(HashMap::new()),
         connections: AtomicU64::new(0),
         voice,
+        brain: OnceLock::new(),
         owner_uid,
     });
+
+    if let Some(setup) = brain_setup {
+        // The brain looks at the sessions through a weak handle: the state owns the brain,
+        // and a strong one back would be a cycle that never frees either of them.
+        let sessions: Arc<dyn SessionAccess> = Arc::new(DaemonSessions {
+            state: Arc::downgrade(&state),
+        });
+        let speaker: Option<Arc<dyn Speaker>> = state
+            .voice
+            .clone()
+            .map(|engine| Arc::new(VoiceSpeaker(engine)) as Arc<dyn Speaker>);
+        let brain = Arc::new(Brain::new(
+            bus.clone(),
+            setup.endpoints,
+            setup.secrets,
+            registry,
+            sessions,
+            speaker,
+            setup.config,
+        ));
+        let _ = state.brain.set(brain);
+    }
 
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let socket_path = config.socket_path.clone();
@@ -842,16 +889,9 @@ async fn handle(
         Request::List {
             running_only,
             done_limit,
-        } => {
-            let mut sessions = Vec::new();
-            for adapter in state.adapters.iter() {
-                sessions.extend(with_deadline(deadline, adapter.list()).await?);
-            }
-            sessions.extend(state.reported_sessions());
-            Ok(ResponseBody::Sessions {
-                sessions: filter_sessions(sessions, running_only, done_limit),
-            })
-        }
+        } => Ok(ResponseBody::Sessions {
+            sessions: filter_sessions(state.all_sessions().await?, running_only, done_limit),
+        }),
 
         Request::Spawn(spawn) => {
             let adapter = state.adapter(&spawn.adapter)?;
@@ -1132,6 +1172,14 @@ async fn handle(
             Ok(ResponseBody::VoiceStream { voice_id })
         }
 
+        Request::ChatMessage { text, voice } => {
+            // Answers as soon as the turn is under way. The answer follows as chat_delta,
+            // chat_tool and chat_done events; waiting for it here would hold the connection
+            // for the whole turn, tool calls included.
+            state.brain()?.chat(text, voice).map_err(brain_error)?;
+            Ok(ResponseBody::Ack)
+        }
+
         Request::ProbeEndpoints { role } => {
             let endpoints = state.voice()?.probe(role).await;
             Ok(ResponseBody::Endpoints { endpoints })
@@ -1160,6 +1208,22 @@ fn voice_error(error: VoiceError) -> ProtocolError {
         | VoiceError::ProgramFailed { .. }
         | VoiceError::ChainExhausted { .. } => ErrorCode::AdapterFailure,
         VoiceError::Secrets(_) => ErrorCode::Internal,
+    };
+    ProtocolError::new(code, error.to_string())
+}
+
+/// Turns a refusal of the companion's own model into one the client understands.
+///
+/// A daemon without a chat endpoint is `not_supported`: it understood the request and has
+/// nothing to serve it with. An empty message and a second message while the first is still
+/// being written are the client's mistake. What an endpoint did wrong is an
+/// `adapter_failure`, the same code an adapter that tried and failed gets.
+fn brain_error(error: BrainError) -> ProtocolError {
+    let code = match &error {
+        BrainError::NoEndpoint { .. } => ErrorCode::NotSupported,
+        BrainError::Busy | BrainError::Empty => ErrorCode::BadRequest,
+        BrainError::ChainExhausted { .. } => ErrorCode::AdapterFailure,
+        BrainError::Prompt { .. } | BrainError::Secrets(_) => ErrorCode::Internal,
     };
     ProtocolError::new(code, error.to_string())
 }
@@ -1355,6 +1419,27 @@ impl ServerState {
                 "this daemon runs without the voice pipeline",
             )
         })
+    }
+
+    /// The companion's own model, or the refusal a daemon without one owes the client.
+    fn brain(&self) -> Result<&Arc<Brain>, ProtocolError> {
+        self.brain.get().ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::NotSupported,
+                "this daemon runs without a model of its own",
+            )
+        })
+    }
+
+    /// Every session the daemon currently sees: what the adapters list, plus what docked
+    /// orchestrators reported about themselves.
+    async fn all_sessions(&self) -> Result<Vec<SessionStatus>, ProtocolError> {
+        let mut sessions = Vec::new();
+        for adapter in self.adapters.iter() {
+            sessions.extend(with_deadline(self.limits.adapter_timeout, adapter.list()).await?);
+        }
+        sessions.extend(self.reported_sessions());
+        Ok(sessions)
     }
 
     fn adapter(
@@ -1570,4 +1655,67 @@ fn prune_reported(
             .is_some_and(|orphaned| now.saturating_sub(orphaned) >= orphan_grace_ms);
         !outlived_its_end && !outlived_its_owner
     });
+}
+
+/// What the companion's own model may do with the sessions of this daemon.
+///
+/// A weak handle on purpose: the state owns the brain, so a strong one back would be a
+/// cycle. A daemon on its way out simply says so instead of answering out of a half-torn
+/// down state.
+struct DaemonSessions {
+    state: Weak<ServerState>,
+}
+
+impl DaemonSessions {
+    fn state(&self) -> Result<Arc<ServerState>, String> {
+        self.state
+            .upgrade()
+            .ok_or_else(|| "der Daemon faehrt gerade herunter".to_owned())
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionAccess for DaemonSessions {
+    async fn sessions(&self) -> Result<Vec<SessionStatus>, String> {
+        let state = self.state()?;
+        state.all_sessions().await.map_err(|error| error.message)
+    }
+
+    async fn read(&self, session_id: &SessionId, lines: u32) -> Result<String, String> {
+        let state = self.state()?;
+        let adapter = state
+            .adapter_for_session(session_id)
+            .await
+            .map_err(|error| error.message)?;
+        let chunk = with_deadline(
+            state.limits.adapter_timeout,
+            adapter.read(session_id, ReadWindow::Tail { lines }),
+        )
+        .await
+        .map_err(|error| error.message)?;
+        Ok(chunk.text)
+    }
+
+    async fn answer(&self, session_id: &SessionId, text: &str) -> Result<SendOutcome, String> {
+        let state = self.state()?;
+        let adapter = state
+            .adapter_for_session(session_id)
+            .await
+            .map_err(|error| error.message)?;
+        with_deadline(state.limits.adapter_timeout, adapter.send(session_id, text))
+            .await
+            .map_err(|error| error.message)
+    }
+}
+
+/// Lets the companion say its answer out loud through the voice pipeline.
+struct VoiceSpeaker(Arc<VoiceEngine>);
+
+impl Speaker for VoiceSpeaker {
+    fn speak(&self, text: String) -> Result<(), String> {
+        self.0
+            .speak(text, None)
+            .map(|_voice_id| ())
+            .map_err(|error| error.to_string())
+    }
 }

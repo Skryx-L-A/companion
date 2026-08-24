@@ -1,0 +1,36 @@
+[package]
+name = "companion-brain"
+description = "The companion's own answer: the chat drivers for the chat_llm role, its tools, and the loop that ties them to the event bus."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+companion-core.workspace = true
+companion-protocol.workspace = true
+
+async-trait.workspace = true
+# The same reasoning as in companion-voice: `system-proxy` would send a request to
+# 127.0.0.1 through whatever proxy the system settings name, and the TLS backend is picked
+# explicitly rather than inherited.
+reqwest = { workspace = true, default-features = false, features = [
+    "rustls",
+    "http2",
+    "charset",
+    "json",
+    "stream",
+] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "process", "sync", "time", "rt", "io-util"] }
+tokio-stream = { workspace = true, features = ["io-util"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

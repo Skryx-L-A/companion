@@ -240,6 +240,19 @@ pub enum Request {
         #[serde(default)]
         voice: Option<String>,
     },
+    /// The person says something to the companion.
+    ///
+    /// The answer arrives as `chat_delta`, `chat_tool` and `chat_done` events, not in the
+    /// response: a client that waited for the answer here would block for the whole turn,
+    /// tool calls included. Only the human role may send this — an answer is written by
+    /// the model that speaks for the person, and a docked orchestrator that could ask for
+    /// one would be talking to the companion in the person's name.
+    ChatMessage {
+        text: String,
+        /// Whether the answer should also be spoken. `chat_done` says whether it was.
+        #[serde(default)]
+        voice: bool,
+    },
     /// Measures the configured endpoints and returns what the probe found.
     ProbeEndpoints {
         /// Only the profiles of one role, or every configured profile when absent.
@@ -271,6 +284,7 @@ pub enum RequestKind {
     VoiceChunk,
     VoiceEnd,
     TtsSpeak,
+    ChatMessage,
     ProbeEndpoints,
 }
 
@@ -303,6 +317,7 @@ impl Request {
             Self::VoiceChunk { .. } => RequestKind::VoiceChunk,
             Self::VoiceEnd { .. } => RequestKind::VoiceEnd,
             Self::TtsSpeak { .. } => RequestKind::TtsSpeak,
+            Self::ChatMessage { .. } => RequestKind::ChatMessage,
             Self::ProbeEndpoints { .. } => RequestKind::ProbeEndpoints,
         }
     }

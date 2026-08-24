@@ -12,7 +12,7 @@ use std::path::Path;
 
 use companion_core::{Settings, SettingsError, paths};
 
-pub use server::{Limits, ServerConfig, ServerError, ServerHandle, VoiceSetup, start};
+pub use server::{BrainSetup, Limits, ServerConfig, ServerError, ServerHandle, VoiceSetup, start};
 
 /// Version of the daemon binary, reported in the handshake.
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");

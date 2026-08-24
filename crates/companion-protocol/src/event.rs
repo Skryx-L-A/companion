@@ -27,10 +27,11 @@ pub enum EndReason {
 ///
 /// The first thirteen variants are the event list from `DESIGN.md` § Session-Adapter, in
 /// that order. The four voice events after them were added in phase 1b and belong to no
-/// session: they carry a [`VoiceId`] instead, and their envelope has no session id. They
-/// are additive, so they do not raise [`crate::PROTOCOL_VERSION`] — `DESIGN.md`
-/// § Architektur, Protokoll-Kompatibilität: a client that does not know them ignores them
-/// and counts them.
+/// session: they carry a [`VoiceId`] instead, and their envelope has no session id. The
+/// three chat events at the end are the answer of the companion itself and belong to no
+/// session either. All of them are additive, so they do not raise
+/// [`crate::PROTOCOL_VERSION`] — `DESIGN.md` § Architektur, Protokoll-Kompatibilität: a
+/// client that does not know them ignores them and counts them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
@@ -130,6 +131,33 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         endpoint: Option<String>,
     },
+    /// A piece of the answer the companion is writing, in the order it was produced.
+    ///
+    /// Appended to whatever the earlier pieces of the same answer said; unlike
+    /// [`Self::SttPartial`] it never replaces them. There is no id on the three chat
+    /// events because the daemon answers one message at a time: a second `chat_message`
+    /// while an answer is still being written is refused rather than interleaved.
+    ChatDelta {
+        text: String,
+    },
+    /// The companion used one of its tools.
+    ///
+    /// `summary` is a short line for the panel, never the whole tool result: the result
+    /// goes to the model, the person sees what was done.
+    ChatTool {
+        name: String,
+        summary: String,
+    },
+    /// The answer is complete.
+    ///
+    /// `text` is the whole answer, so a client that missed a delta does not have to piece
+    /// it together, and `spoken` says whether it was also said out loud. An answer that
+    /// failed part way ends here as well, with what there was: the error arrives as
+    /// [`Self::Error`] next to it, the same way a failed dictation does.
+    ChatDone {
+        text: String,
+        spoken: bool,
+    },
 }
 
 /// The name of an event without its payload. Adapters use this in their capabilities to
@@ -156,13 +184,17 @@ pub enum EventKind {
     SttFinal,
     TtsChunk,
     TtsDone,
+    ChatDelta,
+    ChatTool,
+    ChatDone,
 }
 
 impl EventKind {
-    /// Every event kind the protocol defines, including the one only the daemon produces
-    /// and the four the voice pipeline produces. An adapter names the subset it can really
-    /// deliver in its capabilities; no adapter delivers a voice event.
-    pub const ALL: [EventKind; 17] = [
+    /// Every event kind the protocol defines, including the one only the daemon produces,
+    /// the four the voice pipeline produces and the three the companion's own answer
+    /// produces. An adapter names the subset it can really deliver in its capabilities; no
+    /// adapter delivers a voice or a chat event.
+    pub const ALL: [EventKind; 20] = [
         Self::SessionStarted,
         Self::SessionEnded,
         Self::QuestionOpen,
@@ -180,14 +212,18 @@ impl EventKind {
         Self::SttFinal,
         Self::TtsChunk,
         Self::TtsDone,
+        Self::ChatDelta,
+        Self::ChatTool,
+        Self::ChatDone,
     ];
 
     /// The kinds a session adapter can actually produce.
     ///
     /// [`Self::EventsDropped`] is not among them: only the daemon knows about a gap of its
-    /// own making. Neither are the four voice kinds, which come from the voice pipeline and
-    /// belong to no session. An adapter names its own subset of this in its capabilities,
-    /// and having the line here means no adapter has to remember both exclusions.
+    /// own making. Neither are the four voice kinds and the three chat kinds, which come
+    /// from the voice pipeline and from the companion itself and belong to no session. An
+    /// adapter names its own subset of this in its capabilities, and having the line here
+    /// means no adapter has to remember the exclusions.
     pub const ADAPTER_EVENTS: [EventKind; 12] = [
         Self::SessionStarted,
         Self::SessionEnded,
@@ -209,6 +245,11 @@ impl EventKind {
             self,
             Self::SttPartial | Self::SttFinal | Self::TtsChunk | Self::TtsDone
         )
+    }
+
+    /// Whether this kind belongs to an answer the companion itself is writing.
+    pub fn is_chat(self) -> bool {
+        matches!(self, Self::ChatDelta | Self::ChatTool | Self::ChatDone)
     }
 }
 
@@ -232,6 +273,9 @@ impl Event {
             Self::SttFinal { .. } => EventKind::SttFinal,
             Self::TtsChunk { .. } => EventKind::TtsChunk,
             Self::TtsDone { .. } => EventKind::TtsDone,
+            Self::ChatDelta { .. } => EventKind::ChatDelta,
+            Self::ChatTool { .. } => EventKind::ChatTool,
+            Self::ChatDone { .. } => EventKind::ChatDone,
         }
     }
 }
@@ -262,13 +306,14 @@ mod tests {
     #[test]
     fn every_variant_maps_to_its_kind() {
         // Guards against a new event variant that nobody added to EventKind::ALL.
-        assert_eq!(EventKind::ALL.len(), 17);
+        assert_eq!(EventKind::ALL.len(), 20);
         // And against a new kind that lands in neither of the two groups.
         let unassigned = EventKind::ALL
             .into_iter()
             .filter(|kind| {
                 !EventKind::ADAPTER_EVENTS.contains(kind)
                     && !kind.is_voice()
+                    && !kind.is_chat()
                     && *kind != EventKind::EventsDropped
             })
             .count();
@@ -297,6 +342,36 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["event"], "stt_final");
         assert_eq!(value["voice_id"], "voice-1");
+    }
+
+    #[test]
+    fn the_three_chat_events_keep_the_names_the_shell_builds_against() {
+        // The Mac shell is written against these three names and these fields. A rename
+        // here is a protocol break, not a refactoring, so the names are pinned in a test.
+        let delta = serde_json::to_value(Event::ChatDelta {
+            text: "guten ".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(delta["event"], "chat_delta");
+        assert_eq!(delta["text"], "guten ");
+
+        let tool = serde_json::to_value(Event::ChatTool {
+            name: "list_sessions".to_owned(),
+            summary: "3 Sitzungen".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(tool["event"], "chat_tool");
+        assert_eq!(tool["name"], "list_sessions");
+        assert_eq!(tool["summary"], "3 Sitzungen");
+
+        let done = serde_json::to_value(Event::ChatDone {
+            text: "guten Morgen".to_owned(),
+            spoken: true,
+        })
+        .unwrap();
+        assert_eq!(done["event"], "chat_done");
+        assert_eq!(done["text"], "guten Morgen");
+        assert_eq!(done["spoken"], true);
     }
 
     #[test]
