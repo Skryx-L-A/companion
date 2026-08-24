@@ -30,7 +30,8 @@ pub use endpoints::{EndpointConfig, EndpointError, EndpointProfile, RoleBinding}
 pub use registry::{ApprovalRecord, Registry, RegistryError};
 pub use secrets::{FileSecretStore, NoSecrets, SecretError, SecretStore};
 pub use settings::{
-    Autonomy, HighRiskSettings, NotificationChannel, Settings, SettingsError, ToolBoundary,
+    AdapterDefault, Autonomy, HighRiskSettings, NotificationChannel, Settings, SettingsError,
+    ToolBoundary,
 };
 
 /// Unix time in milliseconds. Every timestamp on the wire uses this.

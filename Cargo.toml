@@ -14,6 +14,8 @@ companion-protocol = { path = "crates/companion-protocol" }
 companion-core = { path = "crates/companion-core" }
 companion-adapter-workbench = { path = "crates/companion-adapter-workbench" }
 companion-adapter-claude = { path = "crates/companion-adapter-claude" }
+companion-adapter-codex = { path = "crates/companion-adapter-codex" }
+companion-adapter-pty = { path = "crates/companion-adapter-pty" }
 companion-voice = { path = "crates/companion-voice" }
 companion-brain = { path = "crates/companion-brain" }
 

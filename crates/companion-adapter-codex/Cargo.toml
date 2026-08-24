@@ -1,0 +1,24 @@
+[package]
+name = "companion-adapter-codex"
+description = "Session adapter for the Codex CLI: headless runs over codex exec --json and the rollout files under CODEX_HOME."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+companion-core.workspace = true
+companion-protocol.workspace = true
+
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "rt", "process", "io-util", "macros"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

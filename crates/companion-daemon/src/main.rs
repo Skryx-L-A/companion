@@ -6,10 +6,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use companion_adapter_claude::{ClaudeAdapter, ClaudeConfig};
+use companion_adapter_codex::{CodexAdapter, CodexConfig};
+use companion_adapter_pty::{PtyAdapter, PtyConfig};
 use companion_adapter_workbench::{WorkbenchAdapter, WorkbenchConfig};
 use companion_brain::{BrainConfig, BrainLimits};
 use companion_core::adapter::AdapterSet;
-use companion_core::{FileSecretStore, FileTokenStore, Registry, TokenStore, paths};
+use companion_core::{
+    AdapterDefault, FileSecretStore, FileTokenStore, Registry, TokenStore, paths,
+};
 use companion_daemon::{BrainSetup, ServerConfig, VoiceSetup, prepare_config, start};
 use companion_voice::VoiceLimits;
 use tracing::{error, info, warn};
@@ -68,12 +72,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let tokens = FileTokenStore::new(paths::token_file_path()).load_or_create()?;
     let registry = Arc::new(Registry::open(&paths::registry_path())?);
 
-    // An empty list means every adapter this build has; a filled one is a choice, and
-    // until now it was read, logged and ignored.
-    let wanted = |id: &str| {
-        settings.enabled_adapters.is_empty()
-            || settings.enabled_adapters.iter().any(|name| name == id)
-    };
+    // An empty list means every adapter this build has; a filled one is a choice. The
+    // terminal adapter is the exception and has to be named: see `AdapterDefault`.
+    let wanted = |id: &str| settings.adapter_enabled(id, AdapterDefault::On);
 
     let mut adapters = AdapterSet::new();
     let workbench = Arc::new(WorkbenchAdapter::new(WorkbenchConfig::default()));
@@ -82,6 +83,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if wanted(companion_adapter_claude::ADAPTER_ID) {
         adapters.insert(Arc::new(ClaudeAdapter::new(ClaudeConfig::default())));
+    }
+    if wanted(companion_adapter_codex::ADAPTER_ID) {
+        adapters.insert(Arc::new(CodexAdapter::new(CodexConfig::default())));
+    }
+    if settings.adapter_enabled(companion_adapter_pty::ADAPTER_ID, AdapterDefault::OptIn) {
+        // Named but without a program is a half-made setting, and a terminal adapter that
+        // starts nothing is worth saying out loud rather than leaving to be discovered at
+        // the first spawn.
+        if settings.pty_command.is_empty() {
+            warn!(
+                "the terminal adapter is enabled but no pty_command is set, so it starts nothing"
+            );
+        }
+        adapters.insert(Arc::new(PtyAdapter::new(PtyConfig::for_command(
+            settings.pty_command.clone(),
+        ))));
     }
     if adapters.is_empty() {
         warn!("the settings enable no adapter this build has, so the daemon sees no sessions");

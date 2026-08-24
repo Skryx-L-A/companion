@@ -19,6 +19,8 @@ path = "src/hook.rs"
 
 [dependencies]
 companion-adapter-claude.workspace = true
+companion-adapter-codex.workspace = true
+companion-adapter-pty.workspace = true
 companion-adapter-workbench.workspace = true
 companion-brain.workspace = true
 companion-core.workspace = true

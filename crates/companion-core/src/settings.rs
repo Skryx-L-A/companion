@@ -78,6 +78,20 @@ pub enum Autonomy {
     Act,
 }
 
+/// Whether an adapter is loaded when the settings say nothing about it.
+///
+/// Most are: an empty `enabled_adapters` means "everything this build has". An opt-in one
+/// is not, and that is a security decision rather than a taste one — `DESIGN.md`
+/// § Sicherheit points out that a permission level has no hold over a foreign CLI, so the
+/// adapter that runs foreign CLIs has to be asked for by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdapterDefault {
+    /// Loaded unless the settings name other adapters instead.
+    On,
+    /// Loaded only when the settings name it.
+    OptIn,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -85,8 +99,16 @@ pub struct Settings {
     /// Boundary for everything that is not high risk.
     pub tool_boundary: ToolBoundary,
     pub high_risk: HighRiskSettings,
-    /// Adapters the daemon should load. Empty means every adapter it was built with.
+    /// Adapters the daemon should load. Empty means every adapter it was built with,
+    /// with one exception: an adapter that is opt-in stays off until it is named here by
+    /// its id. The generic terminal adapter (`pty`) is the one, because `DESIGN.md`
+    /// § Sicherheit says a permission level cannot restrict a foreign CLI — nobody is to
+    /// end up with one by accident.
     pub enabled_adapters: Vec<String>,
+    /// The command the generic terminal adapter runs, program first, arguments after.
+    /// Empty is the default and means it starts nothing: there is no sensible default
+    /// program for "any CLI".
+    pub pty_command: Vec<String>,
     /// Where the person is told about something. The figure alone by default: every other
     /// channel sends data off this machine.
     pub notification_channels: Vec<NotificationChannel>,
@@ -106,10 +128,22 @@ impl Default for Settings {
             tool_boundary: ToolBoundary::Ask,
             high_risk: HighRiskSettings::default(),
             enabled_adapters: Vec::new(),
+            pty_command: Vec::new(),
             notification_channels: vec![NotificationChannel::Figure],
             forward_done: true,
             autonomy: Autonomy::Observe,
             endpoints: EndpointConfig::default(),
+        }
+    }
+}
+
+impl Settings {
+    /// Whether an adapter should be loaded at all.
+    pub fn adapter_enabled(&self, id: &str, default: AdapterDefault) -> bool {
+        let named = self.enabled_adapters.iter().any(|name| name == id);
+        match default {
+            AdapterDefault::On => named || self.enabled_adapters.is_empty(),
+            AdapterDefault::OptIn => named,
         }
     }
 }
@@ -292,6 +326,29 @@ mod tests {
         );
 
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn an_opt_in_adapter_stays_off_until_it_is_named() {
+        let quiet = Settings::default();
+        assert!(
+            quiet.adapter_enabled("workbench", AdapterDefault::On),
+            "an empty list means every ordinary adapter"
+        );
+        assert!(
+            !quiet.adapter_enabled("pty", AdapterDefault::OptIn),
+            "an empty list must not hand anybody a terminal adapter"
+        );
+
+        let chosen = Settings {
+            enabled_adapters: vec!["pty".to_owned()],
+            ..Settings::default()
+        };
+        assert!(chosen.adapter_enabled("pty", AdapterDefault::OptIn));
+        assert!(
+            !chosen.adapter_enabled("workbench", AdapterDefault::On),
+            "a filled list is a choice, and the others are not in it"
+        );
     }
 
     #[test]

@@ -1,0 +1,37 @@
+[package]
+name = "companion-adapter-pty"
+description = "Generic terminal adapter: runs any configured CLI on a pseudo terminal and reports only what a terminal can honestly show."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+companion-core.workspace = true
+companion-protocol.workspace = true
+
+async-trait.workspace = true
+# The one dependency this crate adds to the workspace, and the reason it is a dependency
+# rather than code here: opening a pseudo terminal means openpty and a controlling
+# terminal, which is unsafe code, and the workspace forbids unsafe outright. portable-pty
+# is the crate wezterm itself runs on, it wraps exactly that, and it also covers the
+# Windows ConPTY that `DESIGN.md` § Session-Adapter names for this adapter. The lighter
+# alternatives (pty-process, rustix-openpty) are Unix only and would leave that half
+# unbuilt.
+portable-pty = "0.9"
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
+tracing.workspace = true
+
+# Only for the SIGTERM of `stop`: portable-pty's own kill is a SIGKILL, and going straight
+# to SIGKILL denies a CLI the chance to clean up after itself. nix is already in the tree
+# below portable-pty and the same version is used here, so this costs a feature, not a
+# dependency.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.28", features = ["signal"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
