@@ -115,9 +115,9 @@ final class ServerMessageFixtureTests: XCTestCase {
             }
             return envelope.event.kind
         }
-        // The three chat kinds are not in here: the fixture writer of the protocol crate does
-        // not know them yet. They are decoded against hand-written lines in
-        // `ChatEventWireTests` until it does.
+        // The three chat kinds are not in here: the schema has them, but the fixture writer of
+        // the protocol crate does not write a line for them yet. They are decoded against
+        // hand-written lines in `ChatEventWireTests` until it does.
         let written = EventKind.allCases.filter { !$0.isChat }
         XCTAssertEqual(Set(kinds), Set(written), "one fixture per event kind")
         XCTAssertEqual(kinds.count, written.count)

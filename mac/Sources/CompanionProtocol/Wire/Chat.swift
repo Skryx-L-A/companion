@@ -9,10 +9,10 @@ import Foundation
 /// to that role and not to a session, which is why nothing in this file carries a session id.
 /// Talking to a single session is still `send`, and the session list is where that happens.
 ///
-/// The three events are read tolerantly on purpose. The other half of this contract is being
-/// built at the same time as this shell, so a field that is missing leaves its value at what
-/// an empty one would be instead of throwing the whole event away. What the shell must not do
-/// is invent content: an empty delta stays empty and shows nothing.
+/// The three events are read tolerantly on purpose: a field that is missing leaves its value
+/// at what an empty one would be instead of throwing the whole event away. The schema requires
+/// every one of them, so this only ever matters for a daemon that drifts. What the shell must
+/// not do is invent content, and it does not: an empty delta stays empty and shows nothing.
 
 /// The three chat events, by name on the wire.
 public enum ChatEventKind: String, Sendable, Codable, Hashable, CaseIterable {
@@ -27,7 +27,8 @@ public enum ChatEvent: Sendable, Equatable {
     /// replaces it, which is what separates this from `stt_partial`.
     case delta(text: String)
     /// The companion used a tool. One quiet line in the history, not an answer of its own.
-    case tool(name: String, summary: String?)
+    /// `summary` is a short line for the panel and never the whole tool result.
+    case tool(name: String, summary: String)
     /// The answer is complete. `text` is the whole of it, so a daemon that streams nothing
     /// and sends everything at the end still works. `spoken` says the daemon has already read
     /// the answer out, and the shell then does not say it a second time.
@@ -66,7 +67,7 @@ extension ChatEvent: Codable {
         case .chatTool:
             self = .tool(
                 name: try container.decodeIfPresent(String.self, forKey: .name) ?? "",
-                summary: try container.decodeIfPresent(String.self, forKey: .summary))
+                summary: try container.decodeIfPresent(String.self, forKey: .summary) ?? "")
         case .chatDone:
             self = .done(
                 text: try container.decodeIfPresent(String.self, forKey: .text) ?? "",
@@ -82,8 +83,7 @@ extension ChatEvent: Codable {
             try container.encode(text, forKey: .text)
         case .tool(let name, let summary):
             try container.encode(name, forKey: .name)
-            // Left out while absent, so a line written here matches one the daemon would send.
-            try container.encodeIfPresent(summary, forKey: .summary)
+            try container.encode(summary, forKey: .summary)
         case .done(let text, let spoken):
             try container.encode(text, forKey: .text)
             try container.encode(spoken, forKey: .spoken)
@@ -99,7 +99,7 @@ extension ChatEvent: CustomStringConvertible {
         case .delta(let text):
             return "chat_delta(\(text.count) Zeichen)"
         case .tool(let name, let summary):
-            return "chat_tool(\(name), \(summary?.count ?? 0) Zeichen)"
+            return "chat_tool(\(name), \(summary.count) Zeichen)"
         case .done(let text, let spoken):
             return "chat_done(\(text.count) Zeichen, gesprochen \(spoken))"
         }

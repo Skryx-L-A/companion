@@ -120,7 +120,7 @@ final class ChatHarness {
     private let defaults: UserDefaults
     private var waiting: [(Result<ResponseBody, ChatRequestFailure>) -> Void] = []
 
-    init(autoSend: Bool = true) {
+    init(autoSend: Bool = true, canSpeak: Bool = true) {
         suite = "de.skryx.companion.tests.\(UUID().uuidString.prefix(8))"
         defaults = UserDefaults(suiteName: suite) ?? .standard
         settings = AppSettings(defaults: defaults)
@@ -135,8 +135,10 @@ final class ChatHarness {
                 self.waiting.append(completion)
             }
         }
-        controller.speak = { [weak self] sentence in self?.spoken.append(sentence) }
-        controller.cancelSpeech = { [weak self] in self?.cancelled += 1 }
+        if canSpeak {
+            controller.speak = { [weak self] sentence in self?.spoken.append(sentence) }
+            controller.cancelSpeech = { [weak self] in self?.cancelled += 1 }
+        }
         controller.onFigureEvent = { [weak self] event in self?.figureEvents.append(event) }
         controller.onShowChat = { [weak self] in self?.shownChat += 1 }
     }
@@ -203,8 +205,23 @@ final class ChatControllerTests: XCTestCase {
 
         XCTAssertEqual(harness.questions.count, 1)
         XCTAssertEqual(harness.questions[0].text, "Wie steht es um den Zweig?")
-        XCTAssertTrue(harness.questions[0].spoken)
         XCTAssertEqual(harness.model.chatDraft, "", "and not into the field as well")
+        // The flag asks the daemon to speak the finished answer as one block. This shell says
+        // no to that and speaks it sentence by sentence itself while it is still being written.
+        XCTAssertFalse(harness.questions[0].spoken)
+    }
+
+    /// A shell without a voice pipeline cannot speak the answer, so it asks the daemon to.
+    func testAShellWithoutVoiceAsksTheDaemonToSpeak() {
+        let harness = ChatHarness(canSpeak: false)
+        defer { harness.cleanUp() }
+
+        harness.controller.heard("Wie steht es um den Zweig?")
+        XCTAssertTrue(harness.questions[0].spoken)
+
+        harness.controller.handle(.delta(text: "Der Zweig ist gebaut. Und fertig dazu."))
+        harness.controller.handle(.done(text: "", spoken: true))
+        XCTAssertTrue(harness.spoken.isEmpty, "and does not try to speak it as well")
     }
 
     /// Switched off it is a dictation again: the text lands in the field and the person sends
@@ -321,7 +338,7 @@ final class ChatControllerTests: XCTestCase {
         let harness = ChatHarness()
         defer { harness.cleanUp() }
         harness.controller.send("Was laeuft?")
-        harness.controller.handle(.tool(name: "list", summary: nil))
+        harness.controller.handle(.tool(name: "list", summary: ""))
         harness.controller.handle(.delta(text: "Zwei laufen."))
         XCTAssertEqual(harness.transcript.map(\.author), [.human, .tool, .companion])
         XCTAssertEqual(harness.transcript[1].text, "list")
@@ -332,7 +349,7 @@ final class ChatControllerTests: XCTestCase {
     func testAToolWithoutANameIsStillNamed() {
         let harness = ChatHarness()
         defer { harness.cleanUp() }
-        harness.controller.handle(.tool(name: "", summary: nil))
+        harness.controller.handle(.tool(name: "", summary: ""))
         XCTAssertEqual(harness.transcript.map(\.text), ["Werkzeug"])
     }
 

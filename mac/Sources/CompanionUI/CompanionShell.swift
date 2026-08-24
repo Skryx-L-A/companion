@@ -286,8 +286,12 @@ public final class CompanionShell {
                 }
             }
         }
-        chat.speak = { [weak self] sentence in self?.voice?.speak(sentence) }
-        chat.cancelSpeech = { [weak self] in self?.voice?.cancelSpeech() }
+        // Left unset when this shell was started without voice, because that is what tells
+        // the conversation to ask the daemon to speak the answer instead.
+        if voice != nil {
+            chat.speak = { [weak self] sentence in self?.voice?.speak(sentence) }
+            chat.cancelSpeech = { [weak self] in self?.voice?.cancelSpeech() }
+        }
         chat.onFigureEvent = { [weak self] event in self?.overlay.apply(event) }
         chat.onShowChat = { [weak self] in self?.overlay.showChat() }
     }
@@ -295,10 +299,9 @@ public final class CompanionShell {
     /// Reads a failed request the way the conversation needs it.
     ///
     /// `not_supported` is the daemon saying it understood and has nothing to answer with — no
-    /// chat-LLM connected — so the conversation goes off until something changes.
-    /// `bad_request` on this request means the same thing in practice: there is nothing a
-    /// client could get wrong about a text and a flag except the name of the request itself,
-    /// which is what a daemon that predates the conversation would complain about.
+    /// chat-LLM connected — so the conversation goes off until something changes. `bad_request`
+    /// is this one question's problem and nothing more: the daemon answers one message at a
+    /// time and refuses a second one while the first is still being written.
     private static func chatFailure(_ failure: DaemonClient.RequestFailure) -> ChatRequestFailure {
         switch failure {
         case .notConnected, .connectionLost:
@@ -307,7 +310,7 @@ public final class CompanionShell {
             return .failed("Der Daemon hat nicht innerhalb von \(Int(seconds)) Sekunden geantwortet.")
         case .daemon(let error):
             switch error.code {
-            case .notSupported, .badRequest:
+            case .notSupported:
                 return .notSupported(error.message)
             default:
                 return .failed(error.message)

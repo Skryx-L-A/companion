@@ -129,14 +129,21 @@ public final class ChatController {
             return
         }
 
-        isAnswerSpoken = spoken
+        // `voice` on the wire means one thing: the daemon reads the finished answer out as one
+        // block, once the last token is written. This shell reads it out sentence by sentence
+        // while it is still being written, which is what `DESIGN.md` section Voice asks for and
+        // the only way the first spoken word comes inside one and a half seconds. Only one of
+        // the two may speak, so the flag goes out true exactly when this shell cannot: a shell
+        // started without the voice pipeline has no `speak` to call.
+        isAnswerSpoken = spoken && speak != nil
+        let daemonSpeaks = spoken && speak == nil
         beginAnswer()
         guard let perform else {
             note(.notConnected)
             endAnswer()
             return
         }
-        perform(.chatMessage(text: trimmed, voice: spoken)) { [weak self] result in
+        perform(.chatMessage(text: trimmed, voice: daemonSpeaks)) { [weak self] result in
             self?.messageAnswered(result)
         }
     }
@@ -190,15 +197,15 @@ public final class ChatController {
         for sentence in splitter.push(text) { speak?(sentence) }
     }
 
-    private func appendTool(name: String, summary: String?) {
+    private func appendTool(name: String, summary: String) {
         // The line goes below what has been said so far, and the words that follow go into a
         // new bubble: a tool line in the middle of a sentence would otherwise end up above the
         // second half of it.
         if streamingMessageId != nil, !bubbleText.isEmpty { isAnswerSplit = true }
         closeStreamingMessage()
         let tool = name.isEmpty ? "Werkzeug" : name
-        let detail = summary?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let line = detail.map { $0.isEmpty ? tool : "\(tool): \($0)" } ?? tool
+        let detail = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let line = detail.isEmpty ? tool : "\(tool): \(detail)"
         model.messages.append(ChatMessage(author: .tool, text: line))
     }
 

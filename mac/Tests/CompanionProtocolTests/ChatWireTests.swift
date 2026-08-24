@@ -7,17 +7,17 @@ import XCTest
 
 /// The wire form of the conversation with the companion.
 ///
-/// The daemon side of this is being built on another track at the same time, so these tests
-/// are what pins the shape down: the name of the request, the names of the three events, which
-/// fields may be missing and what the shell reads when they are. A rename on either side has
-/// to fail here rather than in a chat panel that quietly stays empty.
+/// The schema is the contract, and these tests are what holds the Swift types against it: the
+/// name of the request, the names of the three events, what goes on the wire and what the shell
+/// reads back. The fixture writer of the protocol crate has no chat line yet, so until it does
+/// these hand-written lines are the only place a rename would fail before the chat panel does.
 final class ChatRequestWireTests: XCTestCase {
     private func object(_ request: Request, id: RequestId = 12) throws -> [String: Any] {
         let data = try WireCodec.encode(.request(RequestEnvelope(id: id, request: request)))
         return try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
-    func testTheQuestionCarriesTheTextAndWhetherItWasSpoken() throws {
+    func testTheQuestionCarriesTheTextAndWhetherTheDaemonSpeaksTheAnswer() throws {
         let typed = try object(.chatMessage(text: "Was laeuft gerade?", voice: false))
         XCTAssertEqual(typed["type"] as? String, "request")
         XCTAssertEqual(typed["request"] as? String, "chat_message")
@@ -63,13 +63,10 @@ final class ChatEventWireTests: XCTestCase {
             .chat(.delta(text: "Zwei Sessions ")))
     }
 
-    func testAToolLineCarriesItsNameAndAnOptionalSummary() throws {
+    func testAToolLineCarriesItsNameAndItsSummary() throws {
         XCTAssertEqual(
             try event(#"{"event":"chat_tool","name":"list","summary":"drei Sessions gelesen"}"#),
             .chat(.tool(name: "list", summary: "drei Sessions gelesen")))
-        XCTAssertEqual(
-            try event(#"{"event":"chat_tool","name":"list"}"#),
-            .chat(.tool(name: "list", summary: nil)))
     }
 
     func testTheEndCarriesTheWholeAnswerAndWhetherItWasSpoken() throws {
@@ -78,12 +75,12 @@ final class ChatEventWireTests: XCTestCase {
             .chat(.done(text: "Zwei Sessions laufen.", spoken: true)))
     }
 
-    /// Read tolerantly, because the other half of this contract is being written at the same
-    /// time. A field that is missing leaves its value at what an empty one would be; the event
-    /// is not thrown away over it, and nothing is invented in its place.
+    /// Read tolerantly although the schema requires every field: one that is missing leaves its
+    /// value at what an empty one would be, the event is not thrown away over it, and nothing is
+    /// invented in its place.
     func testAMissingFieldLeavesTheEventReadableRatherThanDroppingIt() throws {
         XCTAssertEqual(try event(#"{"event":"chat_delta"}"#), .chat(.delta(text: "")))
-        XCTAssertEqual(try event(#"{"event":"chat_tool"}"#), .chat(.tool(name: "", summary: nil)))
+        XCTAssertEqual(try event(#"{"event":"chat_tool"}"#), .chat(.tool(name: "", summary: "")))
         XCTAssertEqual(try event(#"{"event":"chat_done"}"#), .chat(.done(text: "", spoken: false)))
     }
 
@@ -99,7 +96,7 @@ final class ChatEventWireTests: XCTestCase {
         let events: [ChatEvent] = [
             .delta(text: "ein Stueck"),
             .tool(name: "list", summary: "drei Sessions"),
-            .tool(name: "list", summary: nil),
+            .tool(name: "list", summary: ""),
             .done(text: "Der ganze Satz.", spoken: false),
             .done(text: "Der ganze Satz.", spoken: true),
         ]

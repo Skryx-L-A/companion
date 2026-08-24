@@ -214,9 +214,9 @@ public enum Request: Sendable, Equatable {
     /// `chat_delta`, `chat_tool` and `chat_done` events, not as the response to this: an
     /// answer that takes a minute to write must not hold the connection for a minute.
     ///
-    /// `voice` says the question was spoken rather than typed. It is what decides whether the
-    /// answer is read out loud, and the daemon may use it to keep the answer short enough to
-    /// listen to. `Wire/Chat.swift` has the rest of the contract.
+    /// `voice` asks the daemon to read the finished answer out as one block, and `chat_done`
+    /// says whether it did. A shell that speaks the answer itself, sentence by sentence while
+    /// it is still being written, sends false. `Wire/Chat.swift` has the rest of the contract.
     case chatMessage(text: String, voice: Bool)
 
     /// The name the daemon dispatches on.
