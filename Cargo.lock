@@ -224,6 +224,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "companion-wakeword"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
