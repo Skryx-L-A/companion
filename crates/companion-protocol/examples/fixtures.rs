@@ -14,10 +14,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use companion_protocol::{
-    AdapterCapabilities, ClientMessage, CommandKind, ContextUsage, EndReason, ErrorCode, Event,
-    EventEnvelope, EventKind, Hello, PROTOCOL_VERSION, ProtocolError, Provenance, ReadWindow,
-    Request, RequestEnvelope, Response, ResponseBody, ResponseResult, SendOutcome, ServerMessage,
-    AudioFormat, SessionState, SessionStatus, StatusField, VoiceId, Welcome,
+    AdapterCapabilities, AudioFormat, ClientMessage, CommandKind, ContextUsage, EndReason,
+    ErrorCode, Event, EventEnvelope, EventKind, Hello, PROTOCOL_VERSION, ProtocolError, Provenance,
+    ReadWindow, Request, RequestEnvelope, Response, ResponseBody, ResponseResult, SendOutcome,
+    ServerMessage, SessionState, SessionStatus, StatusField, VoiceId, Welcome,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

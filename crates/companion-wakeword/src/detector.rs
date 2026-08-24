@@ -81,6 +81,12 @@ pub struct Detector {
 
 impl Detector {
     pub fn new(models: Vec<WordModel>, config: DetectorConfig) -> Self {
+        // A hop of zero would divide by zero on the first frame; one is the smallest that
+        // means anything.
+        let config = DetectorConfig {
+            eval_hop: config.eval_hop.max(1),
+            ..config
+        };
         let loaded: Vec<LoadedModel> = models
             .into_iter()
             .map(|model| {
@@ -311,6 +317,20 @@ mod tests {
             detections.extend(detector.push(chunk));
         }
         assert_eq!(detections.len(), 2, "got {detections:?}");
+    }
+
+    #[test]
+    fn an_eval_hop_of_zero_does_not_divide_by_zero() {
+        let word = synthetic_word(&[300.0, 800.0]);
+        let take = embed_in_silence(&word, 100, 100);
+        let model = train("melody", &[&take]).unwrap();
+        let config = DetectorConfig {
+            eval_hop: 0,
+            ..DetectorConfig::default()
+        };
+        let mut detector = Detector::new(vec![model], config);
+        // Would panic on the first evaluated frame if the hop were left at zero.
+        let _ = detector.push(&embed_in_silence(&word, 50, 50));
     }
 
     #[test]
