@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// The C ABI of the wakeword engine, as a module Swift can import.
+//
+// The header is not copied here on purpose: it is the contract of
+// app/crates/companion-wakeword-ffi and belongs next to the code that implements it. Two
+// copies of a hand-written header is exactly the drift the header's own comment warns about.
+//
+// `link` makes SwiftPM pass -lcompanion_wakeword_ffi; where the archive is found comes from
+// the linker flags in Package.swift, and Scripts/build-wakeword.sh is what puts it there.
+module CWakeword {
+    header "../../../crates/companion-wakeword-ffi/include/companion_wakeword.h"
+    link "companion_wakeword_ffi"
+    export *
+}

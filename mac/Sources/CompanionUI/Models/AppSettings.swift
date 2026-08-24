@@ -24,6 +24,7 @@ public final class AppSettings {
         static let pushToTalkHotkey = "voice.pushToTalkHotkey"
         static let halfDuplex = "voice.halfDuplex"
         static let wakeword = "voice.wakeword"
+        static let wakewordEnabled = "voice.wakewordEnabled"
     }
 
     public var corner: ScreenCorner {
@@ -80,10 +81,38 @@ public final class AppSettings {
         didSet { defaults.set(halfDuplexWhileSpeaking, forKey: Key.halfDuplex) }
     }
 
-    /// The word the figure is meant to wake up on. Kept now, used once there is an engine for
-    /// it; until then the key is what starts a recording.
+    /// The word the figure wakes up on. Written by the enrollment when a word has been
+    /// trained, so the settings page can name it without reading the model file.
     public var wakeword: String {
         didSet { defaults.set(wakeword, forKey: Key.wakeword) }
+    }
+
+    /// Whether the microphone listens for the wakeword the whole time.
+    ///
+    /// `DESIGN.md` section Voice: a permanently active wakeword is a high-risk setting with a
+    /// privacy notice when it is switched on, and the Grundprinzip says the companion may
+    /// change its own settings except the high-risk ones. That is why there is no plain setter
+    /// here — every path that could turn this on is a path the figure could take too, and a
+    /// settable property would be exactly such a path. Switching it ON goes through
+    /// `enableWakeword(afterHumanConsent:)` and that argument is only true where a person
+    /// pressed the confirm button of the privacy sheet.
+    ///
+    /// Switching it OFF is deliberately open to anyone: stopping a microphone needs no
+    /// ceremony.
+    public private(set) var isWakewordEnabled: Bool {
+        didSet { defaults.set(isWakewordEnabled, forKey: Key.wakewordEnabled) }
+    }
+
+    /// Turns the always-on microphone on. Returns whether it happened.
+    @discardableResult
+    public func enableWakeword(afterHumanConsent consent: Bool) -> Bool {
+        guard consent else { return false }
+        isWakewordEnabled = true
+        return true
+    }
+
+    public func disableWakeword() {
+        isWakewordEnabled = false
     }
 
     public init(defaults: UserDefaults = .standard) {
@@ -106,5 +135,6 @@ public final class AppSettings {
             .flatMap(HotkeyCombination.init(settingsValue:)) ?? .pushToTalkDefault
         halfDuplexWhileSpeaking = defaults.bool(forKey: Key.halfDuplex)
         wakeword = defaults.string(forKey: Key.wakeword) ?? "Companion"
+        isWakewordEnabled = defaults.bool(forKey: Key.wakewordEnabled)
     }
 }

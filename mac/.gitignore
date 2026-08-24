@@ -1,0 +1,3 @@
+# The wakeword static library, built by Scripts/build-wakeword.sh out of
+# ../crates/companion-wakeword-ffi. Build output, 14 MB, and two directories from its source.
+Vendor/

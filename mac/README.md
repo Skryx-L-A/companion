@@ -9,10 +9,17 @@ The package builds from the command line; Xcode is not required.
 
 ```sh
 cd app/mac
+./Scripts/build-wakeword.sh      # the Rust wakeword library — see below, run this first
 swift build                      # debug binary
 swift test                       # unit tests
 ./Scripts/make-app-bundle.sh     # companion.app with Info.plist and LSUIElement
 ```
+
+`Scripts/build-wakeword.sh` builds `app/crates/companion-wakeword-ffi` with cargo and copies
+the archive into `Vendor/`. SwiftPM cannot build Rust, so without that step the link fails
+with `library not found for -lcompanion_wakeword_ffi`. `make-app-bundle.sh` and the scripts
+in `tests/mac/` run it themselves; a bare `swift build` does not. The archive is build output
+and stays out of git.
 
 The binary runs without a bundle. `--demo` fills the panels with sample content and skips the
 daemon, which is the quickest way to see the overlay:
@@ -34,6 +41,8 @@ sessions as JSON and as a picture, both on the way out, which is what
 | Target | Contents |
 |---|---|
 | `CompanionProtocol` | the wire types of `app/protocol/schema`, the socket and the client |
+| `CWakeword` | module map over the C header of `app/crates/companion-wakeword-ffi` |
+| `CompanionWakeword` | Swift over that ABI: the detector, training, where models are kept |
 | `CompanionUI` | overlay panel, figure, the panels, menu bar item, settings, quick start |
 | `CompanionMac` | the executable and its command line |
 
@@ -85,9 +94,14 @@ States without a folder keep the drawn placeholder, so a partial set works.
 ## Tests
 
 `swift test` covers the state machine, the alpha hit test, the layout, the wire types against
-the fixtures and the schema files, the session display and the quick-start settings, and it
-renders the panels to PNG files for review. Three scripts in the repository root exercise
-what a unit test cannot: `tests/mac/ui-smoke.sh` starts the window and checks that the
-frontmost application never changes, `tests/mac/e2e-daemon.sh` runs the shell against a real
-daemon on a throwaway configuration directory, and `tests/mac/ruhelast.sh` measures idle CPU
-and memory.
+the fixtures and the schema files, the session display and the quick-start settings, the
+wakeword across its C ABI, and it renders the panels to PNG files for review. Four scripts in
+the repository root exercise what a unit test cannot: `tests/mac/ui-smoke.sh` starts the
+window and checks that the frontmost application never changes, `tests/mac/e2e-daemon.sh`
+runs the shell against a real daemon on a throwaway configuration directory,
+`tests/mac/ruhelast.sh` measures idle CPU and memory, and `tests/mac/wakeword-ffi.sh` runs the
+wakeword path from the Rust library up into the Swift tests, against recorded speech when the
+fixtures of `tests/wakeword` are there.
+
+No test opens a microphone. Everything that touches audio hardware sits behind
+`AudioCapturing`, `SpeechPlaying` and `MicrophoneAuthorizing`, and the tests hand in fakes.

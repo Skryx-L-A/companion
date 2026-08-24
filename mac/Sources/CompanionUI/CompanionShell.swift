@@ -2,6 +2,7 @@
 
 import AppKit
 import CompanionProtocol
+import CompanionWakeword
 import Foundation
 
 /// Wires the parts together: the daemon connection, the overlay, and the menu bar item.
@@ -28,6 +29,11 @@ public final class CompanionShell {
     private let settingsWindow = SettingsWindowController()
     private let auftragWindow = AuftragWindowController()
     private let excerptWindows = ExcerptWindowController()
+    private let wakewordWindow = WakewordWindowController()
+    /// Where the trained wakeword lives.
+    private let wakewordStore: WakewordStore
+    /// The always-on listener, nil when the shell was started without voice.
+    private let wakeword: WakewordListener?
     /// Sequence number of the last event, so a gap can be noticed.
     private var lastSequence: UInt64?
     private var isListPending = false
@@ -50,15 +56,24 @@ public final class CompanionShell {
         self.settings = AppSettings(defaults: defaults)
         self.overlay = OverlayController(settings: settings)
         self.client = DaemonClient(paths: paths, socketPath: socketPath)
+        self.wakewordStore = WakewordStore(paths: paths)
         guard voiceEnabled else {
             self.voice = nil
             self.microphone = nil
             self.hotkey = nil
+            self.wakeword = nil
             return
         }
         let microphone = SystemMicrophoneAuthorization()
         self.microphone = microphone
         self.hotkey = CarbonHotkeyRegistrar()
+        // Its own capture, subscribed through the same `onBuffer` the dictation uses.
+        // `MicrophoneCapture` is untouched: the two never run at once, so a second engine
+        // costs nothing while the first one has the microphone.
+        self.wakeword = WakewordListener(
+            store: self.wakewordStore,
+            capture: { MicrophoneCapture() },
+            authorization: microphone)
         // Both factories are lazy on purpose: nothing of CoreAudio is built until a person
         // actually records or the daemon actually speaks.
         self.voice = VoiceController(
@@ -91,7 +106,12 @@ public final class CompanionShell {
                 daemonStatus: self.overlay.model.daemonStatusText,
                 daemonDetail: self.overlay.model.daemonDetail,
                 microphoneStatus: self.microphoneStatusText,
-                voiceStatus: self.voiceStatusText)
+                voiceStatus: self.voiceStatusText,
+                wakewordStatus: self.wakewordStatusText,
+                hasWakewordModel: self.wakewordStore.hasModel,
+                onTrainWakeword: { self.openWakewordEnrollment() },
+                onDeleteWakeword: { self.deleteWakeword() },
+                onSetWakewordEnabled: { self.setWakewordEnabled($0) })
         }
         self.statusItem = statusItem
 
@@ -127,9 +147,13 @@ public final class CompanionShell {
         voice?.shutDown()
         statusItem?.remove()
         statusItem = nil
+        // The always-on microphone goes down with the shell. One that outlived it would be a
+        // microphone nobody can see any more.
+        wakeword?.stop()
         // Windows this shell opened are closed by it; a window left behind would outlive the
         // connection that fills it.
         auftragWindow.close()
+        wakewordWindow.close()
         excerptWindows.closeAll()
         overlay.stop()
     }
@@ -233,6 +257,15 @@ public final class CompanionShell {
         voice.onFigureEvent = { [weak self] event in
             guard let self else { return }
             self.overlay.apply(event)
+            // The listener gives the microphone up while a dictation runs and takes it back
+            // when the dictation is done. Hooked to the figure events rather than to the two
+            // call sites, because a recording also ends on its own — the endpoint, a full
+            // queue, a daemon that refuses — and every one of those has to hand it back.
+            switch event {
+            case .voiceCaptureStarted: self.wakeword?.pause()
+            case .voiceCaptureStopped: self.wakeword?.resume()
+            default: break
+            }
             self.refreshVoiceState()
         }
         voice.onPartialTranscript = { [weak self] text in
@@ -253,8 +286,26 @@ public final class CompanionShell {
             self?.refreshVoiceState()
         }
 
+        wakeword?.onDetected = { [weak self] _ in self?.wakewordHeard() }
+        wakeword?.onNotice = { [weak self] text in self?.systemMessage(text) }
+        wakeword?.onStateChange = { [weak self] _ in self?.refreshVoiceState() }
+
         overlay.onToggleVoice = { [weak self] in self?.toggleVoice() }
         applyVoiceSettings()
+        refreshVoiceState()
+    }
+
+    /// The word was heard. From here on it is the push-to-talk path, unchanged: the same
+    /// recording, the same panel, the same transcript into the input field.
+    ///
+    /// `DESIGN.md` section Voice names the wakeword as one of three ways to START speaking,
+    /// so it starts what the key starts and nothing more. What is said still goes into the
+    /// field and is still sent by the person.
+    private func wakewordHeard() {
+        guard let voice, !voice.isCapturing else { return }
+        overlay.apply(.userActivity)
+        voice.beginCapture()
+        overlay.showChat()
         refreshVoiceState()
     }
 
@@ -276,12 +327,13 @@ public final class CompanionShell {
         guard let voice else { return }
         voice.configuration.halfDuplex = settings.halfDuplexWhileSpeaking
         trackVoiceSettings()
+        applyWakewordSetting()
 
         guard let hotkey else { return }
         let combination = settings.pushToTalkHotkey
-        // The key is taken for the wakeword setting as well: there is no engine for a
-        // wakeword yet, and leaving that choice with no way to talk at all would be worse
-        // than one key more than asked for. The settings page says so in words.
+        // The key is taken for the wakeword setting as well. A wakeword mishears, and a person
+        // whose word did not carry needs a way to talk that does not depend on being heard.
+        // One key more than asked for is the smaller cost. The settings page says so in words.
         let wantsKey = settings.voiceTrigger != .click
         guard wantsKey else {
             hotkey.unregister()
@@ -300,15 +352,99 @@ public final class CompanionShell {
         }
     }
 
-    /// Watches the three voice settings. `withObservationTracking` fires once, so the next
-    /// watch is installed by the change it reported.
+    /// Watches the voice settings. `withObservationTracking` fires once, so the next watch is
+    /// installed by the change it reported.
     private func trackVoiceSettings() {
         withObservationTracking {
             _ = settings.pushToTalkHotkey
             _ = settings.voiceTrigger
             _ = settings.halfDuplexWhileSpeaking
+            _ = settings.isWakewordEnabled
         } onChange: { [weak self] in
             Task { @MainActor in self?.applyVoiceSettings() }
+        }
+    }
+
+    // MARK: - Wakeword
+
+    /// Starts or stops the always-on listener from what the settings say.
+    ///
+    /// Two things have to be true: the person picked the wakeword as their way in, and they
+    /// armed it in the privacy sheet. The second one is the high-risk switch and only a human
+    /// ever sets it — see `AppSettings.enableWakeword(afterHumanConsent:)`.
+    private func applyWakewordSetting() {
+        guard let wakeword else { return }
+        let wanted = settings.voiceTrigger == .wakeword && settings.isWakewordEnabled
+        if wanted {
+            wakeword.start()
+        } else {
+            wakeword.stop()
+        }
+    }
+
+    private func openWakewordEnrollment() {
+        guard let microphone else {
+            systemMessage("Diese Shell wurde ohne Sprache gestartet; ein Weckwort laesst sich so nicht anlernen.")
+            return
+        }
+        // The microphone belongs to the enrollment while it records. A listener that kept
+        // running would hear the takes and wake up in the middle of the training.
+        wakeword?.pause()
+        wakewordWindow.show(
+            store: wakewordStore,
+            word: settings.wakeword,
+            capture: { MicrophoneCapture() },
+            authorization: microphone,
+            onTrained: { [weak self] _ in self?.wakewordTrained() })
+    }
+
+    private func wakewordTrained() {
+        guard let word = wakewordWindow.enrollment?.trimmedWord, !word.isEmpty else { return }
+        settings.wakeword = word
+        // Trained is not armed. Switching the microphone on stays the separate, deliberate
+        // step in the settings, with its own notice.
+        wakeword?.reloadModel()
+        systemMessage(
+            "\(word) ist angelernt. In den Einstellungen laesst sich das dauerhafte Mithoeren dafuer einschalten.")
+        refreshVoiceState()
+    }
+
+    private func deleteWakeword() {
+        wakeword?.stop()
+        settings.disableWakeword()
+        do {
+            try wakewordStore.removeModel()
+            systemMessage("Das Weckwort ist geloescht. Der Companion hoert nicht mehr mit.")
+        } catch {
+            systemMessage("Das Weckwort liess sich nicht loeschen: \(error.localizedDescription)")
+        }
+        refreshVoiceState()
+    }
+
+    /// The only place in the shell that arms the always-on microphone. `enabled` is true only
+    /// where the confirm button of the privacy sheet was pressed.
+    private func setWakewordEnabled(_ enabled: Bool) {
+        if enabled {
+            guard wakewordStore.hasModel else {
+                systemMessage("Es ist noch kein Weckwort angelernt.")
+                return
+            }
+            settings.enableWakeword(afterHumanConsent: true)
+        } else {
+            settings.disableWakeword()
+        }
+        applyWakewordSetting()
+        refreshVoiceState()
+    }
+
+    private var wakewordStatusText: String {
+        switch wakeword?.state {
+        case .listening: return "hoert mit"
+        case .paused: return "pausiert, solange aufgenommen wird"
+        case .off, nil:
+            if !wakewordStore.hasModel { return "kein Wort angelernt" }
+            return settings.isWakewordEnabled ? "aus" : "angelernt, aber nicht eingeschaltet"
+        case .failed(let reason): return reason
         }
     }
 
