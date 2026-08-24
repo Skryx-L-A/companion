@@ -47,8 +47,9 @@ extension EndReason: RawRepresentable, Codable {
 }
 
 /// The name of an event without its payload: the thirteen an adapter or the bus produces, in
-/// the order `DESIGN.md` section Session-Adapter lists them, and the four the voice pipeline
-/// produces. No adapter ever delivers a voice event; they belong to no session.
+/// the order `DESIGN.md` section Session-Adapter lists them, the four the voice pipeline
+/// produces, and the three the companion's own answer produces. No adapter ever delivers a
+/// voice or a chat event; they belong to no session.
 public enum EventKind: String, Sendable, Codable, Hashable, CaseIterable {
     case sessionStarted = "session_started"
     case sessionEnded = "session_ended"
@@ -67,11 +68,22 @@ public enum EventKind: String, Sendable, Codable, Hashable, CaseIterable {
     case sttFinal = "stt_final"
     case ttsChunk = "tts_chunk"
     case ttsDone = "tts_done"
+    case chatDelta = "chat_delta"
+    case chatTool = "chat_tool"
+    case chatDone = "chat_done"
 
     /// True for the four that come from the voice pipeline rather than from a session.
     public var isVoice: Bool {
         switch self {
         case .sttPartial, .sttFinal, .ttsChunk, .ttsDone: return true
+        default: return false
+        }
+    }
+
+    /// True for the three that carry the companion's own answer.
+    public var isChat: Bool {
+        switch self {
+        case .chatDelta, .chatTool, .chatDone: return true
         default: return false
         }
     }
@@ -107,6 +119,10 @@ public enum Event: Sendable, Equatable {
     /// voice pipeline of the shell reads it as one thing and nothing else in the interface
     /// looks at it at all.
     case voice(VoiceEvent)
+    /// The companion's own answer, in the pieces it is written in. Kept as one case for the
+    /// same reason speech is: the chat panel reads it as one thing and nothing else in the
+    /// interface looks at it at all.
+    case chat(ChatEvent)
     /// An event a newer daemon knows and this shell does not. Kept so the sequence stays
     /// readable instead of the whole line being dropped.
     case unrecognised(kind: String)
@@ -133,13 +149,25 @@ public enum Event: Sendable, Equatable {
             case .ttsChunk: return .ttsChunk
             case .ttsDone: return .ttsDone
             }
+        case .chat(let chat):
+            switch chat.kind {
+            case .chatDelta: return .chatDelta
+            case .chatTool: return .chatTool
+            case .chatDone: return .chatDone
+            }
         case .unrecognised: return nil
         }
     }
 
-    /// The voice event this is, or nil for one of the thirteen session events.
+    /// The voice event this is, or nil for anything else.
     public var voiceEvent: VoiceEvent? {
         guard case .voice(let event) = self else { return nil }
+        return event
+    }
+
+    /// The chat event this is, or nil for anything else.
+    public var chatEvent: ChatEvent? {
+        guard case .chat(let event) = self else { return nil }
         return event
     }
 }
@@ -214,6 +242,8 @@ extension Event: Codable {
             self = .eventsDropped(missed: try container.decode(UInt64.self, forKey: .missed))
         case .sttPartial, .sttFinal, .ttsChunk, .ttsDone:
             self = .voice(try VoiceEvent(from: decoder))
+        case .chatDelta, .chatTool, .chatDone:
+            self = .chat(try ChatEvent(from: decoder))
         case nil:
             self = .unrecognised(kind: tag)
         }
@@ -271,6 +301,8 @@ extension Event: Codable {
             try container.encode(missed, forKey: .missed)
         case .voice(let voice):
             try voice.encode(to: encoder)
+        case .chat(let chat):
+            try chat.encode(to: encoder)
         case .unrecognised(let kind):
             try container.encode(kind, forKey: .event)
         }

@@ -35,6 +35,10 @@ public final class OverlayModel {
     public var isVoiceAvailable = true
     /// Why voice is off, for the button's tooltip. Nil while it works.
     public var voiceUnavailableReason: String?
+    /// Why the companion cannot answer, usually because no chat-LLM is connected. Nil while
+    /// it can. The chat panel puts it above the input with the way to the settings, because
+    /// that is where it gets fixed.
+    public var chatUnavailableReason: String?
     public var daemonStatusText: String = "Daemon nicht verbunden"
     public var isDaemonReady = false
     /// What the handshake said, for the settings page: role, daemon version, run id.

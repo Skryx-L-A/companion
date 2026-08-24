@@ -210,6 +210,14 @@ public enum Request: Sendable, Equatable {
     case voiceEnd(voiceId: VoiceId)
     /// Has a text spoken. The audio arrives as `tts_chunk` events, the end as `tts_done`.
     case ttsSpeak(text: String, voice: String?)
+    /// One turn of the conversation with the companion itself. The answer arrives as
+    /// `chat_delta`, `chat_tool` and `chat_done` events, not as the response to this: an
+    /// answer that takes a minute to write must not hold the connection for a minute.
+    ///
+    /// `voice` says the question was spoken rather than typed. It is what decides whether the
+    /// answer is read out loud, and the daemon may use it to keep the answer short enough to
+    /// listen to. `Wire/Chat.swift` has the rest of the contract.
+    case chatMessage(text: String, voice: Bool)
 
     /// The name the daemon dispatches on.
     public var name: String {
@@ -228,6 +236,7 @@ public enum Request: Sendable, Equatable {
         case .voiceChunk: return "voice_chunk"
         case .voiceEnd: return "voice_end"
         case .ttsSpeak: return "tts_speak"
+        case .chatMessage: return "chat_message"
         }
     }
 
@@ -239,6 +248,14 @@ public enum Request: Sendable, Equatable {
         case .voiceBegin, .voiceChunk, .voiceEnd, .ttsSpeak: return true
         default: return false
         }
+    }
+
+    /// True for the request that only works once the daemon has a chat-LLM. A daemon without
+    /// one answers `not_supported`, and the shell says so instead of asking again with every
+    /// sentence somebody types.
+    public var isChat: Bool {
+        if case .chatMessage = self { return true }
+        return false
     }
 }
 
@@ -348,6 +365,12 @@ extension ClientMessage: Encodable {
             case .ttsSpeak(let text, let voice):
                 try container.encode(text, forKey: .text)
                 try container.encodeIfPresent(voice, forKey: .voice)
+            case .chatMessage(let text, let voice):
+                try container.encode(text, forKey: .text)
+                // The same field name as the voice of `tts_speak` and a different type, which
+                // is what the contract says: there it names a voice, here it says the question
+                // was spoken. Two requests, so nothing can read one for the other.
+                try container.encode(voice, forKey: .voice)
             }
         }
     }

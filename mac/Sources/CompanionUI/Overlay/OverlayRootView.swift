@@ -43,6 +43,7 @@ struct OverlayRootView: View {
                     onSubmit: { controller.submit($0) },
                     onAnswer: { controller.answer($0, with: $1) },
                     onToggleVoice: { controller.toggleVoice() },
+                    onOpenSettings: controller.onOpenSettings,
                     onToggleSessionList: { controller.toggleSessionList() },
                     onClose: { controller.toggleChat() })
                     .frame(width: box.width, height: box.height)

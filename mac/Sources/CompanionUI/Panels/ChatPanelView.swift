@@ -6,14 +6,18 @@ import SwiftUI
 /// The chat panel: history, an open question with its answer field, the line the speech
 /// recogniser is filling, and the input.
 ///
-/// What the input does depends on the session that is picked in the list. Without one there
-/// is nowhere to send, and the panel says so instead of swallowing the line.
+/// The input talks to the companion itself. It used to go to whichever session was picked in
+/// the list; that has moved into the session list, where the row it goes to is the one under
+/// the cursor. The one thing here that still reaches a session is the answer to a question it
+/// asked, and that answer names its session on the way out.
 struct ChatPanelView: View {
     let model: OverlayModel
     let onSubmit: (String) -> Void
     var onAnswer: (OpenQuestion, String) -> Void = { _, _ in }
     /// Starts or ends a recording. The same toggle the figure and the push-to-talk key use.
     var onToggleVoice: () -> Void = {}
+    /// Opens the settings window, for the notice that has to point at it.
+    var onOpenSettings: (() -> Void)?
     let onToggleSessionList: () -> Void
     let onClose: () -> Void
 
@@ -39,6 +43,7 @@ struct ChatPanelView: View {
             history
             questionBlock
             transcriptLine
+            unavailableNotice
             Divider()
             input
         }
@@ -48,12 +53,11 @@ struct ChatPanelView: View {
         .onAppear { isInputFocused = true }
     }
 
-    /// The header says where the input goes, because that is the one thing a person cannot
-    /// see from the text field itself.
+    /// The header says whether the companion can answer at all, because that is the one thing
+    /// a person cannot see from the text field itself.
     private var subtitle: String {
         if !model.isDaemonReady { return model.daemonStatusText }
-        guard let session = model.selectedSession else { return "keine Session gewaehlt" }
-        return "an \(session.title)"
+        return model.chatUnavailableReason == nil ? "verbunden" : "kein Chat-Modell verbunden"
     }
 
     @ViewBuilder
@@ -62,7 +66,7 @@ struct ChatPanelView: View {
             PanelPlaceholder(
                 symbol: "text.bubble",
                 title: "Noch keine Nachricht",
-                detail: "Waehle eine Session in der Liste und schreib oder sprich, was sie tun soll.")
+                detail: "Frag den Companion, was laeuft, oder sag ihm, was er starten soll. Einzelne Sessions bekommen ihren Text in der Sessionliste.")
         } else {
             ScrollViewReader { proxy in
                 ScrollView {
@@ -143,6 +147,33 @@ struct ChatPanelView: View {
         }
     }
 
+    /// Why the companion cannot answer, and the way to the place where that is fixed. A panel
+    /// that only stays quiet would leave a person typing into it a second and a third time.
+    @ViewBuilder
+    private var unavailableNotice: some View {
+        if let reason = model.chatUnavailableReason {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                if let onOpenSettings {
+                    Button("Einstellungen") { onOpenSettings() }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(Color(nsColor: .underPageBackgroundColor).opacity(0.5))
+            .accessibilityElement(children: .contain)
+        }
+    }
+
     private var input: some View {
         HStack(spacing: 8) {
             // Not disabled while voice is unavailable, dimmed instead: a plain icon button
@@ -153,12 +184,12 @@ struct ChatPanelView: View {
                 label: voiceButtonLabel,
                 action: onToggleVoice)
                 .foregroundStyle(model.isVoiceAvailable ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
-            TextField(placeholder, text: draft, axis: .vertical)
+            TextField("Nachricht", text: draft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...4)
                 .focused($isInputFocused)
                 .onSubmit(send)
-                .accessibilityLabel("Nachricht an die gewaehlte Session")
+                .accessibilityLabel("Nachricht an den Companion")
             PanelIconButton(symbol: "arrow.up.circle.fill", label: "Senden", action: send)
                 .disabled(draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
@@ -171,10 +202,6 @@ struct ChatPanelView: View {
     private var voiceButtonLabel: String {
         if let reason = model.voiceUnavailableReason, !model.isVoiceAvailable { return reason }
         return model.isMicrophoneOpen ? "Aufnahme beenden" : "Sprechen"
-    }
-
-    private var placeholder: String {
-        model.selectedSession == nil ? "Erst eine Session waehlen" : "Nachricht"
     }
 
     private func send() {
@@ -196,6 +223,14 @@ struct ChatBubble: View {
     let session: String
 
     var body: some View {
+        if message.author == .tool {
+            toolLine
+        } else {
+            bubble
+        }
+    }
+
+    private var bubble: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(author)
                 .font(.caption)
@@ -210,12 +245,31 @@ struct ChatBubble: View {
         .accessibilityLabel("\(author): \(message.text)")
     }
 
+    /// A tool the companion reached for. One quiet line rather than a bubble: it is worth
+    /// seeing and never worth reading before the answer itself.
+    private var toolLine: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "wrench.and.screwdriver")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+            Text(message.text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Werkzeug: \(message.text)")
+    }
+
     private var author: String {
         switch message.author {
         case .human: return message.sessionId == nil ? "Du" : "Du an \(session)"
         // A line without a session comes from the companion itself, not from a session
         // whose name got lost.
         case .companion: return message.sessionId == nil ? "Companion" : session
+        case .tool: return "Werkzeug"
         case .system: return "System"
         }
     }

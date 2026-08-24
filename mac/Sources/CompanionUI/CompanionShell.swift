@@ -35,6 +35,9 @@ public final class CompanionShell {
     private let voice: VoiceController?
     private let microphone: MicrophoneAuthorizing?
     private let hotkey: HotkeyRegistering?
+    /// The conversation with the companion itself. Always there: it needs no hardware, and a
+    /// shell without voice can still be typed at.
+    private let chat: ChatController
 
     /// - Parameter voiceEnabled: false leaves the whole voice path unbuilt — no audio engine,
     ///   no global key. That is what a test run uses: a suite must not take a key combination
@@ -50,6 +53,7 @@ public final class CompanionShell {
         self.settings = AppSettings(defaults: defaults)
         self.overlay = OverlayController(settings: settings)
         self.client = DaemonClient(paths: paths, socketPath: socketPath)
+        self.chat = ChatController(model: overlay.model, settings: settings)
         guard voiceEnabled else {
             self.voice = nil
             self.microphone = nil
@@ -70,9 +74,11 @@ public final class CompanionShell {
     }
 
     public func start(connectToDaemon: Bool = true, onboarding: OnboardingPolicy = .auto) {
-        overlay.onSubmit = { [weak self] text in self?.send(text) }
+        overlay.onSubmit = { [weak self] text in self?.chat.send(text) }
         overlay.onAnswer = { [weak self] question, text in self?.answer(question, with: text) }
+        overlay.onOpenSettings = { [weak self] in self?.showSettings() }
         overlay.sessionActions = SessionActions(
+            send: { [weak self] id, text in self?.send(text, to: id) },
             read: { [weak self] id in self?.readExcerpt(of: id) },
             interrupt: { [weak self] id in self?.interrupt(id) },
             stop: { [weak self] id in self?.confirmStop(id) },
@@ -81,17 +87,11 @@ public final class CompanionShell {
             overlay.onNewAuftrag = { [weak self] in self?.openAuftragWindow() }
         }
         startVoice()
+        startChat()
         overlay.start()
 
         let statusItem = StatusItemController(controller: overlay) { [weak self] in
-            guard let self else { return }
-            self.settingsWindow.show(
-                controller: self.overlay,
-                socketPath: self.socketPath,
-                daemonStatus: self.overlay.model.daemonStatusText,
-                daemonDetail: self.overlay.model.daemonDetail,
-                microphoneStatus: self.microphoneStatusText,
-                voiceStatus: self.voiceStatusText)
+            self?.showSettings()
         }
         self.statusItem = statusItem
 
@@ -132,6 +132,18 @@ public final class CompanionShell {
         auftragWindow.close()
         excerptWindows.closeAll()
         overlay.stop()
+    }
+
+    /// Opens the settings window. Reached from the menu bar item and from the notice in the
+    /// chat panel, which is why it is one method and not two closures.
+    private func showSettings() {
+        settingsWindow.show(
+            controller: overlay,
+            socketPath: socketPath,
+            daemonStatus: overlay.model.daemonStatusText,
+            daemonDetail: overlay.model.daemonDetail,
+            microphoneStatus: microphoneStatusText,
+            voiceStatus: voiceStatusText)
     }
 
     /// Sample content for looking at the panels without a daemon. Marked as such in the chat,
@@ -214,9 +226,10 @@ public final class CompanionShell {
     /// Wires the voice pipeline to the panel, the figure and the daemon, and takes the
     /// push-to-talk key.
     ///
-    /// `DESIGN.md` section Voice. Recognised text lands in the input field and stops there:
-    /// what a session is told is still sent by the person, and automatic sending arrives with
-    /// the part of the system that can judge what it heard.
+    /// `DESIGN.md` section Voice. What was recognised goes to the companion by itself, because
+    /// the companion is now the thing at the other end of the conversation and can be asked
+    /// again if it misheard. The setting for it is in the settings window, and switched off it
+    /// fills the input field the way this did before.
     private func startVoice() {
         guard let voice else { return }
         voice.perform = { [weak self] request, completion in
@@ -239,14 +252,7 @@ public final class CompanionShell {
             self?.overlay.model.liveTranscript = text
         }
         voice.onFinalText = { [weak self] text in
-            guard let self else { return }
-            let model = self.overlay.model
-            // Appended rather than replacing: somebody may have started typing, and a second
-            // sentence after a pause is a second sentence, not a correction of the first.
-            model.chatDraft = model.chatDraft.isEmpty
-                ? text
-                : model.chatDraft.trimmingCharacters(in: .whitespaces) + " " + text
-            self.overlay.showChat()
+            self?.chat.heard(text)
         }
         voice.onNotice = { [weak self] text in
             self?.systemMessage(text)
@@ -256,6 +262,57 @@ public final class CompanionShell {
         overlay.onToggleVoice = { [weak self] in self?.toggleVoice() }
         applyVoiceSettings()
         refreshVoiceState()
+    }
+
+    // MARK: - The conversation
+
+    /// Wires the conversation with the companion to the daemon, the figure and the voice
+    /// pipeline.
+    ///
+    /// The answer is spoken sentence by sentence while it is still being written, which is why
+    /// the sentences go to `VoiceController.speak` one at a time rather than as one block at
+    /// the end: `DESIGN.md` section Voice puts the first spoken word at most one and a half
+    /// seconds after the question ends, and waiting for the last written word would spend that
+    /// budget several times over.
+    private func startChat() {
+        chat.perform = { [weak self] request, completion in
+            guard let self else { return completion(.failure(.notConnected)) }
+            self.client.request(request) { result in
+                switch result {
+                case .success(let body):
+                    completion(.success(body))
+                case .failure(let failure):
+                    completion(.failure(Self.chatFailure(failure)))
+                }
+            }
+        }
+        chat.speak = { [weak self] sentence in self?.voice?.speak(sentence) }
+        chat.cancelSpeech = { [weak self] in self?.voice?.cancelSpeech() }
+        chat.onFigureEvent = { [weak self] event in self?.overlay.apply(event) }
+        chat.onShowChat = { [weak self] in self?.overlay.showChat() }
+    }
+
+    /// Reads a failed request the way the conversation needs it.
+    ///
+    /// `not_supported` is the daemon saying it understood and has nothing to answer with — no
+    /// chat-LLM connected — so the conversation goes off until something changes.
+    /// `bad_request` on this request means the same thing in practice: there is nothing a
+    /// client could get wrong about a text and a flag except the name of the request itself,
+    /// which is what a daemon that predates the conversation would complain about.
+    private static func chatFailure(_ failure: DaemonClient.RequestFailure) -> ChatRequestFailure {
+        switch failure {
+        case .notConnected, .connectionLost:
+            return .notConnected
+        case .timedOut(let seconds):
+            return .failed("Der Daemon hat nicht innerhalb von \(Int(seconds)) Sekunden geantwortet.")
+        case .daemon(let error):
+            switch error.code {
+            case .notSupported, .badRequest:
+                return .notSupported(error.message)
+            default:
+                return .failed(error.message)
+            }
+        }
     }
 
     private func toggleVoice() {
@@ -394,15 +451,15 @@ public final class CompanionShell {
 
     // MARK: - Sending
 
-    private func send(_ text: String) {
+    /// One line to one session, from the field at the bottom of the session list. The chat
+    /// panel does not come here any more: what is typed there is a question to the companion.
+    private func send(_ text: String, to sessionId: SessionId) {
         let model = overlay.model
-        guard let sessionId = model.selectedSessionId else {
-            systemMessage(
-                "Waehle zuerst eine Session in der Liste aus. Getippter Text geht an sie, nicht an den Companion selbst.")
-            return
-        }
-        model.messages.append(ChatMessage(author: .human, text: text, sessionId: sessionId))
-        client.request(.send(sessionId: sessionId, text: text)) { [weak self] result in
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        model.messages.append(ChatMessage(author: .human, text: trimmed, sessionId: sessionId))
+        overlay.showChat()
+        client.request(.send(sessionId: sessionId, text: trimmed)) { [weak self] result in
             self?.handleSendResult(result, sessionId: sessionId)
         }
     }
@@ -462,9 +519,10 @@ public final class CompanionShell {
             model.daemonStatusText = "verbunden"
             model.daemonDetail = "Rolle \(welcome.role.rawValue), Daemon \(welcome.daemonVersion), Lauf \(welcome.runId)"
             lastSequence = nil
-            // A new connection may be a newer daemon, so an earlier "cannot do voice" is not
-            // held against this one.
+            // A new connection may be a newer daemon, so an earlier "cannot do voice" and an
+            // earlier "has no chat model" are not held against this one.
             voice?.connectionChanged()
+            chat.connectionChanged()
             refreshVoiceState()
             refreshSessions()
         case .refused(let error):
@@ -548,6 +606,13 @@ public final class CompanionShell {
         if let voiceEvent = envelope.event.voiceEvent {
             voice?.handle(voiceEvent)
             refreshVoiceState()
+            return
+        }
+
+        // Neither is the companion's own answer: it belongs to no session, and the chat panel
+        // is the only thing that reads it.
+        if let chatEvent = envelope.event.chatEvent {
+            chat.handle(chatEvent)
             return
         }
 

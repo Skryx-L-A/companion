@@ -56,6 +56,11 @@ public enum FigureEvent: Sendable, Equatable {
     case workFinished
     case speechStarted
     case speechFinished
+    /// A question went to the companion itself and its answer is still outstanding. Kept
+    /// apart from `workStarted`, which belongs to the sessions: a session going idle must not
+    /// stop the figure thinking about the question it was just asked.
+    case answerStarted
+    case answerFinished
     /// A session asked something or failed, and nobody has looked at it yet.
     case attentionRequired
     case attentionCleared
@@ -79,6 +84,7 @@ public struct FigureStateMachine: Sendable {
     private var isCapturingVoice = false
     private var isSpeaking = false
     private var isWorking = false
+    private var isAnswering = false
     private var idleFor: TimeInterval = 0
 
     public init(sleepAfter: TimeInterval = 300) {
@@ -89,7 +95,7 @@ public struct FigureStateMachine: Sendable {
         if needsAttention { return .alert }
         if isCapturingVoice { return .listening }
         if isSpeaking { return .speaking }
-        if isWorking { return .thinking }
+        if isWorking || isAnswering { return .thinking }
         if idleFor >= sleepAfter { return .sleeping }
         return .idle
     }
@@ -104,6 +110,8 @@ public struct FigureStateMachine: Sendable {
         case .workFinished: isWorking = false
         case .speechStarted: isSpeaking = true
         case .speechFinished: isSpeaking = false
+        case .answerStarted: isAnswering = true
+        case .answerFinished: isAnswering = false
         case .attentionRequired: needsAttention = true
         case .attentionCleared: needsAttention = false
         case .userActivity: idleFor = 0

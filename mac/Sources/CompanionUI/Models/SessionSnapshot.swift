@@ -179,6 +179,9 @@ public struct ChatMessage: Sendable, Equatable, Identifiable {
     public enum Author: String, Sendable {
         case human
         case companion
+        /// The companion reached for a tool while answering. Its own author, because the line
+        /// is a quiet aside and not part of what was said.
+        case tool
         case system
     }
 

@@ -73,6 +73,19 @@ public final class VoiceController {
         }
     }
 
+    /// One sentence of an answer, from the request that asks for it until it has been played.
+    private struct SpokenSentence {
+        /// Names the sentence while the request is still in flight and no id exists yet.
+        let ticket: Int
+        /// Assigned by the daemon in its answer to `tts_speak`, nil until it arrives.
+        var voiceId: VoiceId?
+        /// Audio that arrived before this sentence's turn came.
+        var buffered: [(sequence: UInt32, format: AudioFormat, audio: Data)] = []
+        /// True once `tts_done` said no further piece follows.
+        var isComplete = false
+        var isPlaying = false
+    }
+
     /// One dictation, from the key going down until `voice_end` is on its way.
     private struct Recording {
         /// Assigned by the daemon in its answer to `voice_begin`, nil until it arrives.
@@ -126,6 +139,22 @@ public final class VoiceController {
     /// True once this playback was already cut short, so barge-in happens once and not on
     /// every buffer that follows.
     private var hasBargedIn = false
+    /// Sentences of the answer that have not been asked for yet.
+    private var pendingSentences: [String] = []
+    /// The sentences that are with the daemon: the one being played, and the one being
+    /// prepared behind it.
+    private var spokenSentences: [SpokenSentence] = []
+    private var nextSpeechTicket = 0
+    /// Ids of sentences that were dropped after they had been asked for. The protocol has no
+    /// way to take a `tts_speak` back, so the audio still arrives and is thrown away here —
+    /// the same thing `discarded` does for a dictation.
+    private var abandonedSpeech: Set<VoiceId> = []
+
+    /// How many sentences of an answer may be with the daemon at once: the one being played
+    /// and one being prepared behind it. Without the second, every sentence would begin with
+    /// the whole start-up latency of the endpoint; with more than two, a barge-in would leave
+    /// that much speech already paid for and thrown away.
+    private static let speechLookahead = 2
 
     public init(
         configuration: Configuration = Configuration(),
@@ -172,6 +201,7 @@ public final class VoiceController {
         recording = nil
         discarded.removeAll()
         stopSpeaking()
+        abandonedSpeech.removeAll()
     }
 
     // MARK: - Input paths
@@ -239,6 +269,14 @@ public final class VoiceController {
         case .ttsChunk(let voiceId, let sequence, let format, let audio):
             play(audio, of: voiceId, sequence: sequence, format: format)
         case .ttsDone(let voiceId, _):
+            // A sentence that was given up on is closed here rather than kept for ever.
+            if abandonedSpeech.remove(voiceId) != nil { return }
+            if let index = spokenSentences.firstIndex(where: { $0.voiceId == voiceId }) {
+                spokenSentences[index].isComplete = true
+                guard index == 0, spokenSentences[0].isPlaying else { return }
+                player?.markEndOfSpeech()
+                return
+            }
             guard voiceId == speakingId else { return }
             player?.markEndOfSpeech()
         }
@@ -430,9 +468,152 @@ public final class VoiceController {
         vad.reset()
     }
 
+    // MARK: - Speaking an answer, one sentence at a time
+
+    /// Adds one sentence to the answer the figure is speaking.
+    ///
+    /// `DESIGN.md` section Voice: TTS runs sentence by sentence while the model is still
+    /// writing, so this is called again for every sentence the answer produces. The sentences
+    /// are played in the order they arrive here, whatever order the daemon finishes them in.
+    public func speak(_ sentence: String) {
+        let text = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        // Dropped without a word: the reason was said once when the daemon first refused, and
+        // an answer of eight sentences would otherwise repeat it eight times. That voice is
+        // off is on the microphone button in the panel for as long as it lasts.
+        if case .unavailable = availability { return }
+        pendingSentences.append(text)
+        pumpSpeech()
+    }
+
+    /// Drops what is left of the answer and goes quiet. Barge-in, an explicit press, and a
+    /// new question all end here.
+    public func cancelSpeech() {
+        stopSpeaking()
+    }
+
+    /// True while the figure has an answer to read out, whether a sentence of it is playing
+    /// this instant or the next one is still being made.
+    public var hasSpeechQueued: Bool {
+        !pendingSentences.isEmpty || !spokenSentences.isEmpty
+    }
+
+    /// Asks the daemon for the next sentences, up to the look-ahead.
+    private func pumpSpeech() {
+        while spokenSentences.count < Self.speechLookahead, !pendingSentences.isEmpty {
+            let text = pendingSentences.removeFirst()
+            let ticket = nextSpeechTicket
+            nextSpeechTicket += 1
+            spokenSentences.append(SpokenSentence(ticket: ticket))
+            // No voice name: which voice speaks hangs on the endpoint, the way the language
+            // of a dictation does.
+            send(.ttsSpeak(text: text, voice: nil)) { [weak self] result in
+                self?.speechAnswered(result, ticket: ticket)
+            }
+        }
+    }
+
+    private func speechAnswered(
+        _ result: Result<ResponseBody, VoiceRequestFailure>, ticket: Int
+    ) {
+        guard let index = spokenSentences.firstIndex(where: { $0.ticket == ticket }) else {
+            // The answer was given up on while this request was in flight. The daemon is
+            // speaking into nothing, so what it sends is thrown away rather than played.
+            if case .success(.voiceStream(let voiceId)) = result { abandonedSpeech.insert(voiceId) }
+            if case .failure(let failure) = result { note(failure) }
+            return
+        }
+        switch result {
+        case .success(.voiceStream(let voiceId)):
+            availability = .available
+            spokenSentences[index].voiceId = voiceId
+        case .success(let body):
+            onNotice?("Unerwartete Antwort auf einen gesprochenen Satz: \(body).")
+            spokenSentences.remove(at: index)
+            dropRestOfAnswer()
+        case .failure(let failure):
+            noteSpeech(failure)
+            spokenSentences.remove(at: index)
+            dropRestOfAnswer()
+        }
+    }
+
+    /// The same as `note`, with the one sentence that would otherwise talk about a recording
+    /// when what failed was the speaking.
+    private func noteSpeech(_ failure: VoiceRequestFailure) {
+        guard case .failed(let reason) = failure else { return note(failure) }
+        onNotice?("Der gesprochene Satz kam nicht an: \(reason)")
+    }
+
+    /// One sentence could not be made. What is already playing is finished — a sentence cut
+    /// off mid-word is worse than one that is missing — and the rest of the answer is dropped.
+    /// The reason is already in the panel: `note(...)` put it there.
+    private func dropRestOfAnswer() {
+        pendingSentences.removeAll()
+        for sentence in spokenSentences where !sentence.isPlaying {
+            if let voiceId = sentence.voiceId { abandonedSpeech.insert(voiceId) }
+        }
+        spokenSentences.removeAll { !$0.isPlaying }
+        if spokenSentences.isEmpty, player?.isPlaying != true { endSpeaking() }
+    }
+
+    /// Gives up the whole answer, including the sentence that is playing.
+    private func dropSpeechQueue() {
+        pendingSentences.removeAll()
+        for sentence in spokenSentences {
+            if let voiceId = sentence.voiceId { abandonedSpeech.insert(voiceId) }
+        }
+        spokenSentences.removeAll()
+    }
+
+    /// Starts the sentence at the head of the queue, once it has audio and nothing else is
+    /// playing. Returns true when playback started.
+    @discardableResult
+    private func startNextSentence() -> Bool {
+        guard player?.isPlaying != true else { return false }
+        guard let head = spokenSentences.first, !head.isPlaying, !head.buffered.isEmpty,
+              let voiceId = head.voiceId
+        else { return false }
+        spokenSentences[0].isPlaying = true
+        spokenSentences[0].buffered = []
+        for piece in head.buffered {
+            enqueueSpeech(piece.audio, of: voiceId, sequence: piece.sequence, format: piece.format)
+        }
+        // The whole sentence was already here before its turn came.
+        if spokenSentences.first?.isComplete == true { player?.markEndOfSpeech() }
+        return true
+    }
+
     // MARK: - Playback
 
+    /// Routes one piece of audio: to the player when it belongs to the sentence that is
+    /// playing, into the queue entry of its own sentence when it does not.
     private func play(_ audio: Data, of voiceId: VoiceId, sequence: UInt32, format: AudioFormat) {
+        // A sentence that was given up on after it was asked for still arrives, and is not
+        // played.
+        guard !abandonedSpeech.contains(voiceId) else { return }
+
+        if let index = spokenSentences.firstIndex(where: { $0.voiceId == voiceId }) {
+            if index == 0, spokenSentences[0].isPlaying {
+                enqueueSpeech(audio, of: voiceId, sequence: sequence, format: format)
+            } else {
+                // Not its turn yet. Held rather than played, so the sentences of one answer
+                // come out in the order they were written and not in the order the endpoint
+                // happened to finish them.
+                spokenSentences[index].buffered.append((sequence, format, audio))
+                startNextSentence()
+            }
+            return
+        }
+
+        // Audio for no sentence of ours: a daemon that speaks without being asked. Played as
+        // it arrives, which is what this did before there was a queue at all.
+        enqueueSpeech(audio, of: voiceId, sequence: sequence, format: format)
+    }
+
+    private func enqueueSpeech(
+        _ audio: Data, of voiceId: VoiceId, sequence: UInt32, format: AudioFormat
+    ) {
         let sink = player ?? playerFactory()
         if player == nil {
             sink.onFinished = { [weak self] in self?.playbackFinished() }
@@ -480,14 +661,33 @@ public final class VoiceController {
         }
     }
 
-    /// Stops the figure mid-sentence. Used by barge-in and by an explicit press.
+    /// Stops the figure mid-sentence and drops the rest of the answer. Used by barge-in and by
+    /// an explicit press.
     private func stopSpeaking() {
+        dropSpeechQueue()
         guard isSpeaking else { return }
-        // `stop()` reports finished, which lowers the flag and the figure state.
-        player?.stop()
+        if player?.isPlaying == true {
+            // `stop()` reports finished, which lowers the flag and the figure state.
+            player?.stop()
+        } else {
+            // Between two sentences nothing is playing, and no player will report a finish.
+            endSpeaking()
+        }
     }
 
     private func playbackFinished() {
+        guard isSpeaking else { return }
+        if spokenSentences.first?.isPlaying == true { spokenSentences.removeFirst() }
+        // A finished sentence frees a place for the one after next.
+        pumpSpeech()
+        if startNextSentence() { return }
+        // The answer is not over while a sentence of it is still being made: the figure keeps
+        // speaking rather than falling silent between two sentences.
+        if hasSpeechQueued { return }
+        endSpeaking()
+    }
+
+    private func endSpeaking() {
         guard isSpeaking else { return }
         isSpeaking = false
         speakingId = nil

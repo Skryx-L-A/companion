@@ -77,6 +77,11 @@ struct ShellSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Toggle("Gesprochenes sofort senden", isOn: $settings.sendVoiceAutomatically)
+                Text("Was du sagst, geht als Frage an den Companion, sobald du fertig bist. Ausgeschaltet landet es im Eingabefeld und du schickst es selbst ab.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 Toggle("Mikrofon stumm, solange er spricht", isOn: $settings.halfDuplexWhileSpeaking)
                 Text("Halbduplex. Dann laesst sich der Companion nicht mitten im Satz unterbrechen, dafuer hoert er sich nie selbst. Ohne Echokompensation schaltet er von allein darauf.")
                     .font(.caption)

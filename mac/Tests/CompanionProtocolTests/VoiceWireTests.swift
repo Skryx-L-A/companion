@@ -169,10 +169,11 @@ final class VoiceEventWireTests: XCTestCase {
         }
     }
 
-    /// The four voice kinds are part of the seventeen the protocol has, and the shell knows
-    /// each of them by its own name.
-    func testTheFourVoiceKindsAreAmongTheSeventeen() {
-        XCTAssertEqual(EventKind.allCases.count, 17)
+    /// The four voice kinds are part of the twenty the shell knows — thirteen from the
+    /// adapters and the bus, four from the voice pipeline, three from the conversation with
+    /// the companion — and each of them has its own name.
+    func testTheFourVoiceKindsAreAmongTheTwenty() {
+        XCTAssertEqual(EventKind.allCases.count, 20)
         for kind in VoiceEventKind.allCases {
             let matching = EventKind(rawValue: kind.rawValue)
             XCTAssertNotNil(matching, "\(kind.rawValue) is missing from EventKind")

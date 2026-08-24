@@ -386,9 +386,12 @@ final class VoiceHarness {
             guard let self else { return completion(.failure(.notConnected)) }
             self.sent.append(request)
             let answer: Result<ResponseBody, VoiceRequestFailure>
-            if case .voiceBegin = request {
+            switch request {
+            // Both of these open a stream and are answered with its id: a dictation going in,
+            // a spoken sentence coming back.
+            case .voiceBegin, .ttsSpeak:
                 answer = .success(.voiceStream(voiceId: self.ids.next()))
-            } else {
+            default:
                 answer = .success(.ack)
             }
             if self.answersAtOnce {
@@ -892,6 +895,166 @@ final class VoiceControllerTests: XCTestCase {
         XCTAssertFalse(harness.controller.isCapturing)
         XCTAssertEqual(harness.controller.availability, .untested)
         XCTAssertTrue(harness.notices.isEmpty)
+    }
+}
+
+// MARK: - Speaking a whole answer
+
+/// The queue that speaks one answer sentence by sentence.
+///
+/// `DESIGN.md` section Voice: TTS runs while the model is still writing, so the sentences are
+/// asked for one at a time. What this has to get right is the order — the endpoint may well
+/// finish the second sentence before the first — and what happens to the rest of an answer
+/// when somebody interrupts it.
+@MainActor
+final class SpokenAnswerTests: XCTestCase {
+    private func audio(_ byte: UInt8) -> Data { Data([byte, byte, byte, byte]) }
+
+    private func chunk(_ voiceId: VoiceId, _ byte: UInt8, sequence: UInt32 = 0) -> VoiceEvent {
+        .ttsChunk(voiceId: voiceId, sequence: sequence, format: .wav, audio: audio(byte))
+    }
+
+    /// One sentence is played while the next is being made, and no more than that: a third
+    /// would only be speech already paid for when somebody interrupts.
+    func testTheNextSentenceIsAskedForWhileTheFirstOneIsPlaying() {
+        let harness = VoiceHarness()
+        harness.controller.speak("Der Zweig ist gebaut.")
+        harness.controller.speak("Die Tests sind gruen.")
+        harness.controller.speak("Gepusht habe ich nichts.")
+        XCTAssertEqual(harness.requestNames, ["tts_speak", "tts_speak"], "one ahead, not all three")
+
+        harness.controller.handle(chunk("voice-1", 1))
+        XCTAssertEqual(harness.player.pieces, [audio(1)])
+        XCTAssertEqual(harness.figureEvents, [.speechStarted])
+
+        // The second sentence is finished first. It waits, because the answer has an order.
+        harness.controller.handle(chunk("voice-2", 2))
+        harness.controller.handle(.ttsDone(voiceId: "voice-2", endpoint: nil))
+        XCTAssertEqual(harness.player.pieces, [audio(1)], "the second sentence waits its turn")
+
+        harness.controller.handle(.ttsDone(voiceId: "voice-1", endpoint: nil))
+        XCTAssertTrue(harness.player.endMarked)
+        harness.player.playedOut()
+
+        XCTAssertEqual(harness.player.pieces, [audio(1), audio(2)], "and then it is played")
+        XCTAssertEqual(harness.player.answers, [.wav, .wav], "every sentence is its own stream")
+        XCTAssertEqual(harness.requestNames.count, 3, "the third is asked for now")
+        XCTAssertEqual(harness.figureEvents, [.speechStarted], "it is one figure speaking")
+    }
+
+    /// The whole answer is one speaking figure. Falling silent between two sentences would
+    /// make the figure flicker at every full stop.
+    func testTheFigureSpeaksUntilTheLastSentenceIsPlayedOut() {
+        let harness = VoiceHarness()
+        harness.controller.speak("Der Zweig ist gebaut.")
+        harness.controller.speak("Die Tests sind gruen.")
+        harness.controller.handle(chunk("voice-1", 1))
+        harness.controller.handle(.ttsDone(voiceId: "voice-1", endpoint: nil))
+        harness.player.playedOut()
+
+        // Nothing is playing: the audio of the second sentence has not arrived yet.
+        XCTAssertTrue(harness.controller.phase.isSpeaking)
+        XCTAssertEqual(harness.figureEvents, [.speechStarted])
+
+        harness.controller.handle(chunk("voice-2", 2))
+        harness.controller.handle(.ttsDone(voiceId: "voice-2", endpoint: nil))
+        harness.player.playedOut()
+        XCTAssertFalse(harness.controller.phase.isSpeaking)
+        XCTAssertEqual(harness.figureEvents, [.speechStarted, .speechFinished])
+        XCTAssertFalse(harness.controller.hasSpeechQueued)
+    }
+
+    /// Barge-in ends the answer, not only the sentence. Audio of the sentences that were
+    /// already asked for still arrives and is thrown away.
+    func testBargeInDropsTheRestOfTheAnswer() {
+        let harness = VoiceHarness()
+        harness.controller.beginCapture()
+        harness.controller.speak("Der Zweig ist gebaut.")
+        harness.controller.speak("Die Tests sind gruen.")
+        harness.controller.handle(chunk("voice-2", 2))
+        XCTAssertTrue(harness.controller.phase.isSpeaking)
+
+        harness.capture.deliver(SyntheticAudio.sine(seconds: 0.5))
+        XCTAssertEqual(harness.player.stopCount, 1)
+        XCTAssertFalse(harness.controller.phase.isSpeaking)
+        XCTAssertFalse(harness.controller.hasSpeechQueued)
+
+        harness.controller.handle(chunk("voice-3", 3))
+        XCTAssertEqual(harness.player.pieces, [audio(2)], "what was cut off is not played after all")
+    }
+
+    /// An explicit press is the same interruption, and it works before a single piece of audio
+    /// has arrived.
+    func testAPressBeforeTheFirstWordDropsTheAnswer() {
+        let harness = VoiceHarness()
+        harness.controller.speak("Der Zweig ist gebaut.")
+        harness.controller.beginCapture()
+        XCTAssertFalse(harness.controller.hasSpeechQueued)
+        harness.controller.handle(chunk("voice-1", 1))
+        XCTAssertTrue(harness.player.pieces.isEmpty)
+        XCTAssertFalse(harness.controller.phase.isSpeaking)
+    }
+
+    /// `DESIGN.md` section Voice: an endpoint that fails mid-answer finishes the sentence that
+    /// is running and says so. The rest of the answer is dropped rather than half-spoken.
+    func testASentenceThatCannotBeMadeLeavesTheOnePlayingAlone() {
+        let harness = VoiceHarness()
+        harness.answersAtOnce = false
+        harness.controller.speak("Der Zweig ist gebaut.")
+        harness.controller.speak("Die Tests sind gruen.")
+        harness.answer("tts_speak")
+        harness.controller.handle(chunk("voice-1", 1))
+        XCTAssertTrue(harness.controller.phase.isSpeaking)
+
+        harness.answer("tts_speak", with: .failure(.failed("Endpoint weg")))
+        XCTAssertEqual(harness.notices.count, 1)
+        XCTAssertTrue(harness.notices[0].contains("Endpoint weg"))
+        XCTAssertTrue(harness.controller.phase.isSpeaking, "the sentence that runs is finished")
+
+        harness.controller.handle(.ttsDone(voiceId: "voice-1", endpoint: nil))
+        harness.player.playedOut()
+        XCTAssertFalse(harness.controller.phase.isSpeaking)
+    }
+
+    /// A daemon without a speech endpoint is asked once, not once per sentence.
+    func testADaemonThatCannotSpeakIsNotAskedAgain() {
+        let harness = VoiceHarness()
+        harness.answersAtOnce = false
+        harness.controller.speak("Der Zweig ist gebaut.")
+        harness.answer("tts_speak", with: .failure(.notSupported("no endpoint for role tts")))
+        XCTAssertEqual(harness.controller.availability, .unavailable(
+            AudioFailure.daemonWithoutVoice("no endpoint for role tts").message))
+
+        harness.controller.speak("Die Tests sind gruen.")
+        XCTAssertEqual(harness.requestNames, ["tts_speak"], "the second sentence is not sent")
+        XCTAssertEqual(
+            harness.notices.count, 1,
+            "and the reason is said once, not once per sentence of the answer")
+    }
+
+    /// Audio for a stream nobody queued is still played: a daemon may speak without being
+    /// asked, and that is what the shell did before there was a queue at all.
+    func testAudioForNoQueuedSentenceIsStillPlayed() {
+        let harness = VoiceHarness()
+        harness.controller.handle(chunk("voice-9", 9))
+        XCTAssertEqual(harness.player.pieces, [audio(9)])
+        XCTAssertTrue(harness.controller.phase.isSpeaking)
+    }
+
+    func testAnEmptySentenceIsNotSpoken() {
+        let harness = VoiceHarness()
+        harness.controller.speak("   \n ")
+        XCTAssertTrue(harness.requestNames.isEmpty)
+        XCTAssertFalse(harness.controller.hasSpeechQueued)
+    }
+
+    func testShuttingDownDropsTheAnswerToo() {
+        let harness = VoiceHarness()
+        harness.controller.speak("Der Zweig ist gebaut.")
+        harness.controller.handle(chunk("voice-1", 1))
+        harness.controller.shutDown()
+        XCTAssertFalse(harness.controller.hasSpeechQueued)
+        XCTAssertFalse(harness.controller.phase.isSpeaking)
     }
 }
 

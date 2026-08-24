@@ -13,7 +13,13 @@ import XCTest
 final class SchemaTests: XCTestCase {
     func testEveryEventKindOfTheSchemaHasACase() throws {
         let names = try enumValues(in: "server_message.json", definition: "EventKind")
-        XCTAssertEqual(names, Set(EventKind.allCases.map(\.rawValue)))
+        // The three chat kinds are not in the schema yet: the conversation with the companion
+        // is being built on the core side while this shell builds its half, and the schema is
+        // generated from the Rust types. They are held against hand-written lines in
+        // `ChatEventWireTests` until then, and this filter goes when the schema has them —
+        // which this very test will report, because the sets stop matching.
+        let fromTheSchema = EventKind.allCases.filter { !$0.isChat }
+        XCTAssertEqual(names, Set(fromTheSchema.map(\.rawValue)))
     }
 
     func testEveryStatusFieldOfTheSchemaHasACase() throws {

@@ -24,6 +24,7 @@ public final class AppSettings {
         static let pushToTalkHotkey = "voice.pushToTalkHotkey"
         static let halfDuplex = "voice.halfDuplex"
         static let wakeword = "voice.wakeword"
+        static let autoSend = "voice.autoSend"
     }
 
     public var corner: ScreenCorner {
@@ -86,6 +87,16 @@ public final class AppSettings {
         didSet { defaults.set(wakeword, forKey: Key.wakeword) }
     }
 
+    /// A finished dictation goes to the companion by itself instead of landing in the input
+    /// field.
+    ///
+    /// On by default, because a spoken question that then has to be sent with the mouse is
+    /// not a conversation. Switched off it fills the field the way it did before, which is
+    /// what somebody dictating into a room with other people in it wants.
+    public var sendVoiceAutomatically: Bool {
+        didSet { defaults.set(sendVoiceAutomatically, forKey: Key.autoSend) }
+    }
+
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let storedCorner = defaults.string(forKey: Key.corner).flatMap(ScreenCorner.init(rawValue:))
@@ -106,5 +117,9 @@ public final class AppSettings {
             .flatMap(HotkeyCombination.init(settingsValue:)) ?? .pushToTalkDefault
         halfDuplexWhileSpeaking = defaults.bool(forKey: Key.halfDuplex)
         wakeword = defaults.string(forKey: Key.wakeword) ?? "Companion"
+        // Read through `object(forKey:)`, because `bool(forKey:)` cannot tell a stored false
+        // from a setting nobody has ever touched, and this one is on unless it was switched
+        // off.
+        sendVoiceAutomatically = defaults.object(forKey: Key.autoSend) as? Bool ?? true
     }
 }

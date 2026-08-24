@@ -33,6 +33,9 @@ public final class OverlayController {
     public var onNewAuftrag: (() -> Void)?
     /// Starts or ends a recording. Set by the shell, which owns the voice pipeline.
     public var onToggleVoice: (() -> Void)?
+    /// Opens the settings window. Set by the shell, which owns that window; nil leaves the
+    /// notice in the chat panel without its link rather than with a dead one.
+    public var onOpenSettings: (() -> Void)?
 
     public init(settings: AppSettings, spriteFolder: URL? = SpriteSet.defaultFolder) {
         self.settings = settings

@@ -6,12 +6,16 @@ import SwiftUI
 /// The session list: what is running, what it is doing, and what nobody knows.
 ///
 /// A row is a button, so it is reachable with the keyboard and reads as one to VoiceOver.
-/// Picking a row is what decides where the chat panel sends.
+/// Picking a row is what decides which session the field at the bottom writes to. That field
+/// is the only way a line reaches one session now; the chat panel is the conversation with the
+/// companion.
 struct SessionListView: View {
     let model: OverlayModel
     var onSelect: (SessionId) -> Void = { _ in }
     var actions: SessionActions = .inert
     let onClose: () -> Void
+
+    @State private var draft: String = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -20,6 +24,10 @@ struct SessionListView: View {
             }
             Divider()
             content
+            if model.isDaemonReady, !model.sessions.isEmpty {
+                Divider()
+                compose
+            }
         }
         .panelChrome()
         .accessibilityElement(children: .contain)
@@ -64,6 +72,41 @@ struct SessionListView: View {
                 }
             }
         }
+    }
+
+    /// Text for the session that is picked. The field says which one that is, because a line
+    /// that goes to the wrong session cannot be taken back.
+    private var compose: some View {
+        HStack(spacing: 8) {
+            TextField(placeholder, text: $draft, axis: .vertical)
+                .textFieldStyle(.plain)
+                .lineLimit(1...3)
+                .onSubmit(send)
+                .disabled(model.selectedSession == nil)
+                .accessibilityLabel(
+                    model.selectedSession.map { "Nachricht an \($0.title)" }
+                        ?? "Erst eine Session waehlen")
+            PanelIconButton(symbol: "arrow.up.circle.fill", label: "An die Session senden", action: send)
+                .disabled(model.selectedSession == nil || isDraftEmpty)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private var placeholder: String {
+        guard let session = model.selectedSession else { return "Erst eine Session waehlen" }
+        return "An \(session.title)"
+    }
+
+    private var isDraftEmpty: Bool {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func send() {
+        guard let session = model.selectedSession, !isDraftEmpty else { return }
+        let text = draft
+        draft = ""
+        actions.send(session.id, text)
     }
 }
 

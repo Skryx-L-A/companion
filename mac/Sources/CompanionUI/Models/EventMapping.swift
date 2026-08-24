@@ -65,8 +65,9 @@ public enum EventMapping {
             return "Zwischen Adapter und Bus sind \(missed) Ereignisse verloren gegangen. Die Liste wird neu gelesen."
         // Speech has its own place in the panel: the transcript line while it is being heard,
         // the input field once it is recognised. A chat line for every partial would push the
-        // history away under a sentence that is still being said.
-        case .busy, .idle, .contextLevel, .budgetLevel, .iteration, .voice, .unrecognised:
+        // history away under a sentence that is still being said. The companion's own answer
+        // is written by `ChatController`, which has to assemble it out of its pieces first.
+        case .busy, .idle, .contextLevel, .budgetLevel, .iteration, .voice, .chat, .unrecognised:
             return nil
         }
     }

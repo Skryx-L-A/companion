@@ -371,6 +371,47 @@ final class PreviewRenderTests: XCTestCase {
         try render(view, size: CGSize(width: 388, height: 428), to: "chat-panel-no-voice.png")
     }
 
+    /// An answer being written: the bubble the deltas fill, the quiet tool line in the middle
+    /// of it, and the second half underneath. The tool line has to read as an aside and never
+    /// as the answer.
+    func testRendersChatPanelWithAnAnswerAndATool() throws {
+        let model = OverlayModel()
+        model.isDaemonReady = true
+        model.messages = [
+            ChatMessage(author: .human, text: "Wie steht es um den Zweig mac-loop?"),
+            ChatMessage(author: .companion, text: "Ich sehe kurz nach."),
+            ChatMessage(author: .tool, text: "list: drei Sessions gelesen"),
+            ChatMessage(author: .companion, text: "Zwei Sessions laufen, eine wartet auf eine Antwort."),
+        ]
+        let view = ChatPanelView(
+            model: model, onSubmit: { _ in }, onToggleSessionList: {}, onClose: {})
+            .frame(width: OverlayLayout.panelWidth, height: OverlayLayout.chatHeight)
+            .padding(24)
+            .background(Color(nsColor: .underPageBackgroundColor))
+        try render(view, size: CGSize(width: 388, height: 428), to: "chat-panel-answer.png")
+    }
+
+    /// A daemon with no chat model. The notice sits above the input with the way to the place
+    /// where it is fixed, because a panel that only stays quiet gets typed into twice.
+    func testRendersChatPanelWithoutAChatModel() throws {
+        let model = OverlayModel()
+        model.isDaemonReady = true
+        model.chatUnavailableReason = ChatController.missingChatModelShort
+        model.messages = [
+            ChatMessage(author: .human, text: "Was laeuft gerade?"),
+            ChatMessage(
+                author: .system,
+                text: ChatController.missingChatModel("no endpoint for role chat")),
+        ]
+        let view = ChatPanelView(
+            model: model, onSubmit: { _ in }, onOpenSettings: {},
+            onToggleSessionList: {}, onClose: {})
+            .frame(width: OverlayLayout.panelWidth, height: OverlayLayout.chatHeight)
+            .padding(24)
+            .background(Color(nsColor: .underPageBackgroundColor))
+        try render(view, size: CGSize(width: 388, height: 428), to: "chat-panel-no-model.png")
+    }
+
     /// The settings page, in both appearances, because that is where a hardwired colour or a
     /// line of text that does not wrap would show first.
     func testRendersVoiceSettings() throws {
@@ -393,7 +434,7 @@ final class PreviewRenderTests: XCTestCase {
                 voiceStatus: "kann Sprache")
                 .padding(20)
                 .background(Color(nsColor: .windowBackgroundColor))
-            try render(view, size: CGSize(width: 540, height: 1180), to: name, appearance: appearance)
+            try render(view, size: CGSize(width: 540, height: 1320), to: name, appearance: appearance)
         }
     }
 
