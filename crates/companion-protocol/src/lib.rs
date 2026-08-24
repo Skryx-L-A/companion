@@ -13,6 +13,7 @@
 
 mod auftrag;
 mod capabilities;
+mod endpoint;
 mod event;
 mod ids;
 mod message;
@@ -23,21 +24,26 @@ mod session;
 
 pub use auftrag::{Approval, Auftrag, GateCommand, Limits, LoopType, Reference};
 pub use capabilities::{AdapterCapabilities, CommandKind, StatusField};
+pub use endpoint::{AudioFormat, EndpointHealth, EndpointProtocol, EndpointRole};
 pub use event::{EndReason, Event, EventEnvelope, EventKind};
-pub use ids::{AdapterId, AuftragId, SessionId};
+pub use ids::{AdapterId, AuftragId, SessionId, VoiceId};
 pub use message::{
-    ClientMessage, DEFAULT_DONE_LIMIT, ErrorCode, Hello, ProtocolError, ReadWindow, Request,
-    RequestEnvelope, RequestId, RequestKind, Response, ResponseBody, ResponseResult, SendOutcome,
-    ServerMessage, SpawnRequest, UNSOLICITED_REQUEST_ID, Welcome,
+    ClientMessage, DEFAULT_DONE_LIMIT, DEFAULT_SAMPLE_RATE_HZ, ErrorCode, Hello, ProtocolError,
+    ReadWindow, Request, RequestEnvelope, RequestId, RequestKind, Response, ResponseBody,
+    ResponseResult, SendOutcome, ServerMessage, SpawnRequest, UNSOLICITED_REQUEST_ID, Welcome,
 };
 pub use provenance::{Origin, Provenance};
 pub use registry::{Cost, RegistryEntry, SelfAnswer};
 pub use role::ClientRole;
 pub use session::{BudgetUsage, ContextUsage, SessionState, SessionStatus};
 
-/// Version of the wire protocol. Bumped whenever a change would make an older shell
-/// misread a message; daemon and shell compare it during the handshake and refuse to
-/// talk on a mismatch.
+/// Version of the wire protocol.
+///
+/// It rises only when a change reinterprets or removes something that already existed;
+/// new events, new fields and new requests leave it where it is (`DESIGN.md`
+/// § Architektur, Protokoll-Kompatibilität). The voice events and requests of phase 1b are
+/// such an addition, which is why this is still 1: a shell that predates them keeps
+/// working and simply never asks for a dictation.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Version of the on-disk job file schema (`.companion/auftraege/<id>.json`).

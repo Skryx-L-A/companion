@@ -88,7 +88,11 @@
         "budget_level",
         "iteration",
         "error",
-        "events_dropped"
+        "events_dropped",
+        "stt_partial",
+        "stt_final",
+        "tts_chunk",
+        "tts_done"
       ]
     },
     "StatusField": {

@@ -265,6 +265,43 @@
           ]
         },
         {
+          "description": "A voice stream was opened. Every event about it carries this id.",
+          "type": "object",
+          "properties": {
+            "voice_id": {
+              "$ref": "#/$defs/VoiceId"
+            },
+            "body": {
+              "type": "string",
+              "const": "voice_stream"
+            }
+          },
+          "required": [
+            "body",
+            "voice_id"
+          ]
+        },
+        {
+          "description": "What the latency probe found, one entry per profile it measured.",
+          "type": "object",
+          "properties": {
+            "endpoints": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/EndpointHealth"
+              }
+            },
+            "body": {
+              "type": "string",
+              "const": "endpoints"
+            }
+          },
+          "required": [
+            "body",
+            "endpoints"
+          ]
+        },
+        {
           "description": "The request was carried out and has nothing to return.",
           "type": "object",
           "properties": {
@@ -799,7 +836,11 @@
         "budget_level",
         "iteration",
         "error",
-        "events_dropped"
+        "events_dropped",
+        "stt_partial",
+        "stt_final",
+        "tts_chunk",
+        "tts_done"
       ]
     },
     "StatusField": {
@@ -1059,6 +1100,81 @@
         "text_sha256"
       ]
     },
+    "VoiceId": {
+      "description": "Identifies one dictation or one spoken answer. Assigned by the daemon, so a client cannot address a stream that is not its own.",
+      "type": "string"
+    },
+    "EndpointHealth": {
+      "description": "What one latency probe found.\n\n`DESIGN.md` § Endpoints uses the measurement to order the STT and TTS endpoints during\nsetup, and repeats it when an endpoint failed twice in a row. The latency is a\n[`Provenance`] value rather than a number, because an endpoint that did not answer has\nno latency: `Unknown` is the honest answer there, and there is no zero to mistake for a\nfast reply.",
+      "type": "object",
+      "properties": {
+        "profile": {
+          "description": "Name of the profile that was probed.",
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/EndpointProtocol"
+        },
+        "reachable": {
+          "description": "Whether the probe reached the endpoint at all.",
+          "type": "boolean"
+        },
+        "latency_ms": {
+          "description": "Round trip of the probe in milliseconds.",
+          "$ref": "#/$defs/Provenance2"
+        },
+        "checked_at_ms": {
+          "description": "Unix time in milliseconds when the probe ran.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "detail": {
+          "description": "What happened, for the settings page. Never carries a key.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "profile",
+        "protocol",
+        "reachable",
+        "latency_ms",
+        "checked_at_ms"
+      ]
+    },
+    "EndpointProtocol": {
+      "description": "How the daemon talks to an endpoint.\n\n`DESIGN.md` § Endpoints separates two execution models: an API profile, where the\ndaemon speaks the interface itself and can stream, and a CLI profile, where it drives\n`claude -p` or `codex exec` and uses the subscription without a key. [`Self::Cli`] is\nthat second model; every other variant is the first.",
+      "oneOf": [
+        {
+          "description": "The OpenAI HTTP shape: `/v1/chat/completions`, `/v1/audio/transcriptions`,\n`/v1/audio/speech`. What most local servers and most providers speak.",
+          "type": "string",
+          "const": "openai_compat"
+        },
+        {
+          "description": "The Anthropic Messages API.",
+          "type": "string",
+          "const": "anthropic"
+        },
+        {
+          "description": "Ollama's own API under `/api`.",
+          "type": "string",
+          "const": "ollama"
+        },
+        {
+          "description": "A `whisper.cpp` server: `/inference` with a multipart upload, plain text back.",
+          "type": "string",
+          "const": "whisper_server"
+        },
+        {
+          "description": "A local program the daemon starts, no HTTP and no key.",
+          "type": "string",
+          "const": "cli"
+        }
+      ]
+    },
     "ProtocolError": {
       "description": "An error with a message that is safe to show.",
       "type": "object",
@@ -1167,7 +1283,7 @@
       ]
     },
     "Event": {
-      "description": "Everything an adapter can report about a session.\n\nThe variant list is the event list from `DESIGN.md` § Session-Adapter, in that order.",
+      "description": "Everything an adapter can report about a session, plus what the voice pipeline reports\nabout a dictation or a spoken answer.\n\nThe first thirteen variants are the event list from `DESIGN.md` § Session-Adapter, in\nthat order. The four voice events after them were added in phase 1b and belong to no\nsession: they carry a [`VoiceId`] instead, and their envelope has no session id. They\nare additive, so they do not raise [`crate::PROTOCOL_VERSION`] — `DESIGN.md`\n§ Architektur, Protokoll-Kompatibilität: a client that does not know them ignores them\nand counts them.",
       "oneOf": [
         {
           "type": "object",
@@ -1431,6 +1547,111 @@
             "event",
             "missed"
           ]
+        },
+        {
+          "description": "Text recognised so far, while the person is still speaking. Replaces whatever the\nlast partial of the same dictation said; it is never appended to it.",
+          "type": "object",
+          "properties": {
+            "voice_id": {
+              "$ref": "#/$defs/VoiceId"
+            },
+            "text": {
+              "type": "string"
+            },
+            "event": {
+              "type": "string",
+              "const": "stt_partial"
+            }
+          },
+          "required": [
+            "event",
+            "voice_id",
+            "text"
+          ]
+        },
+        {
+          "description": "The finished transcript of one dictation. Exactly one per dictation that succeeded.",
+          "type": "object",
+          "properties": {
+            "voice_id": {
+              "$ref": "#/$defs/VoiceId"
+            },
+            "text": {
+              "type": "string"
+            },
+            "endpoint": {
+              "description": "Profile that answered. Visible so a fallback is a fact on the stream and not\nonly a line in the log.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "event": {
+              "type": "string",
+              "const": "stt_final"
+            }
+          },
+          "required": [
+            "event",
+            "voice_id",
+            "text"
+          ]
+        },
+        {
+          "description": "One piece of spoken audio, in the order it has to be played.",
+          "type": "object",
+          "properties": {
+            "voice_id": {
+              "$ref": "#/$defs/VoiceId"
+            },
+            "sequence": {
+              "description": "Counts from zero within one spoken answer, so a client can tell a reordering\nfrom a gap.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "format": {
+              "$ref": "#/$defs/AudioFormat"
+            },
+            "audio_base64": {
+              "description": "The audio bytes, base64 encoded. Only the first chunk of a `wav` or `aiff`\nstream carries the container header; the rest continue it.",
+              "type": "string"
+            },
+            "event": {
+              "type": "string",
+              "const": "tts_chunk"
+            }
+          },
+          "required": [
+            "event",
+            "voice_id",
+            "sequence",
+            "format",
+            "audio_base64"
+          ]
+        },
+        {
+          "description": "The spoken answer is complete. No further chunk of this id follows.",
+          "type": "object",
+          "properties": {
+            "voice_id": {
+              "$ref": "#/$defs/VoiceId"
+            },
+            "endpoint": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "event": {
+              "type": "string",
+              "const": "tts_done"
+            }
+          },
+          "required": [
+            "event",
+            "voice_id"
+          ]
         }
       ]
     },
@@ -1456,6 +1677,27 @@
           "description": "The adapter no longer sees the session and cannot say why it went away.",
           "type": "string",
           "const": "lost"
+        }
+      ]
+    },
+    "AudioFormat": {
+      "description": "Container format of one piece of audio on the wire.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "mp3"
+          ]
+        },
+        {
+          "description": "RIFF/WAVE with little-endian PCM16 samples.",
+          "type": "string",
+          "const": "wav"
+        },
+        {
+          "description": "Apple AIFF, which is what `say -o` writes.",
+          "type": "string",
+          "const": "aiff"
         }
       ]
     },

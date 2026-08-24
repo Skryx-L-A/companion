@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::auftrag::Auftrag;
 use crate::capabilities::AdapterCapabilities;
+use crate::endpoint::{EndpointHealth, EndpointRole};
 use crate::event::EventEnvelope;
-use crate::ids::{AdapterId, AuftragId, SessionId};
+use crate::ids::{AdapterId, AuftragId, SessionId, VoiceId};
 use crate::role::ClientRole;
 use crate::session::SessionStatus;
 
@@ -24,8 +25,20 @@ pub const UNSOLICITED_REQUEST_ID: RequestId = 0;
 /// How many finished sessions a listing carries when the client does not say.
 pub const DEFAULT_DONE_LIMIT: u32 = 20;
 
+/// Sample rate a dictation is assumed to use when the client does not say. What every STT
+/// model in reach wants, and what the shells record at.
+pub const DEFAULT_SAMPLE_RATE_HZ: u32 = 16_000;
+
 fn default_done_limit() -> u32 {
     DEFAULT_DONE_LIMIT
+}
+
+fn default_sample_rate() -> u32 {
+    DEFAULT_SAMPLE_RATE_HZ
+}
+
+fn default_channels() -> u16 {
+    1
 }
 
 /// First message of every connection.
@@ -191,6 +204,48 @@ pub enum Request {
         message: String,
         result_path: Option<String>,
     },
+    /// Opens one dictation. The daemon answers with the id every chunk of it carries.
+    ///
+    /// There is no voice activity detection behind this: the shell decides where an
+    /// utterance begins and ends, the daemon transcribes what it is given. That keeps the
+    /// endpointing next to the microphone, where the audio and the barge-in state are.
+    VoiceBegin {
+        #[serde(default = "default_sample_rate")]
+        sample_rate_hz: u32,
+        #[serde(default = "default_channels")]
+        channels: u16,
+        /// Language hint for the endpoint. Absent means the endpoint decides, which is
+        /// what `DESIGN.md` § Voice wants: the language hangs on the model, not on the app.
+        #[serde(default)]
+        language: Option<String>,
+    },
+    /// One piece of recorded audio: little-endian PCM16 samples, base64 encoded.
+    VoiceChunk {
+        voice_id: VoiceId,
+        pcm16_base64: String,
+    },
+    /// Ends the dictation. The transcript arrives as an `stt_final` event, not in the
+    /// response: a client that waits for the answer to this request would block for as
+    /// long as the endpoint takes.
+    VoiceEnd {
+        voice_id: VoiceId,
+    },
+    /// Speaks a text. The audio arrives as `tts_chunk` events, the end as `tts_done`.
+    ///
+    /// Splitting an answer into sentences happens above this: here one call is one piece
+    /// of text, and the caller decides how much of it to hand over at a time.
+    TtsSpeak {
+        text: String,
+        /// Voice name to pass to the endpoint, when it has more than one.
+        #[serde(default)]
+        voice: Option<String>,
+    },
+    /// Measures the configured endpoints and returns what the probe found.
+    ProbeEndpoints {
+        /// Only the profiles of one role, or every configured profile when absent.
+        #[serde(default)]
+        role: Option<EndpointRole>,
+    },
 }
 
 /// The name of a request without its payload, which is what the role check works on.
@@ -212,6 +267,11 @@ pub enum RequestKind {
     ReportStatus,
     AskQuestion,
     Report,
+    VoiceBegin,
+    VoiceChunk,
+    VoiceEnd,
+    TtsSpeak,
+    ProbeEndpoints,
 }
 
 impl Request {
@@ -239,6 +299,11 @@ impl Request {
             Self::ReportStatus { .. } => RequestKind::ReportStatus,
             Self::AskQuestion { .. } => RequestKind::AskQuestion,
             Self::Report { .. } => RequestKind::Report,
+            Self::VoiceBegin { .. } => RequestKind::VoiceBegin,
+            Self::VoiceChunk { .. } => RequestKind::VoiceChunk,
+            Self::VoiceEnd { .. } => RequestKind::VoiceEnd,
+            Self::TtsSpeak { .. } => RequestKind::TtsSpeak,
+            Self::ProbeEndpoints { .. } => RequestKind::ProbeEndpoints,
         }
     }
 }
@@ -320,6 +385,14 @@ pub enum ResponseBody {
         path: String,
         /// The gate commands as they will be shown for approval, quoted.
         gate_display: Vec<String>,
+    },
+    /// A voice stream was opened. Every event about it carries this id.
+    VoiceStream {
+        voice_id: VoiceId,
+    },
+    /// What the latency probe found, one entry per profile it measured.
+    Endpoints {
+        endpoints: Vec<EndpointHealth>,
     },
     /// The request was carried out and has nothing to return.
     Ack,

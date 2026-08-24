@@ -12,8 +12,10 @@ pub mod adapter;
 pub mod auftrag;
 pub mod auth;
 pub mod bus;
+pub mod endpoints;
 pub mod paths;
 pub mod registry;
+pub mod secrets;
 pub mod settings;
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,7 +26,9 @@ pub use adapter::{
 pub use auftrag::{AuftragError, canonical_bytes, hash_of};
 pub use auth::{Authenticator, FileTokenStore, TokenStore, Tokens, generate_token, permits};
 pub use bus::EventBus;
+pub use endpoints::{EndpointConfig, EndpointError, EndpointProfile, RoleBinding};
 pub use registry::{ApprovalRecord, Registry, RegistryError};
+pub use secrets::{FileSecretStore, NoSecrets, SecretError, SecretStore};
 pub use settings::{
     Autonomy, HighRiskSettings, NotificationChannel, Settings, SettingsError, ToolBoundary,
 };

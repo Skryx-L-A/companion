@@ -3,7 +3,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{AdapterId, SessionId};
+use crate::endpoint::AudioFormat;
+use crate::ids::{AdapterId, SessionId, VoiceId};
 use crate::provenance::Provenance;
 use crate::session::{BudgetUsage, ContextUsage, SessionStatus};
 
@@ -21,9 +22,15 @@ pub enum EndReason {
     Lost,
 }
 
-/// Everything an adapter can report about a session.
+/// Everything an adapter can report about a session, plus what the voice pipeline reports
+/// about a dictation or a spoken answer.
 ///
-/// The variant list is the event list from `DESIGN.md` § Session-Adapter, in that order.
+/// The first thirteen variants are the event list from `DESIGN.md` § Session-Adapter, in
+/// that order. The four voice events after them were added in phase 1b and belong to no
+/// session: they carry a [`VoiceId`] instead, and their envelope has no session id. They
+/// are additive, so they do not raise [`crate::PROTOCOL_VERSION`] — `DESIGN.md`
+/// § Architektur, Protokoll-Kompatibilität: a client that does not know them ignores them
+/// and counts them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
@@ -91,6 +98,38 @@ pub enum Event {
     EventsDropped {
         missed: u64,
     },
+    /// Text recognised so far, while the person is still speaking. Replaces whatever the
+    /// last partial of the same dictation said; it is never appended to it.
+    SttPartial {
+        voice_id: VoiceId,
+        text: String,
+    },
+    /// The finished transcript of one dictation. Exactly one per dictation that succeeded.
+    SttFinal {
+        voice_id: VoiceId,
+        text: String,
+        /// Profile that answered. Visible so a fallback is a fact on the stream and not
+        /// only a line in the log.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
+    },
+    /// One piece of spoken audio, in the order it has to be played.
+    TtsChunk {
+        voice_id: VoiceId,
+        /// Counts from zero within one spoken answer, so a client can tell a reordering
+        /// from a gap.
+        sequence: u32,
+        format: AudioFormat,
+        /// The audio bytes, base64 encoded. Only the first chunk of a `wav` or `aiff`
+        /// stream carries the container header; the rest continue it.
+        audio_base64: String,
+    },
+    /// The spoken answer is complete. No further chunk of this id follows.
+    TtsDone {
+        voice_id: VoiceId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
+    },
 }
 
 /// The name of an event without its payload. Adapters use this in their capabilities to
@@ -113,12 +152,17 @@ pub enum EventKind {
     Iteration,
     Error,
     EventsDropped,
+    SttPartial,
+    SttFinal,
+    TtsChunk,
+    TtsDone,
 }
 
 impl EventKind {
-    /// Every event kind the protocol defines, including the one only the daemon produces.
-    /// An adapter names the subset it can really deliver in its capabilities.
-    pub const ALL: [EventKind; 13] = [
+    /// Every event kind the protocol defines, including the one only the daemon produces
+    /// and the four the voice pipeline produces. An adapter names the subset it can really
+    /// deliver in its capabilities; no adapter delivers a voice event.
+    pub const ALL: [EventKind; 17] = [
         Self::SessionStarted,
         Self::SessionEnded,
         Self::QuestionOpen,
@@ -132,7 +176,40 @@ impl EventKind {
         Self::Iteration,
         Self::Error,
         Self::EventsDropped,
+        Self::SttPartial,
+        Self::SttFinal,
+        Self::TtsChunk,
+        Self::TtsDone,
     ];
+
+    /// The kinds a session adapter can actually produce.
+    ///
+    /// [`Self::EventsDropped`] is not among them: only the daemon knows about a gap of its
+    /// own making. Neither are the four voice kinds, which come from the voice pipeline and
+    /// belong to no session. An adapter names its own subset of this in its capabilities,
+    /// and having the line here means no adapter has to remember both exclusions.
+    pub const ADAPTER_EVENTS: [EventKind; 12] = [
+        Self::SessionStarted,
+        Self::SessionEnded,
+        Self::QuestionOpen,
+        Self::WaitingForInput,
+        Self::Busy,
+        Self::Idle,
+        Self::Done,
+        Self::GateResult,
+        Self::ContextLevel,
+        Self::BudgetLevel,
+        Self::Iteration,
+        Self::Error,
+    ];
+
+    /// Whether this kind comes from the voice pipeline rather than from a session.
+    pub fn is_voice(self) -> bool {
+        matches!(
+            self,
+            Self::SttPartial | Self::SttFinal | Self::TtsChunk | Self::TtsDone
+        )
+    }
 }
 
 impl Event {
@@ -151,6 +228,10 @@ impl Event {
             Self::Iteration { .. } => EventKind::Iteration,
             Self::Error { .. } => EventKind::Error,
             Self::EventsDropped { .. } => EventKind::EventsDropped,
+            Self::SttPartial { .. } => EventKind::SttPartial,
+            Self::SttFinal { .. } => EventKind::SttFinal,
+            Self::TtsChunk { .. } => EventKind::TtsChunk,
+            Self::TtsDone { .. } => EventKind::TtsDone,
         }
     }
 }
@@ -181,7 +262,17 @@ mod tests {
     #[test]
     fn every_variant_maps_to_its_kind() {
         // Guards against a new event variant that nobody added to EventKind::ALL.
-        assert_eq!(EventKind::ALL.len(), 13);
+        assert_eq!(EventKind::ALL.len(), 17);
+        // And against a new kind that lands in neither of the two groups.
+        let unassigned = EventKind::ALL
+            .into_iter()
+            .filter(|kind| {
+                !EventKind::ADAPTER_EVENTS.contains(kind)
+                    && !kind.is_voice()
+                    && *kind != EventKind::EventsDropped
+            })
+            .count();
+        assert_eq!(unassigned, 0, "every event kind has to be classified");
         assert_eq!(Event::Busy.kind(), EventKind::Busy);
         assert_eq!(
             Event::Error {
@@ -190,6 +281,22 @@ mod tests {
             .kind(),
             EventKind::Error
         );
+    }
+
+    #[test]
+    fn an_old_client_can_skip_a_voice_event_without_losing_the_stream() {
+        // The compat rule of DESIGN.md § Architektur: a reader dispatches on the tag and
+        // ignores what it does not know. That only works if a voice event is a normal
+        // envelope with a normal tag, which is what this checks.
+        let json = serde_json::to_string(&Event::SttFinal {
+            voice_id: crate::ids::VoiceId::new("voice-1"),
+            text: "guten Morgen".to_owned(),
+            endpoint: Some("local-whisper".to_owned()),
+        })
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["event"], "stt_final");
+        assert_eq!(value["voice_id"], "voice-1");
     }
 
     #[test]

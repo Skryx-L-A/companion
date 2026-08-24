@@ -22,6 +22,7 @@ companion-adapter-claude.workspace = true
 companion-adapter-workbench.workspace = true
 companion-core.workspace = true
 companion-protocol.workspace = true
+companion-voice.workspace = true
 
 serde_json.workspace = true
 thiserror.workspace = true

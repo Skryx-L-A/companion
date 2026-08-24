@@ -12,7 +12,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use companion_core::adapter::{AdapterEvent, AdapterResult, AdapterSet, SpawnOptions};
-use companion_core::{AdapterError, Authenticator, EventBus, Registry, Tokens, now_ms, permits};
+use companion_core::{
+    AdapterError, Authenticator, EndpointConfig, EventBus, Registry, SecretStore, Tokens, now_ms,
+    permits,
+};
 use companion_protocol::{
     AdapterCapabilities, AdapterId, AuftragId, ClientMessage, ClientRole, Cost, EndReason,
     ErrorCode, Event, EventEnvelope, PROTOCOL_VERSION, ProtocolError, Provenance,
@@ -20,6 +23,7 @@ use companion_protocol::{
     ResponseResult, ServerMessage, SessionId, SessionState, SessionStatus, UNSOLICITED_REQUEST_ID,
     Welcome,
 };
+use companion_voice::{VoiceEngine, VoiceError, VoiceLimits};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedReadHalf;
@@ -100,6 +104,18 @@ impl Default for Limits {
     }
 }
 
+/// What the voice pipeline needs.
+///
+/// A setup rather than a built engine, because the engine publishes onto the event bus and
+/// the bus is created inside [`start`]. A daemon started without this answers every voice
+/// request with `not_supported`, which is what a build or a machine without speech should
+/// say instead of failing at the first chunk.
+pub struct VoiceSetup {
+    pub endpoints: Arc<EndpointConfig>,
+    pub secrets: Arc<dyn SecretStore>,
+    pub limits: VoiceLimits,
+}
+
 /// Everything the server needs to run. The caller builds it, so a test can hand in its own
 /// adapters and an in-memory register.
 pub struct ServerConfig {
@@ -110,6 +126,9 @@ pub struct ServerConfig {
     /// How many events a slow client may fall behind before it loses the oldest ones.
     pub event_capacity: usize,
     pub limits: Limits,
+    /// The endpoints and keys the voice pipeline works with, or `None` for a daemon
+    /// without speech.
+    pub voice: Option<VoiceSetup>,
 }
 
 impl ServerConfig {
@@ -121,6 +140,7 @@ impl ServerConfig {
             registry,
             event_capacity: 1024,
             limits: Limits::default(),
+            voice: None,
         }
     }
 }
@@ -156,6 +176,8 @@ struct ServerState {
     reported: Mutex<HashMap<SessionId, ReportedSession>>,
     /// Counts connections, which is what gives each one its namespace.
     connections: AtomicU64,
+    /// The voice pipeline, when this daemon was started with one.
+    voice: Option<Arc<VoiceEngine>>,
     /// The account the daemon runs under, read from the socket it just created. A peer
     /// from any other account is refused before the handshake.
     owner_uid: Option<u32>,
@@ -262,6 +284,15 @@ pub async fn start(config: ServerConfig) -> Result<ServerHandle, ServerError> {
         });
     }
 
+    let voice = config.voice.map(|setup| {
+        Arc::new(VoiceEngine::new(
+            bus.clone(),
+            setup.endpoints,
+            setup.secrets,
+            setup.limits,
+        ))
+    });
+
     let state = Arc::new(ServerState {
         authenticator: Authenticator::new(config.tokens),
         adapters: config.adapters,
@@ -270,6 +301,7 @@ pub async fn start(config: ServerConfig) -> Result<ServerHandle, ServerError> {
         limits: config.limits,
         reported: Mutex::new(HashMap::new()),
         connections: AtomicU64::new(0),
+        voice,
         owner_uid,
     });
 
@@ -1063,7 +1095,73 @@ async fn handle(
             }
             Ok(ResponseBody::Ack)
         }
+
+        Request::VoiceBegin {
+            sample_rate_hz,
+            channels,
+            language,
+        } => {
+            let voice_id = state
+                .voice()?
+                .begin(sample_rate_hz, channels, language)
+                .map_err(voice_error)?;
+            Ok(ResponseBody::VoiceStream { voice_id })
+        }
+
+        Request::VoiceChunk {
+            voice_id,
+            pcm16_base64,
+        } => {
+            state
+                .voice()?
+                .chunk(&voice_id, &pcm16_base64)
+                .map_err(voice_error)?;
+            Ok(ResponseBody::Ack)
+        }
+
+        Request::VoiceEnd { voice_id } => {
+            // Answers as soon as the dictation is closed. The transcript follows as an
+            // stt_final event: waiting for it here would hold the connection for as long as
+            // the endpoint takes, and the shell is listening on the event stream anyway.
+            state.voice()?.end(&voice_id).map_err(voice_error)?;
+            Ok(ResponseBody::Ack)
+        }
+
+        Request::TtsSpeak { text, voice } => {
+            let voice_id = state.voice()?.speak(text, voice).map_err(voice_error)?;
+            Ok(ResponseBody::VoiceStream { voice_id })
+        }
+
+        Request::ProbeEndpoints { role } => {
+            let endpoints = state.voice()?.probe(role).await;
+            Ok(ResponseBody::Endpoints { endpoints })
+        }
     }
+}
+
+/// Turns a refusal of the voice pipeline into one the client understands.
+///
+/// A missing endpoint or a protocol that cannot hear is `not_supported`: the daemon
+/// understood the request and has nothing to serve it with. A stream that does not exist,
+/// audio that is not base64 and a dictation over its ceiling are the client's mistake. What
+/// an endpoint did wrong is an `adapter_failure`, the same code an adapter that tried and
+/// failed gets.
+fn voice_error(error: VoiceError) -> ProtocolError {
+    let code = match &error {
+        VoiceError::NoEndpoint { .. } | VoiceError::Unsupported { .. } => ErrorCode::NotSupported,
+        VoiceError::UnknownStream { .. } => ErrorCode::UnknownSession,
+        VoiceError::BadEncoding(_) | VoiceError::TooMuch { .. } | VoiceError::MissingKey { .. } => {
+            ErrorCode::BadRequest
+        }
+        VoiceError::Transport { .. }
+        | VoiceError::Status { .. }
+        | VoiceError::Malformed { .. }
+        | VoiceError::Process { .. }
+        | VoiceError::ProgramFailed { .. }
+        | VoiceError::ChainExhausted { .. } => ErrorCode::AdapterFailure,
+        VoiceError::Secrets(_) => ErrorCode::Internal,
+    };
+    ProtocolError::new(code, error.to_string())
 }
 
 /// The answer to everything that hands a job file back.
@@ -1249,6 +1347,16 @@ fn write_registry_entry(
 }
 
 impl ServerState {
+    /// The voice pipeline, or the refusal a daemon without one owes the client.
+    fn voice(&self) -> Result<&Arc<VoiceEngine>, ProtocolError> {
+        self.voice.as_ref().ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::NotSupported,
+                "this daemon runs without the voice pipeline",
+            )
+        })
+    }
+
     fn adapter(
         &self,
         id: &AdapterId,
