@@ -165,3 +165,186 @@ public enum ToolDetection {
         return nil
     }
 }
+
+// MARK: - The answers the full setup adds
+
+/// How far something may act on its own with a class of tools.
+///
+/// The same three steps the daemon keeps in its settings file. `DESIGN.md` section
+/// Grundprinzip makes `full` a high-risk setting: the companion may never set it, and the
+/// assistant does not offer it either — a person sets it in the settings, where the warning
+/// stands next to it.
+public enum ToolBoundary: String, Sendable, CaseIterable, Codable {
+    /// Read, never write.
+    case readOnly
+    /// Ask before every use. The default everywhere.
+    case ask
+    /// Act without asking.
+    case full
+
+    public var label: String {
+        switch self {
+        case .readOnly: return "Nur lesen"
+        case .ask: return "Fragt bei Schreibzugriff"
+        case .full: return "Voll autonom"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .readOnly:
+            return "Liest und meldet, schreibt nichts. Die sparsamste und harmloseste Stufe."
+        case .ask:
+            return "Fragt, bevor etwas geschrieben, gesendet oder gestartet wird."
+        case .full:
+            return "Handelt ohne Rueckfrage, auch dort, wo etwas nach aussen geht."
+        }
+    }
+
+    /// True for the step that only a person may set.
+    public var isHighRisk: Bool { self == .full }
+}
+
+/// How far the companion itself acts when eine Session etwas meldet.
+public enum CompanionAutonomy: String, Sendable, CaseIterable, Codable {
+    /// Watch and report, decide nothing. The default.
+    case observe
+    /// Answer what is unambiguous, ask about the rest.
+    case ask
+    /// Answer and act within the guardrails of the job file.
+    case act
+
+    public var label: String {
+        switch self {
+        case .observe: return "Nur beobachten"
+        case .ask: return "Antwortet, wo es eindeutig ist"
+        case .act: return "Handelt im Rahmen des Auftrags"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .observe:
+            return "Er sieht zu und meldet dir, was passiert. Entscheiden tust du."
+        case .ask:
+            return "Was eindeutig ist, beantwortet er selbst; beim Rest fragt er dich."
+        case .act:
+            return "Er beantwortet Fragen und startet und stoppt Sessions von sich aus, solange der Auftrag es deckt."
+        }
+    }
+
+    /// Starting and stopping sessions unasked is on the high-risk list of `DESIGN.md`
+    /// section Grundprinzip.
+    public var isHighRisk: Bool { self == .act }
+}
+
+/// How much of the skill package goes into every recognised harness.
+public enum SkillLevel: String, Sendable, CaseIterable, Codable {
+    case none
+    case recommended
+    case many
+    case all
+
+    public var label: String {
+        switch self {
+        case .none: return "Keine"
+        case .recommended: return "Empfohlene"
+        case .many: return "Groessere Auswahl"
+        case .all: return "Alle"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .none:
+            return "Nichts wird installiert. Nicht empfohlen: ohne den Pflichtkern meldet keine Session ihren Stand."
+        case .recommended:
+            return "Der Pflichtkern: Schleifen, Protokoll, Spezifikation zuerst, unabhaengiger Kritiker, Uebergabe zwischen Sitzungen."
+        case .many:
+            return "Der Pflichtkern und die geprueften Erweiterungen."
+        case .all:
+            return "Alles, was im Paket liegt."
+        }
+    }
+}
+
+/// What happens when eine Session sich fertig meldet.
+public enum DoneHandling: String, Sendable, CaseIterable, Codable {
+    case forward
+    case gate
+    case reviewer
+
+    public var label: String {
+        switch self {
+        case .forward: return "Weiterleiten"
+        case .gate: return "Gate pruefen"
+        case .reviewer: return "Reviewer-Session"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .forward: return "Du bekommst die Meldung, sonst passiert nichts."
+        case .gate: return "Die Gate-Befehle des Auftrags laufen, und du bekommst ihr Ergebnis."
+        case .reviewer: return "Eine zweite Session prueft das Ergebnis, bevor du es siehst. Kostet am meisten."
+        }
+    }
+}
+
+/// Where der Companion dich erreicht.
+public enum ReportChannel: String, Sendable, CaseIterable, Codable {
+    case figure
+    case sound
+    case speech
+    case systemNotification
+    case phone
+
+    public var label: String {
+        switch self {
+        case .figure: return "Figur"
+        case .sound: return "Ton"
+        case .speech: return "Sprechen"
+        case .systemNotification: return "System-Mitteilung"
+        case .phone: return "Handy"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .figure: return "Die Figur hebt die Hand. Verlaesst diesen Rechner nie."
+        case .sound: return "Ein kurzer Ton dazu."
+        case .speech: return "Er sagt es laut, ueber die eingestellte Sprachausgabe."
+        case .systemNotification: return "Eine Mitteilung von macOS, auch wenn die Figur verdeckt ist."
+        case .phone: return "Eine Push-Nachricht aufs Telefon. Dafuer geht die Meldung ueber einen fremden Dienst."
+        }
+    }
+
+    /// Push is on the high-risk list of `DESIGN.md` section Grundprinzip.
+    public var isHighRisk: Bool { self == .phone }
+}
+
+/// Wie der Companion redet.
+public enum ConversationStyle: String, Sendable, CaseIterable, Codable {
+    case terse
+    case detailed
+
+    public var label: String {
+        switch self {
+        case .terse: return "Knapp"
+        case .detailed: return "Ausfuehrlich"
+        }
+    }
+}
+
+/// Wie er dich anspricht.
+public enum AddressForm: String, Sendable, CaseIterable, Codable {
+    case informal
+    case formal
+
+    public var label: String {
+        switch self {
+        case .informal: return "Du"
+        case .formal: return "Sie"
+        }
+    }
+}

@@ -3,8 +3,11 @@
 import AppKit
 import SwiftUI
 
-/// Settings the shell owns. Everything about sessions, adapters and limits belongs to the
-/// daemon and gets its own page once the daemon side exists.
+/// The settings window: three pages, because the shell now owns more than one topic.
+///
+/// Everything about sessions, adapters and limits belongs to the daemon and gets its own page
+/// once the daemon side exists. The endpoints page is the first one that reaches over: it
+/// edits what the daemon owns, and says so at the top of the page.
 struct ShellSettingsView: View {
     let controller: OverlayController
     @Bindable var settings: AppSettings
@@ -19,17 +22,55 @@ struct ShellSettingsView: View {
     let wakewordStatus: String
     /// Whether a word has been trained on this machine at all.
     let hasWakewordModel: Bool
+    /// The endpoints page.
+    let endpoints: EndpointsController
     /// Opens the enrollment window.
     let onTrainWakeword: () -> Void
     /// Throws the trained word away.
     let onDeleteWakeword: () -> Void
     /// Arms or disarms the always-on microphone. True only ever arrives from the confirm
-    /// button of the sheet below.
+    /// button of the privacy sheet.
     let onSetWakewordEnabled: (Bool) -> Void
+    /// Opens the full setup assistant.
+    let onFullSetup: () -> Void
 
-    /// True while the privacy sheet is open. The toggle itself stays off until the person in
-    /// it says yes, so a stray click cannot leave a microphone running.
-    @State private var isAskingForWakewordConsent = false
+    var body: some View {
+        TabView {
+            ShellGeneralSettingsView(
+                controller: controller,
+                settings: settings,
+                socketPath: socketPath,
+                daemonStatus: daemonStatus,
+                daemonDetail: daemonDetail,
+                onFullSetup: onFullSetup)
+                .tabItem { Label("Allgemein", systemImage: "gearshape") }
+
+            ShellVoiceSettingsView(
+                settings: settings,
+                microphoneStatus: microphoneStatus,
+                voiceStatus: voiceStatus,
+                wakewordStatus: wakewordStatus,
+                hasWakewordModel: hasWakewordModel,
+                onTrainWakeword: onTrainWakeword,
+                onDeleteWakeword: onDeleteWakeword,
+                onSetWakewordEnabled: onSetWakewordEnabled)
+                .tabItem { Label("Sprache", systemImage: "waveform") }
+
+            EndpointsSettingsView(controller: endpoints)
+                .tabItem { Label("Endpoints", systemImage: "point.3.connected.trianglepath.dotted") }
+        }
+        .frame(width: 560, height: 620)
+    }
+}
+
+/// The figure, the screen, the connection, and the way back into the setup.
+struct ShellGeneralSettingsView: View {
+    let controller: OverlayController
+    @Bindable var settings: AppSettings
+    let socketPath: String
+    let daemonStatus: String
+    let daemonDetail: String?
+    let onFullSetup: () -> Void
 
     var body: some View {
         Form {
@@ -68,6 +109,50 @@ struct ShellSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Daemon") {
+                LabeledContent("Status", value: daemonStatus)
+                if let daemonDetail {
+                    LabeledContent("Verbindung", value: daemonDetail)
+                        .textSelection(.enabled)
+                }
+                LabeledContent("Socket", value: socketPath)
+                    .textSelection(.enabled)
+            }
+
+            Section("Einrichtung") {
+                LabeledContent("Arbeitsmodus", value: settings.workMode.label)
+                LabeledContent("Standardwerkzeug", value: settings.defaultModelTool ?? "keines")
+                // The third answer of the quick start is not echoed here any more: the voice
+                // page owns it now, and the same setting in two places reads as two settings.
+                Button("Schnellstart erneut zeigen") { controller.startOnboarding() }
+                Button("Vollstaendige Einrichtung", action: onFullSetup)
+                Text("Der Schnellstart stellt drei Fragen und laesst den Rest auf sicheren Standards. Die vollstaendige Einrichtung geht alles durch, was der Companion ueber deine Arbeitsweise wissen kann.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+/// Everything about speaking and listening, including the one high-risk switch of this window.
+struct ShellVoiceSettingsView: View {
+    @Bindable var settings: AppSettings
+    let microphoneStatus: String
+    let voiceStatus: String
+    let wakewordStatus: String
+    let hasWakewordModel: Bool
+    let onTrainWakeword: () -> Void
+    let onDeleteWakeword: () -> Void
+    let onSetWakewordEnabled: (Bool) -> Void
+
+    /// True while the privacy sheet is open. The toggle itself stays off until the person in
+    /// it says yes, so a stray click cannot leave a microphone running.
+    @State private var isAskingForWakewordConsent = false
+
+    var body: some View {
+        Form {
             Section("Sprache") {
                 Picker("Eingabeweg", selection: $settings.voiceTrigger) {
                     ForEach(VoiceTrigger.allCases, id: \.self) { trigger in
@@ -108,29 +193,8 @@ struct ShellSettingsView: View {
             }
 
             wakewordSection
-
-            Section("Daemon") {
-                LabeledContent("Status", value: daemonStatus)
-                if let daemonDetail {
-                    LabeledContent("Verbindung", value: daemonDetail)
-                        .textSelection(.enabled)
-                }
-                LabeledContent("Socket", value: socketPath)
-                    .textSelection(.enabled)
-            }
-
-            Section("Schnellstart") {
-                LabeledContent("Arbeitsmodus", value: settings.workMode.label)
-                LabeledContent("Standardwerkzeug", value: settings.defaultModelTool ?? "keines")
-                // The third answer of the quick start is not echoed here any more: the
-                // section above owns it now, and the same setting in two places reads as two
-                // settings.
-                Button("Schnellstart erneut zeigen") { controller.startOnboarding() }
-            }
         }
         .formStyle(.grouped)
-        .frame(width: 460)
-        .fixedSize(horizontal: false, vertical: true)
     }
 
     /// The high-risk setting of this page.
@@ -210,12 +274,14 @@ final class SettingsWindowController {
 
     func show(
         controller: OverlayController, socketPath: String, daemonStatus: String,
+        endpoints: EndpointsController,
         daemonDetail: String? = nil, microphoneStatus: String = "unbekannt",
         voiceStatus: String = "unbekannt", wakewordStatus: String = "unbekannt",
         hasWakewordModel: Bool = false,
         onTrainWakeword: @escaping () -> Void = {},
         onDeleteWakeword: @escaping () -> Void = {},
-        onSetWakewordEnabled: @escaping (Bool) -> Void = { _ in }
+        onSetWakewordEnabled: @escaping (Bool) -> Void = { _ in },
+        onFullSetup: @escaping () -> Void = {}
     ) {
         if let window {
             window.makeKeyAndOrderFront(nil)
@@ -232,13 +298,15 @@ final class SettingsWindowController {
             voiceStatus: voiceStatus,
             wakewordStatus: wakewordStatus,
             hasWakewordModel: hasWakewordModel,
+            endpoints: endpoints,
             onTrainWakeword: onTrainWakeword,
             onDeleteWakeword: onDeleteWakeword,
-            onSetWakewordEnabled: onSetWakewordEnabled)
+            onSetWakewordEnabled: onSetWakewordEnabled,
+            onFullSetup: onFullSetup)
         let hosting = NSHostingController(rootView: view)
         let window = NSWindow(contentViewController: hosting)
         window.title = "Companion Einstellungen"
-        window.styleMask = [.titled, .closable, .miniaturizable]
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.isReleasedWhenClosed = false
         window.center()
         self.window = window

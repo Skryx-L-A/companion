@@ -115,12 +115,8 @@ final class ServerMessageFixtureTests: XCTestCase {
             }
             return envelope.event.kind
         }
-        // The three chat kinds are not in here: the schema has them, but the fixture writer of
-        // the protocol crate does not write a line for them yet. They are decoded against
-        // hand-written lines in `ChatEventWireTests` until it does.
-        let written = EventKind.allCases.filter { !$0.isChat }
-        XCTAssertEqual(Set(kinds), Set(written), "one fixture per event kind")
-        XCTAssertEqual(kinds.count, written.count)
+        XCTAssertEqual(Set(kinds), Set(EventKind.allCases), "one fixture per event kind")
+        XCTAssertEqual(kinds.count, EventKind.allCases.count)
     }
 
     func testEventEnvelopeCarriesTheBookkeeping() throws {
@@ -179,6 +175,9 @@ final class ServerMessageFixtureTests: XCTestCase {
             case .voiceStream:
                 // No fixture line for a dictation; `VoiceRequestWireTests` covers that body.
                 seen.insert("voice_stream")
+            case .endpoints:
+                // No fixture line for a measurement; `EndpointWireTests` covers that body.
+                seen.insert("endpoints")
             case .sessions, .unrecognised:
                 break
             }
