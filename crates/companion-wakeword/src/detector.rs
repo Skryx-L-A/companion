@@ -23,6 +23,10 @@ pub struct DetectorConfig {
     /// Speech gate: a frame is active when its RMS exceeds the tracked noise floor
     /// times this factor (and an absolute floor that keeps digital silence inactive).
     pub gate_factor: f32,
+    /// A detection needs this many consecutive evaluations under the threshold.
+    /// Two (the default, one extra confirmation = 60 ms latency) suppresses the
+    /// transient dips that unrelated speech produces for a single evaluation.
+    pub confirm_evals: usize,
 }
 
 impl Default for DetectorConfig {
@@ -31,6 +35,7 @@ impl Default for DetectorConfig {
             eval_hop: 6,
             refractory: 100,
             gate_factor: 3.0,
+            confirm_evals: 2,
         }
     }
 }
@@ -52,7 +57,12 @@ pub struct Detection {
 struct LoadedModel {
     model: WordModel,
     window_len: usize,
+    /// Median template length; how many trailing active frames feed the CMN mean.
+    cmn_tail: usize,
     last_fired_frame: Option<u64>,
+    /// Consecutive evaluations that scored under the threshold, so far.
+    below_streak: usize,
+    best_in_streak: f32,
 }
 
 pub struct Detector {
@@ -62,8 +72,8 @@ pub struct Detector {
     /// Pre-emphasized samples not yet consumed by a full frame.
     pending: Vec<f32>,
     prev_raw: f32,
-    /// Rolling feature window: (mfcc, active).
-    ring: VecDeque<(Frame, bool)>,
+    /// Rolling feature window: (mfcc, rms, active).
+    ring: VecDeque<(Frame, f32, bool)>,
     ring_cap: usize,
     noise_floor: f32,
     frame_count: u64,
@@ -76,10 +86,16 @@ impl Detector {
             .map(|model| {
                 // Room for the word spoken at half speed, plus slack for the gate.
                 let window_len = (model.max_template_len() * 2 + 10).clamp(40, 400);
+                let mut lens: Vec<usize> = model.templates.iter().map(Vec::len).collect();
+                lens.sort_unstable();
+                let cmn_tail = lens.get(lens.len() / 2).copied().unwrap_or(40);
                 LoadedModel {
                     model,
                     window_len,
+                    cmn_tail,
                     last_fired_frame: None,
+                    below_streak: 0,
+                    best_in_streak: f32::MAX,
                 }
             })
             .collect();
@@ -129,7 +145,7 @@ impl Detector {
             if self.ring.len() == self.ring_cap {
                 self.ring.pop_front();
             }
-            self.ring.push_back((mfcc, active));
+            self.ring.push_back((mfcc, rms, active));
             self.frame_count += 1;
             consumed += HOP_LEN;
 
@@ -146,7 +162,7 @@ impl Detector {
             .iter()
             .rev()
             .take(RECENT_ACTIVE_SPAN)
-            .any(|&(_, active)| active)
+            .any(|&(_, _, active)| active)
     }
 
     fn evaluate(&mut self, detections: &mut Vec<Detection>) {
@@ -155,8 +171,18 @@ impl Detector {
         }
         // One normalized copy of the largest needed window; per-model views index
         // into its tail.
-        let window_full: Vec<Frame> = self.ring.iter().map(|&(f, _)| f).collect();
-        let active_full: Vec<bool> = self.ring.iter().map(|&(_, a)| a).collect();
+        let window_full: Vec<Frame> = self.ring.iter().map(|&(f, _, _)| f).collect();
+        // The CMN mask is peak-relative within the window — the same rule the trainer
+        // and score_clip use — so the mean is computed over the same kind of frames
+        // in training and detection. The adaptive noise floor only gates WHETHER a
+        // search runs, never which frames the normalization sees.
+        let peak = self
+            .ring
+            .iter()
+            .map(|&(_, rms, _)| rms)
+            .fold(0.0f32, f32::max);
+        let gate = (peak * 0.08).max(GATE_ABS_FLOOR);
+        let active_full: Vec<bool> = self.ring.iter().map(|&(_, rms, _)| rms > gate).collect();
 
         for loaded in &mut self.models {
             let take = loaded.window_len.min(window_full.len());
@@ -170,7 +196,7 @@ impl Detector {
             }
             let start = window_full.len() - take;
             let mut window = window_full[start..].to_vec();
-            dsp::cmn(&mut window, &active_full[start..]);
+            dsp::cmn_tail(&mut window, &active_full[start..], loaded.cmn_tail);
 
             let best = loaded
                 .model
@@ -178,15 +204,25 @@ impl Detector {
                 .iter()
                 .filter_map(|t| dtw::dtw_subsequence(t, &window))
                 .min_by(f32::total_cmp);
-            if let Some(score) = best
-                && score < loaded.model.threshold
-            {
-                loaded.last_fired_frame = Some(self.frame_count);
-                detections.push(Detection {
-                    word: loaded.model.name.clone(),
-                    score,
-                    at_sample: self.frame_count * HOP_LEN as u64,
-                });
+            match best {
+                Some(score) if score < loaded.model.threshold => {
+                    loaded.below_streak += 1;
+                    loaded.best_in_streak = loaded.best_in_streak.min(score);
+                    if loaded.below_streak >= self.config.confirm_evals.max(1) {
+                        loaded.last_fired_frame = Some(self.frame_count);
+                        detections.push(Detection {
+                            word: loaded.model.name.clone(),
+                            score: loaded.best_in_streak,
+                            at_sample: self.frame_count * HOP_LEN as u64,
+                        });
+                        loaded.below_streak = 0;
+                        loaded.best_in_streak = f32::MAX;
+                    }
+                }
+                _ => {
+                    loaded.below_streak = 0;
+                    loaded.best_in_streak = f32::MAX;
+                }
             }
         }
     }

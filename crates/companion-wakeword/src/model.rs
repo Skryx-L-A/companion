@@ -27,14 +27,15 @@ const MAX_TEMPLATE_FRAMES: usize = 200;
 const TRIM_PAD: usize = 4;
 /// The threshold is the mean pairwise training distance times this factor. Calibrated
 /// on the fixture set (tests/wakeword): smaller values push rejects up, larger values
-/// let confusable words in.
-const THRESHOLD_FACTOR: f32 = 1.25;
+/// let confusable words in. Measured per-step distances there: matching takes of the
+/// same voice score ~4–8, unrelated speech ~25–40.
+const THRESHOLD_FACTOR: f32 = 2.3;
 /// Threshold bounds. The lower bound keeps a model trained from near-identical takes
 /// usable; the upper bound caps how permissive a sloppy training set can make it.
-const THRESHOLD_MIN: f32 = 1.6;
-const THRESHOLD_MAX: f32 = 3.2;
+const THRESHOLD_MIN: f32 = 8.0;
+const THRESHOLD_MAX: f32 = 16.0;
 /// Fallback threshold when only one recording is provided (no pairwise distances).
-const THRESHOLD_SINGLE: f32 = 2.0;
+const THRESHOLD_SINGLE: f32 = 12.0;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TrainError {

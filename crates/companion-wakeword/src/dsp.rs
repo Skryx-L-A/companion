@@ -231,6 +231,42 @@ pub fn cmn(frames: &mut [Frame], active: &[bool]) {
     }
 }
 
+/// Like [`cmn`], but the mean comes from only the LAST `tail` active frames. The
+/// streaming detector uses this with `tail` set to the template length: at the
+/// evaluation where a word has just ended, those frames are the word itself, so the
+/// normalization matches the training-side CMN whether the word was spoken in
+/// isolation or embedded in a sentence.
+pub fn cmn_tail(frames: &mut [Frame], active: &[bool], tail: usize) {
+    if frames.is_empty() {
+        return;
+    }
+    let mut mean = [0.0f32; NUM_COEFFS];
+    let mut count = 0usize;
+    for (frame, &is_active) in frames.iter().zip(active).rev() {
+        if is_active {
+            for (m, v) in mean.iter_mut().zip(frame) {
+                *m += v;
+            }
+            count += 1;
+            if count == tail {
+                break;
+            }
+        }
+    }
+    if count == 0 {
+        cmn(frames, active);
+        return;
+    }
+    for m in mean.iter_mut() {
+        *m /= count as f32;
+    }
+    for frame in frames.iter_mut() {
+        for (v, m) in frame.iter_mut().zip(&mean) {
+            *v -= m;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
