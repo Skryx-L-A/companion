@@ -634,6 +634,12 @@ async fn serve_client(stream: UnixStream, state: Arc<ServerState>) -> std::io::R
     // same reporter takes it over; if none comes, the pruning drops it.
     state.orphan_reported(&connection.namespace);
 
+    // A dictation this connection opened and never ended would otherwise hold one of the
+    // few voice slots until the daemon stops. It goes when the connection does.
+    if let Some(voice) = &state.voice {
+        voice.release_owner(&connection.namespace);
+    }
+
     drop(outgoing);
     events_task.abort();
     let _ = writer_task.await;
@@ -1103,7 +1109,12 @@ async fn handle(
         } => {
             let voice_id = state
                 .voice()?
-                .begin(sample_rate_hz, channels, language)
+                .begin(
+                    sample_rate_hz,
+                    channels,
+                    language,
+                    connection.namespace.clone(),
+                )
                 .map_err(voice_error)?;
             Ok(ResponseBody::VoiceStream { voice_id })
         }
@@ -1150,9 +1161,10 @@ fn voice_error(error: VoiceError) -> ProtocolError {
     let code = match &error {
         VoiceError::NoEndpoint { .. } | VoiceError::Unsupported { .. } => ErrorCode::NotSupported,
         VoiceError::UnknownStream { .. } => ErrorCode::UnknownSession,
-        VoiceError::BadEncoding(_) | VoiceError::TooMuch { .. } | VoiceError::MissingKey { .. } => {
-            ErrorCode::BadRequest
-        }
+        VoiceError::BadEncoding(_)
+        | VoiceError::TooMuch { .. }
+        | VoiceError::MissingKey { .. }
+        | VoiceError::InvalidAudio { .. } => ErrorCode::BadRequest,
         VoiceError::Transport { .. }
         | VoiceError::Status { .. }
         | VoiceError::Malformed { .. }

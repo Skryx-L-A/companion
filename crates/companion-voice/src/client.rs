@@ -56,6 +56,8 @@ pub enum VoiceError {
     UnknownStream { voice_id: String },
     #[error("{what} is over its limit of {limit}")]
     TooMuch { what: &'static str, limit: usize },
+    #[error("the audio format is not usable: {detail}")]
+    InvalidAudio { detail: String },
     #[error("a chunk is not valid base64: {0}")]
     BadEncoding(String),
     #[error("the whole fallback chain for role {role} failed: {detail}")]
