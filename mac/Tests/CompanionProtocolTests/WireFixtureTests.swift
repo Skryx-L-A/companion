@@ -178,11 +178,27 @@ final class ServerMessageFixtureTests: XCTestCase {
             case .endpoints:
                 // No fixture line for a measurement; `EndpointWireTests` covers that body.
                 seen.insert("endpoints")
+            case .settings(let settings):
+                seen.insert("settings")
+                // The fixture carries a filled document, so a shell that only ever saw the
+                // defaults is checked against one somebody actually configured.
+                XCTAssertEqual(settings.schemaVersion, companionSettingsSchemaVersion)
+                XCTAssertEqual(settings.toolBoundary, .readOnly)
+                XCTAssertEqual(settings.agentBoundary, .ask)
+                XCTAssertEqual(settings.enabledAdapters, ["workbench", "claude-code"])
+                XCTAssertEqual(settings.notificationChannels, [.figure, .systemNotification])
+                XCTAssertEqual(settings.doneHandling, .gate)
+                XCTAssertTrue(settings.inventoryAllowed)
+                XCTAssertEqual(settings.budgetLimitPercent, 80)
+                XCTAssertEqual(settings.skillLevel, .many)
+                XCTAssertEqual(settings.figureName, defaultFigureName)
+                XCTAssertEqual(settings.endpoints.profiles.map(\.id), ["lokal-whisper", "macos-say"])
+                XCTAssertEqual(settings.endpoints.chain(.stt).map(\.id), ["lokal-whisper", "macos-say"])
             case .sessions, .unrecognised:
                 break
             }
         }
-        XCTAssertEqual(seen, ["chunk", "capabilities", "sent", "ack", "session"])
+        XCTAssertEqual(seen, ["chunk", "capabilities", "sent", "ack", "session", "settings"])
     }
 
     func testConnectionLevelDropAndRefusal() throws {
@@ -205,6 +221,30 @@ final class ServerMessageFixtureTests: XCTestCase {
 /// What the shell sends, checked against the lines the Rust types produce for the same
 /// values. Compared as parsed JSON, because the order of keys is an encoder's business.
 final class ClientMessageFixtureTests: XCTestCase {
+    /// The document the fixture generator writes, field for field. A difference here is a
+    /// difference between what this shell sends and what the daemon reads.
+    static let fixtureSettings = DaemonSettings(
+        toolBoundary: .readOnly,
+        agentBoundary: .ask,
+        enabledAdapters: ["workbench", "claude-code"],
+        notificationChannels: [.figure, .systemNotification],
+        doneHandling: .gate,
+        inventoryAllowed: true,
+        budgetLimitPercent: 80,
+        skillLevel: .many,
+        figureName: defaultFigureName,
+        endpoints: EndpointConfig(
+            profiles: [
+                EndpointProfile(
+                    id: "lokal-whisper", protocolKind: .whisperServer,
+                    url: "http://127.0.0.1:8765", model: "ggml-large-v3"),
+                EndpointProfile(id: "macos-say", protocolKind: .cli, url: "/usr/bin/say"),
+            ],
+            roles: [
+                .stt: RoleBinding(primary: "lokal-whisper", fallback: ["macos-say"]),
+                .tts: RoleBinding(primary: "macos-say"),
+            ]))
+
     func testTheShellWritesWhatTheDaemonReads() throws {
         let expected = try RepositoryLayout.lines(of: "client_messages.jsonl")
         let mine: [ClientMessage] = [
@@ -219,6 +259,9 @@ final class ClientMessageFixtureTests: XCTestCase {
             .request(RequestEnvelope(id: 7, request: .interrupt(
                 sessionId: "-Users-me-AI-companion"))),
             .request(RequestEnvelope(id: 5, request: .capabilities(adapter: "workbench"))),
+            .request(RequestEnvelope(id: 8, request: .getSettings)),
+            .request(RequestEnvelope(id: 9, request: .setSettings(
+                Self.fixtureSettings, confirmHighRisk: false))),
         ]
         // One line short of the fixture on purpose: the last line is `run_gate` in the shape
         // it had before the approval was tied to a hash, with project, job id and hash all

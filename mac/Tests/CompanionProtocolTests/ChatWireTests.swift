@@ -106,10 +106,10 @@ final class ChatEventWireTests: XCTestCase {
         }
     }
 
-    /// The three chat kinds have their own names among the twenty, and the shell can tell them
-    /// from the voice ones without looking at the payload.
-    func testTheThreeChatKindsAreAmongTheTwenty() {
-        XCTAssertEqual(EventKind.allCases.count, 20)
+    /// The three chat kinds have their own names among the twenty-one, and the shell can tell
+    /// them from the voice ones without looking at the payload.
+    func testTheThreeChatKindsAreAmongTheTwentyOne() {
+        XCTAssertEqual(EventKind.allCases.count, 21)
         for kind in ChatEventKind.allCases {
             let matching = EventKind(rawValue: kind.rawValue)
             XCTAssertNotNil(matching, "\(kind.rawValue) is missing from EventKind")

@@ -461,18 +461,7 @@ final class PreviewRenderTests: XCTestCase {
             let suite = "de.skryx.companion.preview.\(UUID().uuidString.prefix(8))"
             let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
             defer { defaults.removePersistentDomain(forName: suite) }
-            let store = LocalEndpointDraftStore(defaults: defaults) { _, completion in
-                completion(.success([
-                    EndpointHealth(
-                        profile: "macos-say", protocolKind: .cli, reachable: true,
-                        latencyMs: .measured(3), checkedAtMs: 1),
-                    EndpointHealth(
-                        profile: "lokal-whisper", protocolKind: .whisperServer,
-                        reachable: false, latencyMs: .unknown, checkedAtMs: 1,
-                        detail: "Verbindung abgelehnt"),
-                ]))
-            }
-            store.saveEndpoints(EndpointConfig(
+            let daemon = StubDaemon(settings: DaemonSettings(endpoints: EndpointConfig(
                 profiles: [
                     EndpointProfile(id: "macos-say", protocolKind: .cli, url: "/usr/bin/say"),
                     EndpointProfile(
@@ -482,7 +471,17 @@ final class PreviewRenderTests: XCTestCase {
                 roles: [
                     .tts: RoleBinding(primary: "macos-say"),
                     .stt: RoleBinding(primary: "lokal-whisper"),
-                ])) { _ in }
+                ])))
+            daemon.health = [[
+                EndpointHealth(
+                    profile: "macos-say", protocolKind: .cli, reachable: true,
+                    latencyMs: .measured(3), checkedAtMs: 1),
+                EndpointHealth(
+                    profile: "lokal-whisper", protocolKind: .whisperServer,
+                    reachable: false, latencyMs: .unknown, checkedAtMs: 1,
+                    detail: "Verbindung abgelehnt"),
+            ]]
+            let store = DaemonSettingsStore(send: daemon.sending, defaults: defaults)
             let controller = EndpointsController(service: store)
             controller.load()
             controller.probe()

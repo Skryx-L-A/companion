@@ -41,6 +41,10 @@ public final class OverlayController {
     public var onFullSetup: ((OnboardingFlow) -> Void)?
     /// Opens the wakeword enrollment. Set by the shell, which owns that window.
     public var onTrainWakeword: (() -> Void)?
+    /// Called when the quick start is over, whether it was answered or left early. The shell
+    /// uses it to hand the answers that belong to the daemon over to it. Not called when the
+    /// quick start hands over to the full setup: that run is not over, it moved.
+    public var onOnboardingClosed: (() -> Void)?
     /// What macOS says about the microphone. Written by the shell, read by the setup.
     public var microphoneStatusText: String = "unbekannt"
 
@@ -248,6 +252,7 @@ public final class OverlayController {
     private func closeOnboarding() {
         onboardingFlow = nil
         closeOnboardingPanel()
+        onOnboardingClosed?()
     }
 
     private func closeOnboardingPanel() {

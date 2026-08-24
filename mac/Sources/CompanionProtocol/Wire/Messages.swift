@@ -223,6 +223,17 @@ public enum Request: Sendable, Equatable {
     /// `DESIGN.md` section Endpoints uses the measurement to order the STT and TTS endpoints
     /// during setup. `nil` measures every configured profile, a role measures only its own.
     case probeEndpoints(role: EndpointRole?)
+    /// The settings document the daemon is working with.
+    case getSettings
+    /// Replaces the settings document. The daemon checks it the way it checks the file at
+    /// load time and writes it atomically, or refuses the whole document and changes
+    /// nothing.
+    ///
+    /// `confirmHighRisk` is true only where a person confirmed the warning for the raise
+    /// this document contains: `DESIGN.md` section Sicherheit lets only the person put mail,
+    /// push or publish on `full`. A raise sent without it is refused, which is the point —
+    /// the promise holds in the daemon, not in a habit of this shell.
+    case setSettings(DaemonSettings, confirmHighRisk: Bool)
 
     /// The name the daemon dispatches on.
     public var name: String {
@@ -243,6 +254,8 @@ public enum Request: Sendable, Equatable {
         case .ttsSpeak: return "tts_speak"
         case .chatMessage: return "chat_message"
         case .probeEndpoints: return "probe_endpoints"
+        case .getSettings: return "get_settings"
+        case .setSettings: return "set_settings"
         }
     }
 
@@ -311,6 +324,8 @@ extension ClientMessage: Encodable {
         case language
         case voice
         case role
+        case settings
+        case confirmHighRisk = "confirm_high_risk"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -382,6 +397,13 @@ extension ClientMessage: Encodable {
                 // Left off while it is nil, the way `list` leaves its options off: no role
                 // means every configured profile is measured.
                 try container.encodeIfPresent(role, forKey: .role)
+            case .getSettings:
+                break
+            case .setSettings(let settings, let confirmHighRisk):
+                try container.encode(settings, forKey: .settings)
+                // Always written, never left to a default: this field is what stands
+                // between a raise and a person who confirmed it.
+                try container.encode(confirmHighRisk, forKey: .confirmHighRisk)
             }
         }
     }
@@ -511,6 +533,8 @@ public enum ResponseBody: Sendable, Equatable {
     case voiceStream(voiceId: VoiceId)
     /// What the latency probe found, one entry per profile it measured.
     case endpoints([EndpointHealth])
+    /// The settings document, as the daemon is working with it right now.
+    case settings(DaemonSettings)
     /// The request was carried out and has nothing to return.
     case ack
     /// A body a newer daemon knows and this shell does not.
@@ -532,6 +556,7 @@ extension ResponseBody: Codable {
         case gateDisplay = "gate_display"
         case voiceId = "voice_id"
         case endpoints
+        case settings
     }
 
     public init(from decoder: any Decoder) throws {
@@ -560,6 +585,8 @@ extension ResponseBody: Codable {
             self = .voiceStream(voiceId: try container.decode(VoiceId.self, forKey: .voiceId))
         case "endpoints":
             self = .endpoints(try container.decode([EndpointHealth].self, forKey: .endpoints))
+        case "settings":
+            self = .settings(try container.decode(DaemonSettings.self, forKey: .settings))
         case "ack":
             self = .ack
         default:
@@ -598,6 +625,9 @@ extension ResponseBody: Codable {
         case .endpoints(let endpoints):
             try container.encode("endpoints", forKey: .body)
             try container.encode(endpoints, forKey: .endpoints)
+        case .settings(let settings):
+            try container.encode("settings", forKey: .body)
+            try container.encode(settings, forKey: .settings)
         case .ack:
             try container.encode("ack", forKey: .body)
         case .unrecognised(let body):

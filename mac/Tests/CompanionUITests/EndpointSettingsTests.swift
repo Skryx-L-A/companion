@@ -234,14 +234,17 @@ final class EndpointsControllerTests: XCTestCase {
             latencyMs: latency.map { Provenance.measured($0) } ?? .unknown, checkedAtMs: 1)
     }
 
-    func testADraftSurvivesTheWindowBeingClosed() {
-        let store = LocalEndpointDraftStore(defaults: defaults)
-        let first = EndpointsController(service: store)
+    func testWhatWasEditedGoesToTheDaemonAndComesBackFromIt() {
+        let daemon = StubDaemon()
+        let first = EndpointsController(
+            service: DaemonSettingsStore(send: daemon.sending, defaults: defaults))
+        first.load()
         first.draft.profiles = [EndpointProfile(
             id: "lokal", protocolKind: .ollama, url: "http://127.0.0.1:11434", model: "qwen3")]
         first.save()
 
-        let second = EndpointsController(service: LocalEndpointDraftStore(defaults: defaults))
+        let second = EndpointsController(
+            service: DaemonSettingsStore(send: daemon.sending, defaults: defaults))
         second.load()
         XCTAssertEqual(second.draft.profiles.map(\.id), ["lokal"])
         XCTAssertEqual(second.draft.profiles.first?.model, "qwen3")
@@ -249,23 +252,16 @@ final class EndpointsControllerTests: XCTestCase {
 
     /// The page says what is open instead of writing a configuration the daemon would refuse.
     func testADraftWithProblemsIsNotSaved() {
-        let controller = EndpointsController(service: LocalEndpointDraftStore(defaults: defaults))
+        let daemon = StubDaemon()
+        let controller = EndpointsController(
+            service: DaemonSettingsStore(send: daemon.sending, defaults: defaults))
+        controller.load()
         controller.draft.profiles = [EndpointProfile(
             id: "cloud", protocolKind: .anthropic, url: "")]
         controller.save()
 
         XCTAssertNotNil(controller.notice)
-        let reopened = EndpointsController(service: LocalEndpointDraftStore(defaults: defaults))
-        reopened.load()
-        XCTAssertEqual(reopened.draft.profiles, [], "nothing was written")
-    }
-
-    /// The daemon owns the settings file, and this protocol has no request that reads or writes
-    /// it. The page says so at the top rather than pretending the draft is in effect.
-    func testThePageSaysThatTheDaemonCannotTakeTheseSettingsYet() {
-        let controller = EndpointsController(service: LocalEndpointDraftStore(defaults: defaults))
-        controller.load()
-        XCTAssertTrue(controller.isDaemonWriteMissing)
+        XCTAssertEqual(daemon.written, [], "nothing was sent")
     }
 
     func testAMeasurementOfOneRoleDoesNotThrowAwayTheOthers() {
@@ -273,10 +269,10 @@ final class EndpointsControllerTests: XCTestCase {
             [health("lokal", latency: 12), health("cloud", latency: 240)],
             [health("cloud", latency: 90)],
         ]
-        let store = LocalEndpointDraftStore(defaults: defaults) { _, completion in
-            completion(.success(answers.removeFirst()))
-        }
-        let controller = EndpointsController(service: store)
+        let daemon = StubDaemon()
+        daemon.health = answers
+        let controller = EndpointsController(
+            service: DaemonSettingsStore(send: daemon.sending, defaults: defaults))
 
         controller.probe()
         controller.probe(role: .chatLlm)
@@ -290,10 +286,10 @@ final class EndpointsControllerTests: XCTestCase {
     /// An endpoint that did not answer has no latency, and the page says that instead of
     /// showing a zero somebody could read as fast.
     func testAnUnreachableEndpointShowsNoNumber() {
-        let store = LocalEndpointDraftStore(defaults: defaults) { _, completion in
-            completion(.success([self.health("cloud", latency: nil)]))
-        }
-        let controller = EndpointsController(service: store)
+        let daemon = StubDaemon()
+        daemon.health = [[health("cloud", latency: nil)]]
+        let controller = EndpointsController(
+            service: DaemonSettingsStore(send: daemon.sending, defaults: defaults))
         controller.probe()
 
         let entry = controller.health(of: "cloud")
@@ -302,10 +298,10 @@ final class EndpointsControllerTests: XCTestCase {
     }
 
     func testAFailedMeasurementIsSaidOutLoud() {
-        let store = LocalEndpointDraftStore(defaults: defaults) { _, completion in
-            completion(.failure(ActionFailure("Es besteht keine Verbindung zum Daemon.")))
-        }
-        let controller = EndpointsController(service: store)
+        let daemon = StubDaemon()
+        daemon.failures["probe_endpoints"] = .failed("Es besteht keine Verbindung zum Daemon.")
+        let controller = EndpointsController(
+            service: DaemonSettingsStore(send: daemon.sending, defaults: defaults))
         controller.probe()
         XCTAssertEqual(controller.notice, "Es besteht keine Verbindung zum Daemon.")
         XCTAssertTrue(controller.health.isEmpty)

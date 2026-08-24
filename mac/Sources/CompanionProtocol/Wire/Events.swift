@@ -48,8 +48,9 @@ extension EndReason: RawRepresentable, Codable {
 
 /// The name of an event without its payload: the thirteen an adapter or the bus produces, in
 /// the order `DESIGN.md` section Session-Adapter lists them, the four the voice pipeline
-/// produces, and the three the companion's own answer produces. No adapter ever delivers a
-/// voice or a chat event; they belong to no session.
+/// produces, the three the companion's own answer produces, and the one the daemon sends when
+/// its settings document changed. No adapter ever delivers a voice, a chat or a settings
+/// event; they belong to no session.
 public enum EventKind: String, Sendable, Codable, Hashable, CaseIterable {
     case sessionStarted = "session_started"
     case sessionEnded = "session_ended"
@@ -71,6 +72,7 @@ public enum EventKind: String, Sendable, Codable, Hashable, CaseIterable {
     case chatDelta = "chat_delta"
     case chatTool = "chat_tool"
     case chatDone = "chat_done"
+    case settingsChanged = "settings_changed"
 
     /// True for the four that come from the voice pipeline rather than from a session.
     public var isVoice: Bool {
@@ -123,6 +125,9 @@ public enum Event: Sendable, Equatable {
     /// same reason speech is: the chat panel reads it as one thing and nothing else in the
     /// interface looks at it at all.
     case chat(ChatEvent)
+    /// The settings document changed, here or in another shell of the person. It carries
+    /// nothing: whoever cares reads the document again.
+    case settingsChanged
     /// An event a newer daemon knows and this shell does not. Kept so the sequence stays
     /// readable instead of the whole line being dropped.
     case unrecognised(kind: String)
@@ -155,6 +160,7 @@ public enum Event: Sendable, Equatable {
             case .chatTool: return .chatTool
             case .chatDone: return .chatDone
             }
+        case .settingsChanged: return .settingsChanged
         case .unrecognised: return nil
         }
     }
@@ -244,6 +250,8 @@ extension Event: Codable {
             self = .voice(try VoiceEvent(from: decoder))
         case .chatDelta, .chatTool, .chatDone:
             self = .chat(try ChatEvent(from: decoder))
+        case .settingsChanged:
+            self = .settingsChanged
         case nil:
             self = .unrecognised(kind: tag)
         }
@@ -303,6 +311,8 @@ extension Event: Codable {
             try voice.encode(to: encoder)
         case .chat(let chat):
             try chat.encode(to: encoder)
+        case .settingsChanged:
+            try container.encode(EventKind.settingsChanged.rawValue, forKey: .event)
         case .unrecognised(let kind):
             try container.encode(kind, forKey: .event)
         }

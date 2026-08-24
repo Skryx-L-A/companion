@@ -39,31 +39,30 @@ struct EndpointsSettingsView: View {
         .onAppear { controller.load() }
     }
 
-    // MARK: - The standing notice
+    // MARK: - The notice for an older daemon
 
-    /// Said once, at the top, and not repeated per field.
+    /// Said once, at the top, and only where it is true.
     ///
-    /// The daemon owns the settings file. This version of the protocol has no request that
-    /// reads or writes it, so everything below is a draft on this machine. Saying that plainly
-    /// is the only honest way to show an editable page at all.
+    /// The daemon owns the settings file, and this shell reads and writes it over the socket.
+    /// An older daemon has no request for that, and then the page would be a form that goes
+    /// nowhere; saying so is the only honest way to leave it on screen at all.
     private var draftNotice: some View {
         Section {
             Label {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Entwurf, noch nicht in Kraft")
+                    Text("Der Daemon kann diese Seite nicht entgegennehmen")
                         .font(.headline)
                     Text("""
-                        Die Einstellungsdatei gehoert dem Daemon. Dieses Protokoll hat noch \
-                        keinen Weg, sie zu lesen oder zu schreiben, deshalb bleibt alles auf \
-                        dieser Seite ein Entwurf auf diesem Rechner. Die Messung unten fragt \
-                        dagegen den Daemon und zeigt, was er wirklich konfiguriert hat.
+                        Dieser Daemon ist aelter als die Oberflaeche und kennt den Weg noch \
+                        nicht, seine Einstellungsdatei zu lesen oder zu schreiben. Was hier \
+                        steht, bleibt deshalb ohne Wirkung, bis der Daemon aktuell ist.
                         """)
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             } icon: {
-                Image(systemName: "info.circle")
+                Image(systemName: "exclamationmark.triangle")
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)
             }
@@ -89,7 +88,7 @@ struct EndpointsSettingsView: View {
                     expanded.insert(name)
                 }
                 Spacer(minLength: 8)
-                Button(controller.isSaving ? "Sichern laeuft" : "Entwurf sichern") {
+                Button(controller.isSaving ? "Sichern laeuft" : "Sichern") {
                     controller.save()
                 }
                 .disabled(controller.isSaving)

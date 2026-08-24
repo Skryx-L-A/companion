@@ -67,7 +67,10 @@ public enum EventMapping {
         // the input field once it is recognised. A chat line for every partial would push the
         // history away under a sentence that is still being said. The companion's own answer
         // is written by `ChatController`, which has to assemble it out of its pieces first.
-        case .busy, .idle, .contextLevel, .budgetLevel, .iteration, .voice, .chat, .unrecognised:
+        // A changed settings document is read again rather than talked about: whoever wrote
+        // it was looking at the page, and the other shells simply follow.
+        case .busy, .idle, .contextLevel, .budgetLevel, .iteration, .voice, .chat,
+             .settingsChanged, .unrecognised:
             return nil
         }
     }

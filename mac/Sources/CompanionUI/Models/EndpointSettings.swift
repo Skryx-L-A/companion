@@ -252,10 +252,10 @@ public final class EndpointDraft {
 
 // MARK: - What the shell needs from the daemon
 
-/// Why reading or writing the endpoint settings did not work.
+/// Why reading or writing the settings did not work.
 public enum EndpointStoreFailure: Error, Sendable, Equatable {
-    /// This version of the protocol has no request for it. Not a fault of the daemon and not
-    /// one of the connection: the way simply does not exist yet.
+    /// This daemon has no request for it. Not a fault of the connection: it is an older
+    /// daemon than this shell, and the way simply does not exist on the other side.
     case notInProtocol
     case failed(String)
 
@@ -263,8 +263,8 @@ public enum EndpointStoreFailure: Error, Sendable, Equatable {
         switch self {
         case .notInProtocol:
             return """
-                Der Daemon besitzt die Einstellungsdatei, und dieses Protokoll hat noch keinen \
-                Weg, sie zu lesen oder zu schreiben.
+                Dieser Daemon ist aelter als diese Oberflaeche und kennt den Weg noch nicht, \
+                seine Einstellungsdatei zu lesen oder zu schreiben.
                 """
         case .failed(let reason):
             return reason
@@ -274,12 +274,9 @@ public enum EndpointStoreFailure: Error, Sendable, Equatable {
 
 /// Reading and writing the endpoint part of the settings, and measuring what is configured.
 ///
-/// `probe` is a request the daemon answers today. `load` and `save` are the two halves that
-/// the protocol is still missing: the settings file belongs to the daemon, so the shell does
-/// not write it, and a request for it has to be defined on the daemon side before this can do
-/// anything but say so. Everything above this line is built against the interface rather than
-/// against the request, so filling that gap is one new implementation and no change to the
-/// settings page.
+/// All three are requests the daemon answers: `get_settings`, `set_settings` and
+/// `probe_endpoints`. The interface stays in front of them so the settings page can be driven
+/// by a stub in a test; `DaemonSettingsStore` is the implementation the shell uses.
 @MainActor
 public protocol EndpointSettingsService: AnyObject {
     func loadEndpoints(completion: @escaping (Result<EndpointConfig, EndpointStoreFailure>) -> Void)
@@ -289,62 +286,6 @@ public protocol EndpointSettingsService: AnyObject {
     func probeEndpoints(
         role: EndpointRole?,
         completion: @escaping (Result<[EndpointHealth], ActionFailure>) -> Void)
-}
-
-/// Keeps the draft on this machine until the daemon can take it.
-///
-/// This is not a second settings file and does not pretend to be one: nothing here reaches the
-/// daemon, and the settings page says so above every field. It exists so that a person who
-/// fills the page in does not lose the work when the window closes, and so that the day the
-/// protocol grows the two requests, there is something to send.
-@MainActor
-public final class LocalEndpointDraftStore: EndpointSettingsService {
-    private let defaults: UserDefaults
-    private let key = "endpoints.draft"
-    private let probe: (EndpointRole?, @escaping (Result<[EndpointHealth], ActionFailure>) -> Void) -> Void
-
-    /// - Parameter probe: what to run for a latency measurement. The shell passes its daemon
-    ///   connection; a test passes a closure that answers without a daemon.
-    public init(
-        defaults: UserDefaults = .standard,
-        probe: @escaping (EndpointRole?, @escaping (Result<[EndpointHealth], ActionFailure>) -> Void) -> Void
-            = { _, completion in completion(.failure(ActionFailure("Keine Verbindung zum Daemon."))) }
-    ) {
-        self.defaults = defaults
-        self.probe = probe
-    }
-
-    public func loadEndpoints(
-        completion: @escaping (Result<EndpointConfig, EndpointStoreFailure>) -> Void
-    ) {
-        guard let data = defaults.data(forKey: key) else {
-            return completion(.success(EndpointConfig()))
-        }
-        do {
-            completion(.success(try JSONDecoder().decode(EndpointConfig.self, from: data)))
-        } catch {
-            completion(.failure(.failed("Der gespeicherte Entwurf ist nicht lesbar: \(error).")))
-        }
-    }
-
-    public func saveEndpoints(
-        _ config: EndpointConfig,
-        completion: @escaping (Result<Void, EndpointStoreFailure>) -> Void
-    ) {
-        do {
-            defaults.set(try JSONEncoder().encode(config), forKey: key)
-            completion(.success(()))
-        } catch {
-            completion(.failure(.failed("Der Entwurf liess sich nicht sichern: \(error).")))
-        }
-    }
-
-    public func probeEndpoints(
-        role: EndpointRole?,
-        completion: @escaping (Result<[EndpointHealth], ActionFailure>) -> Void
-    ) {
-        probe(role, completion)
-    }
 }
 
 // MARK: - Words for the settings page

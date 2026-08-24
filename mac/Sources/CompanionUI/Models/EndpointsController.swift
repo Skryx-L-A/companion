@@ -18,9 +18,10 @@ public final class EndpointsController {
     public private(set) var isSaving = false
     /// The last thing that happened, in one line. Nil while there is nothing to say.
     public private(set) var notice: String?
-    /// True when the daemon has no way to take these settings. The page then says once, at the
-    /// top, that what is filled in here is a draft and not in effect.
-    public private(set) var isDaemonWriteMissing = true
+    /// True when this daemon is older than the shell and has no request for the settings
+    /// document. The page then says so once, at the top, instead of letting somebody fill in a
+    /// form that goes nowhere.
+    public private(set) var isDaemonWriteMissing = false
 
     private let service: any EndpointSettingsService
     /// True once `load` has run. The page calls it every time it appears, and a second read
@@ -41,6 +42,7 @@ public final class EndpointsController {
             guard let self else { return }
             switch result {
             case .success(let config):
+                self.isDaemonWriteMissing = false
                 self.draft.apply(config)
             case .failure(.notInProtocol):
                 self.isDaemonWriteMissing = true
@@ -62,7 +64,10 @@ public final class EndpointsController {
             self.isSaving = false
             switch result {
             case .success:
-                self.notice = "Entwurf gesichert."
+                self.notice = "Gesichert. Der Daemon arbeitet damit."
+            case .failure(.notInProtocol):
+                self.isDaemonWriteMissing = true
+                self.notice = EndpointStoreFailure.notInProtocol.message
             case .failure(let failure):
                 self.notice = failure.message
             }

@@ -47,21 +47,27 @@ public final class CompanionShell {
     /// shell without voice can still be typed at.
     private let chat: ChatController
 
+    /// The settings document of the daemon, as this shell reads and writes it.
+    ///
+    /// Built with the shell rather than on first use, because the handshake reaches for it:
+    /// the answers of the setup assistant that belong to the daemon are handed over on the
+    /// first connect, and that happens whether or not anybody opens a window.
+    private lazy var settingsStore: DaemonSettingsStore = {
+        DaemonSettingsStore(
+            send: { [weak self] request, completion in
+                guard let self else {
+                    return completion(.failure(.failed("Die Shell ist nicht mehr da.")))
+                }
+                self.request(request, completion: completion)
+            },
+            defaults: defaults)
+    }()
+
     /// The endpoints page of the settings.
     ///
     /// Built on first use, because the settings window is the only thing that shows it and most
-    /// runs never open it. The draft lives on this machine: the daemon owns the settings file
-    /// and this protocol has no request that reads or writes it, so the page says so and
-    /// keeps what was typed until the day it can be sent.
-    private lazy var endpoints: EndpointsController = {
-        let store = LocalEndpointDraftStore(defaults: defaults) { [weak self] role, completion in
-            guard let self else {
-                return completion(.failure(ActionFailure("Die Shell ist nicht mehr da.")))
-            }
-            self.probeEndpoints(role: role, completion: completion)
-        }
-        return EndpointsController(service: store)
-    }()
+    /// runs never open it.
+    private lazy var endpoints = EndpointsController(service: settingsStore)
 
     /// - Parameter voiceEnabled: false leaves the whole voice path unbuilt — no audio engine,
     ///   no global key. That is what a test run uses: a suite must not take a key combination
@@ -109,6 +115,7 @@ public final class CompanionShell {
 
     public func start(connectToDaemon: Bool = true, onboarding: OnboardingPolicy = .auto) {
         overlay.onSubmit = { [weak self] text in self?.chat.send(text) }
+        overlay.onOnboardingClosed = { [weak self] in self?.handSetupAnswersOver() }
         overlay.onAnswer = { [weak self] question, text in self?.answer(question, with: text) }
         overlay.onOpenSettings = { [weak self] in self?.showSettings() }
         overlay.onFullSetup = { [weak self] flow in self?.showFullSetup(continuing: flow) }
@@ -209,29 +216,47 @@ public final class CompanionShell {
             microphoneStatus: microphoneStatusText,
             onTrainWakeword: { [weak self] in self?.openWakewordEnrollment() },
             onOpenEndpoints: { [weak self] in self?.showSettings() },
-            onClose: {})
+            // Whatever the assistant answered goes to the daemon, because nine of the
+            // thirteen points are its business and not the shell's.
+            onClose: { [weak self] in self?.handSetupAnswersOver() })
         ToolDetection.detectInBackground { [weak self] tools in
             self?.overlay.model.detectedTools = tools
         }
     }
 
-    /// Measures what the daemon has configured. `DESIGN.md` section Endpoints.
-    private func probeEndpoints(
-        role: EndpointRole?,
-        completion: @escaping (Result<[EndpointHealth], ActionFailure>) -> Void
+    /// Hands the answers of the setup assistant to the daemon.
+    ///
+    /// Called when either path of `DESIGN.md` section Ersteinrichtung closes, including an
+    /// abort: an abort puts back what was in effect before, and that is an answer too. A raise
+    /// nobody confirmed is never in there — the assistant does not offer one and the store
+    /// takes one out.
+    private func handSetupAnswersOver() {
+        settingsStore.pushSetupAnswers(from: settings) { [weak self] result in
+            guard case .failure(let failure) = result, case .failed(let reason) = failure else {
+                return
+            }
+            self?.systemMessage("Die Einstellungen sind nicht beim Daemon angekommen: \(reason)")
+        }
+    }
+
+    /// Sends one request for the settings store and translates what came back.
+    ///
+    /// A daemon that does not know the request answers `not_supported`, and that is not a
+    /// failure of the connection but an older daemon: the store and the page say so in their
+    /// own words instead of showing a protocol error.
+    private func request(
+        _ request: Request,
+        completion: @escaping (Result<ResponseBody, EndpointStoreFailure>) -> Void
     ) {
-        client.request(.probeEndpoints(role: role)) { [weak self] result in
+        client.request(request) { [weak self] result in
             guard let self else { return }
             switch result {
-            case .success(.endpoints(let health)):
-                completion(.success(health))
             case .success(let body):
-                completion(.failure(ActionFailure("Unerwartete Antwort auf die Messung: \(body).")))
+                completion(.success(body))
             case .failure(.daemon(let error)) where error.code == .notSupported:
-                completion(.failure(ActionFailure(
-                    "Dieser Daemon misst keine Endpoints: \(error.message)")))
+                completion(.failure(.notInProtocol))
             case .failure(let failure):
-                completion(.failure(ActionFailure(self.describe(failure))))
+                completion(.failure(.failed(self.describe(failure))))
             }
         }
     }
@@ -730,6 +755,10 @@ public final class CompanionShell {
             chat.connectionChanged()
             refreshVoiceState()
             refreshSessions()
+            // DESIGN.md, Ersteinrichtung: nine of the thirteen answers decide what the daemon
+            // does, so they belong in its document. This hands them over once and afterwards
+            // reads back what is in force.
+            settingsStore.synchronise(with: settings)
         case .refused(let error):
             model.isDaemonReady = false
             model.daemonStatusText = "abgewiesen: \(error.message)"
@@ -818,6 +847,13 @@ public final class CompanionShell {
         // is the only thing that reads it.
         if let chatEvent = envelope.event.chatEvent {
             chat.handle(chatEvent)
+            return
+        }
+
+        // Somebody wrote the settings, here or in a second shell of the person. What this one
+        // has of the document is stale, so it reads it again rather than keeping it.
+        if case .settingsChanged = envelope.event {
+            settingsStore.synchronise(with: settings)
             return
         }
 
