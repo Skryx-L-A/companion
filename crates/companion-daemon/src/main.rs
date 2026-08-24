@@ -8,8 +8,9 @@ use std::time::Duration;
 use companion_adapter_claude::{ClaudeAdapter, ClaudeConfig};
 use companion_adapter_workbench::{WorkbenchAdapter, WorkbenchConfig};
 use companion_core::adapter::AdapterSet;
-use companion_core::{FileTokenStore, Registry, TokenStore, paths};
-use companion_daemon::{ServerConfig, prepare_config, start};
+use companion_core::{FileSecretStore, FileTokenStore, Registry, TokenStore, paths};
+use companion_daemon::{ServerConfig, VoiceSetup, prepare_config, start};
+use companion_voice::VoiceLimits;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -86,8 +87,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     info!(count = adapters.len(), "adapters registered");
 
+    // The endpoints come from the settings file, the keys from the store next to it. Both
+    // are read once here: a change to either takes effect on the next start, the same way a
+    // changed adapter list does.
+    let endpoints = Arc::new(settings.endpoints.clone());
+    info!(
+        profiles = endpoints.profiles.len(),
+        roles = endpoints.roles.len(),
+        "endpoints ready"
+    );
+    let voice = Some(VoiceSetup {
+        endpoints,
+        secrets: Arc::new(FileSecretStore::new(paths::secrets_path())),
+        limits: VoiceLimits::default(),
+    });
+
     let config = ServerConfig {
         adapters,
+        voice,
         ..ServerConfig::new(paths::socket_path(), tokens, registry)
     };
 

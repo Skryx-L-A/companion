@@ -59,6 +59,12 @@ pub fn registry_path() -> PathBuf {
     config_dir().join("register.sqlite3")
 }
 
+/// Fallback location for the keys of the endpoints where no keychain is available. The
+/// macOS shell replaces this with the system keychain, the same way it does for the tokens.
+pub fn secrets_path() -> PathBuf {
+    config_dir().join("secrets.json")
+}
+
 /// Fallback location for the tokens where no keychain is available. The macOS shell
 /// replaces this with the system keychain in the Mac track.
 pub fn token_file_path() -> PathBuf {

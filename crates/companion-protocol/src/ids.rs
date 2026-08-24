@@ -56,3 +56,7 @@ string_id!(
     AuftragId,
     "Identifies a job file under `.companion/auftraege/<id>.json`."
 );
+string_id!(
+    VoiceId,
+    "Identifies one dictation or one spoken answer. Assigned by the daemon, so a client cannot address a stream that is not its own."
+);

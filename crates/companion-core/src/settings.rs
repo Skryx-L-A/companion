@@ -14,6 +14,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::endpoints::{EndpointConfig, EndpointError};
 use crate::paths::write_private_file;
 
 /// Version of the settings file format.
@@ -93,6 +94,9 @@ pub struct Settings {
     /// a run that is done is the one thing somebody is actually waiting for.
     pub forward_done: bool,
     pub autonomy: Autonomy,
+    /// The provider profiles and which role uses which of them. Keys live in the keychain;
+    /// a profile here holds only the name of one.
+    pub endpoints: EndpointConfig,
 }
 
 impl Default for Settings {
@@ -105,6 +109,7 @@ impl Default for Settings {
             notification_channels: vec![NotificationChannel::Figure],
             forward_done: true,
             autonomy: Autonomy::Observe,
+            endpoints: EndpointConfig::default(),
         }
     }
 }
@@ -128,6 +133,12 @@ pub enum SettingsError {
         path: String,
         #[source]
         source: std::io::Error,
+    },
+    #[error("settings file {path} has an unusable endpoint configuration: {source}")]
+    Endpoints {
+        path: String,
+        #[source]
+        source: EndpointError,
     },
 }
 
@@ -160,6 +171,16 @@ impl Settings {
                 expected: SETTINGS_SCHEMA_VERSION,
             });
         }
+        // A broken endpoint configuration is reported at load time rather than at the first
+        // dictation: a key pasted into the settings file has to be visible while somebody
+        // is still looking at the file.
+        settings
+            .endpoints
+            .validate()
+            .map_err(|source| SettingsError::Endpoints {
+                path: path.display().to_string(),
+                source,
+            })?;
         Ok(settings)
     }
 
@@ -240,6 +261,7 @@ mod tests {
             "notification_channels",
             "forward_done",
             "autonomy",
+            "endpoints",
         ] {
             assert!(text.contains(key), "the file must name {key}: {text}");
         }
@@ -283,6 +305,22 @@ mod tests {
 
         let loaded = Settings::load(&path).unwrap();
         assert_eq!(loaded, settings);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_key_pasted_into_the_settings_is_refused_at_load_time() {
+        let path = temp_path("key-in-settings");
+        crate::paths::write_private_file(
+            &path,
+            br#"{"schema_version": 1, "endpoints": {"profiles": [
+                 {"id": "cloud", "protocol": "openai_compat",
+                  "url": "https://example.invalid", "key_ref": "sk-not-a-name"}]}}"#,
+        )
+        .unwrap();
+
+        let error = Settings::load(&path).expect_err("must not accept a key as a name");
+        assert!(matches!(error, SettingsError::Endpoints { .. }), "{error}");
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

@@ -232,7 +232,9 @@ pub fn permits(role: ClientRole, kind: RequestKind) -> bool {
         ClientRole::Human => true,
         // An orchestrator may report, ask and write the status of its own session. It may
         // not start, drive or stop anything, and it may not run a gate command; those are
-        // outward actions and stay with the person.
+        // outward actions and stay with the person. The voice requests are in the same
+        // class: the microphone and the speaker belong to the person at the machine, and an
+        // agent that could dictate or speak would be using them without anybody asking.
         ClientRole::Agent => matches!(
             kind,
             RequestKind::ReportStatus | RequestKind::AskQuestion | RequestKind::Report
@@ -289,6 +291,23 @@ mod tests {
             RequestKind::Capabilities,
             RequestKind::CreateAuftrag,
             RequestKind::ApproveAuftrag,
+        ] {
+            assert!(
+                !permits(ClientRole::Agent, kind),
+                "agent must not do {kind:?}"
+            );
+            assert!(permits(ClientRole::Human, kind), "human needs {kind:?}");
+        }
+    }
+
+    #[test]
+    fn only_the_person_may_use_the_microphone_and_the_speaker() {
+        for kind in [
+            RequestKind::VoiceBegin,
+            RequestKind::VoiceChunk,
+            RequestKind::VoiceEnd,
+            RequestKind::TtsSpeak,
+            RequestKind::ProbeEndpoints,
         ] {
             assert!(
                 !permits(ClientRole::Agent, kind),

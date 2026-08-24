@@ -1,0 +1,39 @@
+[package]
+name = "companion-voice"
+description = "Speech to text and text to speech drivers of the companion daemon, plus the latency probe of the configured endpoints."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+companion-core.workspace = true
+companion-protocol.workspace = true
+
+base64.workspace = true
+# Default features are off on purpose. Two of them would be wrong here:
+# `system-proxy` would send a request to 127.0.0.1 through whatever proxy the system
+# settings name, which is how a local whisper server looks unreachable while it is running
+# (measured in VoxType, see quassel/whisperclient.py), and `default-tls` is only picked up
+# explicitly so the TLS backend of this daemon is a decision and not an inherited default.
+reqwest = { workspace = true, default-features = false, features = [
+    "rustls",
+    "http2",
+    "charset",
+    "json",
+    "multipart",
+    "stream",
+] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "process", "sync", "time", "rt", "io-util"] }
+tokio-stream = { workspace = true, features = ["io-util"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

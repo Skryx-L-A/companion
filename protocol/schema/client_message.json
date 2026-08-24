@@ -793,6 +793,45 @@
         }
       ]
     },
+    "VoiceId": {
+      "description": "Identifies one dictation or one spoken answer. Assigned by the daemon, so a client cannot address a stream that is not its own.",
+      "type": "string"
+    },
+    "EndpointRole": {
+      "description": "What an endpoint is used for.\n\nThe list is the one from `DESIGN.md` § Endpoints. A role points at a provider profile,\nand several roles may point at the same one: local, Peer and cloud are only different\nURLs.",
+      "oneOf": [
+        {
+          "description": "The model the companion itself talks with.",
+          "type": "string",
+          "const": "chat_llm"
+        },
+        {
+          "description": "The model a spawned session runs on.",
+          "type": "string",
+          "const": "subagent_llm"
+        },
+        {
+          "description": "Speech to text.",
+          "type": "string",
+          "const": "stt"
+        },
+        {
+          "description": "Text to speech.",
+          "type": "string",
+          "const": "tts"
+        },
+        {
+          "description": "The local wakeword detector.",
+          "type": "string",
+          "const": "wakeword"
+        },
+        {
+          "description": "Speech to speech, an optional mode rather than the standard path.",
+          "type": "string",
+          "const": "s2s"
+        }
+      ]
+    },
     "RequestEnvelope": {
       "description": "A request with the id its response will carry.",
       "type": "object",
@@ -1102,6 +1141,128 @@
             "request",
             "session_id",
             "message"
+          ]
+        },
+        {
+          "description": "Opens one dictation. The daemon answers with the id every chunk of it carries.\n\nThere is no voice activity detection behind this: the shell decides where an\nutterance begins and ends, the daemon transcribes what it is given. That keeps the\nendpointing next to the microphone, where the audio and the barge-in state are.",
+          "type": "object",
+          "properties": {
+            "sample_rate_hz": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "default": 16000
+            },
+            "channels": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535,
+              "default": 1
+            },
+            "language": {
+              "description": "Language hint for the endpoint. Absent means the endpoint decides, which is\nwhat `DESIGN.md` § Voice wants: the language hangs on the model, not on the app.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "request": {
+              "type": "string",
+              "const": "voice_begin"
+            }
+          },
+          "required": [
+            "request"
+          ]
+        },
+        {
+          "description": "One piece of recorded audio: little-endian PCM16 samples, base64 encoded.",
+          "type": "object",
+          "properties": {
+            "voice_id": {
+              "$ref": "#/$defs/VoiceId"
+            },
+            "pcm16_base64": {
+              "type": "string"
+            },
+            "request": {
+              "type": "string",
+              "const": "voice_chunk"
+            }
+          },
+          "required": [
+            "request",
+            "voice_id",
+            "pcm16_base64"
+          ]
+        },
+        {
+          "description": "Ends the dictation. The transcript arrives as an `stt_final` event, not in the\nresponse: a client that waits for the answer to this request would block for as\nlong as the endpoint takes.",
+          "type": "object",
+          "properties": {
+            "voice_id": {
+              "$ref": "#/$defs/VoiceId"
+            },
+            "request": {
+              "type": "string",
+              "const": "voice_end"
+            }
+          },
+          "required": [
+            "request",
+            "voice_id"
+          ]
+        },
+        {
+          "description": "Speaks a text. The audio arrives as `tts_chunk` events, the end as `tts_done`.\n\nSplitting an answer into sentences happens above this: here one call is one piece\nof text, and the caller decides how much of it to hand over at a time.",
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "voice": {
+              "description": "Voice name to pass to the endpoint, when it has more than one.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "request": {
+              "type": "string",
+              "const": "tts_speak"
+            }
+          },
+          "required": [
+            "request",
+            "text"
+          ]
+        },
+        {
+          "description": "Measures the configured endpoints and returns what the probe found.",
+          "type": "object",
+          "properties": {
+            "role": {
+              "description": "Only the profiles of one role, or every configured profile when absent.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EndpointRole"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "request": {
+              "type": "string",
+              "const": "probe_endpoints"
+            }
+          },
+          "required": [
+            "request"
           ]
         }
       ]

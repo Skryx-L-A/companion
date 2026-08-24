@@ -14,8 +14,11 @@ companion-protocol = { path = "crates/companion-protocol" }
 companion-core = { path = "crates/companion-core" }
 companion-adapter-workbench = { path = "crates/companion-adapter-workbench" }
 companion-adapter-claude = { path = "crates/companion-adapter-claude" }
+companion-voice = { path = "crates/companion-voice" }
 
 async-trait = "0.1"
+base64 = "0.22"
+reqwest = { version = "0.13", default-features = false }
 rusqlite = { version = "0.40", features = ["bundled"] }
 schemars = "1.2"
 serde = { version = "1", features = ["derive"] }
@@ -27,6 +30,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 subtle = "2"
 thiserror = "2"
 tokio = "1"
+tokio-stream = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
