@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[package]
+name = "companion-wakeword-ffi"
+description = "C ABI around companion-wakeword: a static library the native shells link against."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "companion_wakeword_ffi"
+# staticlib for the shells, rlib so `cargo test` can build the unit tests against it.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+companion-wakeword = { path = "../companion-wakeword" }
+
+# Deliberately NOT `[lints] workspace = true`: the workspace forbids `unsafe_code`, and a C
+# ABI is unsafe by definition. This is the one crate in the workspace where unsafe is the
+# point, so the lint is relaxed here and nowhere else — every other crate keeps the ban.
+[lints.rust]
+unsafe_code = "allow"
+missing_docs = "warn"
