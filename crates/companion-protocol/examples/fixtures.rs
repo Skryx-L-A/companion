@@ -144,6 +144,17 @@ fn server_messages() -> Vec<ServerMessage> {
             message: "tmux nicht erreichbar".to_owned(),
         },
         Event::EventsDropped { missed: 4 },
+        Event::ChatDelta {
+            text: "Zwei Sessions laufen".to_owned(),
+        },
+        Event::ChatTool {
+            name: "list_sessions".to_owned(),
+            summary: "2 Sessions gelesen".to_owned(),
+        },
+        Event::ChatDone {
+            text: "Zwei Sessions laufen, keine wartet.".to_owned(),
+            spoken: true,
+        },
         Event::SttPartial {
             voice_id: VoiceId::from("v-1"),
             text: "starte die".to_owned(),
