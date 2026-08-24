@@ -199,6 +199,12 @@ public enum Request: Sendable, Equatable {
     case runGate(
         sessionId: SessionId, gateIndex: UInt32, project: String, auftragId: AuftragId,
         expectedHash: String)
+    /// Opens one spoken utterance. `DESIGN.md` section Voice; details in `Wire/Voice.swift`.
+    case voiceBegin(VoiceBegin)
+    /// One block of microphone audio of the utterance that is open.
+    case voiceChunk(voiceId: String, seq: UInt32, audio: Data)
+    /// Closes the utterance, saying whether it is to be recognised or thrown away.
+    case voiceEnd(voiceId: String, reason: VoiceEndReason)
 
     /// The name the daemon dispatches on.
     public var name: String {
@@ -213,6 +219,19 @@ public enum Request: Sendable, Equatable {
         case .createAuftrag: return "create_auftrag"
         case .approveAuftrag: return "approve_auftrag"
         case .runGate: return "run_gate"
+        case .voiceBegin: return "voice_begin"
+        case .voiceChunk: return "voice_chunk"
+        case .voiceEnd: return "voice_end"
+        }
+    }
+
+    /// True for the three requests that only work once the daemon knows voice. They are
+    /// answered with `not_supported` or `bad_request` by one that does not, and the shell
+    /// switches voice off for the connection rather than asking again per utterance.
+    public var isVoice: Bool {
+        switch self {
+        case .voiceBegin, .voiceChunk, .voiceEnd: return true
+        default: return false
         }
     }
 }
@@ -256,6 +275,10 @@ extension ClientMessage: Encodable {
         case prompt
         case auftrag
         case expectedHash = "expected_hash"
+        case voiceId = "voice_id"
+        case seq
+        case audio
+        case reason
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -303,6 +326,20 @@ extension ClientMessage: Encodable {
                 try container.encode(project, forKey: .project)
                 try container.encode(auftragId, forKey: .auftragId)
                 try container.encode(expectedHash, forKey: .expectedHash)
+            case .voiceBegin(let begin):
+                try container.encode(begin.voiceId, forKey: .voiceId)
+                // Left off while no session is picked, the way `list` leaves its options off.
+                try container.encodeIfPresent(begin.sessionId, forKey: .sessionId)
+                // Flattened onto the request, so the three format fields sit next to the id
+                // rather than in an object of their own.
+                try begin.format.encode(to: encoder)
+            case .voiceChunk(let voiceId, let seq, let audio):
+                try container.encode(voiceId, forKey: .voiceId)
+                try container.encode(seq, forKey: .seq)
+                try container.encode(audio.base64EncodedString(), forKey: .audio)
+            case .voiceEnd(let voiceId, let reason):
+                try container.encode(voiceId, forKey: .voiceId)
+                try container.encode(reason, forKey: .reason)
             }
         }
     }

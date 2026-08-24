@@ -23,6 +23,11 @@ struct Options {
     /// Throwaway settings domain. A test must never write into the settings the user is
     /// actually running with.
     var defaultsSuite: String?
+    /// Start without the voice path. A test run uses this: taking a global key combination
+    /// away from the person at the machine is an intervention, and so is opening a microphone.
+    var voiceEnabled = true
+    /// Report what the microphone path would do, without recording a sample.
+    var printAudioDiagnostics = false
 
     static func parse(_ arguments: [String]) -> Options {
         var options = Options()
@@ -62,6 +67,10 @@ struct Options {
             case "--defaults-suite":
                 index += 1
                 if index < arguments.count { options.defaultsSuite = arguments[index] }
+            case "--no-voice":
+                options.voiceEnabled = false
+            case "--audio-diagnostics":
+                options.printAudioDiagnostics = true
             case "--help":
                 print("""
                 companion-mac
@@ -75,6 +84,8 @@ struct Options {
                   --dump-sessions <pfad>     Sessionliste als JSON schreiben, vor dem Beenden
                   --snapshot <pfad>          Bild der Sessionliste schreiben, ohne Fenster
                   --defaults-suite <name>    Einstellungen in eine eigene Domain schreiben
+                  --no-voice                 ohne Mikrofon und ohne globale Taste starten
+                  --audio-diagnostics        Zustand des Mikrofonwegs als JSON, ohne Aufnahme
                 """)
                 exit(0)
             default:
@@ -102,10 +113,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let defaults = options.defaultsSuite.flatMap { UserDefaults(suiteName: $0) } ?? .standard
         let paths = CompanionPaths(configDirectory: options.configDirectory)
         let shell = CompanionShell(
-            paths: paths, socketPath: options.socketPath, defaults: defaults)
+            paths: paths, socketPath: options.socketPath, defaults: defaults,
+            voiceEnabled: options.voiceEnabled)
         shell.start(connectToDaemon: options.connectToDaemon, onboarding: options.onboarding)
         if options.demo { shell.seedDemoContent() }
         self.shell = shell
+
+        if options.printAudioDiagnostics { printAudioDiagnostics() }
 
         if options.printDiagnostics {
             // One line of JSON, so a test can read the window state without a screenshot.
@@ -120,6 +134,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let seconds = options.quitAfter {
             DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { NSApp.terminate(nil) }
         }
+    }
+
+    /// What the microphone path finds on this machine, as one line of JSON.
+    ///
+    /// Enabling the echo-cancelling audio unit and reading a format do not record anything and
+    /// do not raise a permission prompt, so this is safe to run on a machine somebody is
+    /// working on — which is the only way to check the graph without opening a microphone.
+    @MainActor
+    private func printAudioDiagnostics() {
+        var report = MicrophoneCapture().inspect()
+        report["microphonePermission"] = {
+            switch SystemMicrophoneAuthorization().authorization {
+            case .granted: return "granted"
+            case .denied: return "denied"
+            case .undetermined: return "undetermined"
+            }
+        }()
+        report["pushToTalkDefault"] = HotkeyCombination.pushToTalkDefault.settingsValue
+        guard let data = try? JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]),
+              let line = String(data: data, encoding: .utf8) else {
+            FileHandle.standardError.write(Data("Audiozustand liess sich nicht als JSON schreiben\n".utf8))
+            return
+        }
+        print(line)
+        fflush(stdout)
     }
 
     /// The dump and the picture are written on the way out, so they show what the shell knew

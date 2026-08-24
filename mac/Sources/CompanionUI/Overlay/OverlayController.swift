@@ -31,6 +31,8 @@ public final class OverlayController {
     public var sessionActions: SessionActions = .inert
     /// Called when the human asks for a new job. Nil while there is no daemon to write it.
     public var onNewAuftrag: (() -> Void)?
+    /// Starts or ends a recording. Set by the shell, which owns the voice pipeline.
+    public var onToggleVoice: (() -> Void)?
 
     public init(settings: AppSettings, spriteFolder: URL? = SpriteSet.defaultFolder) {
         self.settings = settings
@@ -120,6 +122,29 @@ public final class OverlayController {
             panel?.makeFirstResponder(nil)
         }
         apply(.userActivity)
+    }
+
+    /// What a click on the figure does. Speech input by click is a setting, and while it is
+    /// picked the click belongs to the microphone; the chat is then opened by the menu, by the
+    /// menu bar item, or by the recording itself.
+    public func figureClicked() {
+        if settings.voiceTrigger == .click, onToggleVoice != nil {
+            toggleVoice()
+        } else {
+            toggleChat()
+        }
+    }
+
+    public func toggleVoice() {
+        apply(.userActivity)
+        onToggleVoice?()
+    }
+
+    /// Opens the chat if it is closed. Used when a recording starts: the recognised text
+    /// appears in the panel, and a person who is dictating has to be able to read it.
+    public func showChat() {
+        guard !model.isChatOpen else { return }
+        toggleChat()
     }
 
     public func toggleSessionList() {

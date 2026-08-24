@@ -90,6 +90,9 @@ public enum Event: Sendable, Equatable {
     case error(message: String)
     /// Events were lost between an adapter and the bus before they could be numbered.
     case eventsDropped(missed: UInt64)
+    /// Speech, in either direction. `Wire/Voice.swift` says why these four are not in
+    /// `EventKind`: the schema the enum is held against does not have them yet.
+    case voice(VoiceEvent)
     /// An event a newer daemon knows and this shell does not. Kept so the sequence stays
     /// readable instead of the whole line being dropped.
     case unrecognised(kind: String)
@@ -109,8 +112,14 @@ public enum Event: Sendable, Equatable {
         case .iteration: return .iteration
         case .error: return .error
         case .eventsDropped: return .eventsDropped
-        case .unrecognised: return nil
+        case .voice, .unrecognised: return nil
         }
+    }
+
+    /// The voice event this is, or nil for one of the thirteen session events.
+    public var voiceEvent: VoiceEvent? {
+        guard case .voice(let event) = self else { return nil }
+        return event
     }
 }
 
@@ -183,7 +192,13 @@ extension Event: Codable {
         case .eventsDropped:
             self = .eventsDropped(missed: try container.decode(UInt64.self, forKey: .missed))
         case nil:
-            self = .unrecognised(kind: tag)
+            // Not one of the thirteen. The four voice names are read here rather than in
+            // `EventKind`, and everything else stays unrecognised with its name kept.
+            if let voice = try? VoiceEvent(from: decoder) {
+                self = .voice(voice)
+            } else {
+                self = .unrecognised(kind: tag)
+            }
         }
     }
 
@@ -237,6 +252,8 @@ extension Event: Codable {
         case .eventsDropped(let missed):
             try container.encode(EventKind.eventsDropped.rawValue, forKey: .event)
             try container.encode(missed, forKey: .missed)
+        case .voice(let voice):
+            try voice.encode(to: encoder)
         case .unrecognised(let kind):
             try container.encode(kind, forKey: .event)
         }

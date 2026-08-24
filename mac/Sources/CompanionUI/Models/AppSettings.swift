@@ -21,6 +21,9 @@ public final class AppSettings {
         static let workMode = "onboarding.workMode"
         static let defaultModelTool = "onboarding.defaultModelTool"
         static let voiceTrigger = "onboarding.voiceTrigger"
+        static let pushToTalkHotkey = "voice.pushToTalkHotkey"
+        static let halfDuplex = "voice.halfDuplex"
+        static let wakeword = "voice.wakeword"
     }
 
     public var corner: ScreenCorner {
@@ -58,9 +61,29 @@ public final class AppSettings {
         didSet { defaults.set(defaultModelTool, forKey: Key.defaultModelTool) }
     }
 
-    /// Quick start, question three. Voice arrives in phase 1b; only the answer is kept.
+    /// Quick start, question three: how speech input starts.
     public var voiceTrigger: VoiceTrigger {
         didSet { defaults.set(voiceTrigger.rawValue, forKey: Key.voiceTrigger) }
+    }
+
+    /// The combination push to talk sits on. Held down, the microphone runs.
+    public var pushToTalkHotkey: HotkeyCombination {
+        didSet { defaults.set(pushToTalkHotkey.settingsValue, forKey: Key.pushToTalkHotkey) }
+    }
+
+    /// Microphone muted while the figure speaks.
+    ///
+    /// `DESIGN.md` section Voice: barge-in needs echo cancellation, and without it the
+    /// pipeline falls back to half duplex. This is the switch for choosing that fallback
+    /// deliberately; a microphone that gives no cancellation forces it regardless.
+    public var halfDuplexWhileSpeaking: Bool {
+        didSet { defaults.set(halfDuplexWhileSpeaking, forKey: Key.halfDuplex) }
+    }
+
+    /// The word the figure is meant to wake up on. Kept now, used once there is an engine for
+    /// it; until then the key is what starts a recording.
+    public var wakeword: String {
+        didSet { defaults.set(wakeword, forKey: Key.wakeword) }
     }
 
     public init(defaults: UserDefaults = .standard) {
@@ -76,5 +99,12 @@ public final class AppSettings {
         defaultModelTool = defaults.string(forKey: Key.defaultModelTool)
         voiceTrigger = defaults.string(forKey: Key.voiceTrigger)
             .flatMap(VoiceTrigger.init(rawValue:)) ?? .pushToTalk
+        // A hand-edited value that names no combination this shell can register falls back to
+        // the default rather than to nothing: a push-to-talk key that is silently absent is
+        // worse than one that is not the one somebody typed.
+        pushToTalkHotkey = defaults.string(forKey: Key.pushToTalkHotkey)
+            .flatMap(HotkeyCombination.init(settingsValue:)) ?? .pushToTalkDefault
+        halfDuplexWhileSpeaking = defaults.bool(forKey: Key.halfDuplex)
+        wakeword = defaults.string(forKey: Key.wakeword) ?? "Companion"
     }
 }

@@ -31,17 +31,42 @@ public final class CompanionShell {
     /// Sequence number of the last event, so a gap can be noticed.
     private var lastSequence: UInt64?
     private var isListPending = false
+    /// The voice pipeline, nil when the shell was started without it.
+    private let voice: VoiceController?
+    private let microphone: MicrophoneAuthorizing?
+    private let hotkey: HotkeyRegistering?
 
+    /// - Parameter voiceEnabled: false leaves the whole voice path unbuilt — no audio engine,
+    ///   no global key. That is what a test run uses: a suite must not take a key combination
+    ///   away from the person at the machine, and it must not open a microphone.
     public init(
         paths: CompanionPaths = CompanionPaths(),
         socketPath: String? = nil,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        voiceEnabled: Bool = true
     ) {
         self.paths = paths
         self.socketPath = socketPath ?? paths.socketPath
         self.settings = AppSettings(defaults: defaults)
         self.overlay = OverlayController(settings: settings)
         self.client = DaemonClient(paths: paths, socketPath: socketPath)
+        guard voiceEnabled else {
+            self.voice = nil
+            self.microphone = nil
+            self.hotkey = nil
+            return
+        }
+        let microphone = SystemMicrophoneAuthorization()
+        self.microphone = microphone
+        self.hotkey = CarbonHotkeyRegistrar()
+        // Both factories are lazy on purpose: nothing of CoreAudio is built until a person
+        // actually records or the daemon actually speaks.
+        self.voice = VoiceController(
+            configuration: VoiceController.Configuration(
+                halfDuplex: settings.halfDuplexWhileSpeaking),
+            capture: { MicrophoneCapture() },
+            player: { SpeechPlayback() },
+            authorization: microphone)
     }
 
     public func start(connectToDaemon: Bool = true, onboarding: OnboardingPolicy = .auto) {
@@ -55,6 +80,7 @@ public final class CompanionShell {
         if connectToDaemon {
             overlay.onNewAuftrag = { [weak self] in self?.openAuftragWindow() }
         }
+        startVoice()
         overlay.start()
 
         let statusItem = StatusItemController(controller: overlay) { [weak self] in
@@ -63,7 +89,9 @@ public final class CompanionShell {
                 controller: self.overlay,
                 socketPath: self.socketPath,
                 daemonStatus: self.overlay.model.daemonStatusText,
-                daemonDetail: self.overlay.model.daemonDetail)
+                daemonDetail: self.overlay.model.daemonDetail,
+                microphoneStatus: self.microphoneStatusText,
+                voiceStatus: self.voiceStatusText)
         }
         self.statusItem = statusItem
 
@@ -93,6 +121,10 @@ public final class CompanionShell {
 
     public func stop() {
         client.stop()
+        // The key goes back before anything else: a combination this shell still holds after
+        // it stopped would be gone from the machine until the process ends.
+        hotkey?.unregister()
+        voice?.shutDown()
         statusItem?.remove()
         statusItem = nil
         // Windows this shell opened are closed by it; a window left behind would outlive the
@@ -177,6 +209,183 @@ public final class CompanionShell {
         statusItem?.setNeedsAttention(overlay.model.needsAttention)
     }
 
+    // MARK: - Voice
+
+    /// Wires the voice pipeline to the panel, the figure and the daemon, and takes the
+    /// push-to-talk key.
+    ///
+    /// `DESIGN.md` section Voice. Recognised text lands in the input field and stops there:
+    /// what a session is told is still sent by the person, and automatic sending arrives with
+    /// the part of the system that can judge what it heard.
+    private func startVoice() {
+        guard let voice else { return }
+        voice.perform = { [weak self] request, completion in
+            guard let self else { return completion(.failure(.notConnected)) }
+            self.client.request(request) { result in
+                switch result {
+                case .success:
+                    completion(.success(()))
+                case .failure(let failure):
+                    completion(.failure(Self.voiceFailure(failure)))
+                }
+            }
+        }
+        voice.onFigureEvent = { [weak self] event in
+            guard let self else { return }
+            self.overlay.apply(event)
+            self.refreshVoiceState()
+        }
+        voice.onPartialTranscript = { [weak self] text in
+            self?.overlay.model.liveTranscript = text
+        }
+        voice.onFinalText = { [weak self] text in
+            guard let self else { return }
+            let model = self.overlay.model
+            // Appended rather than replacing: somebody may have started typing, and a second
+            // sentence after a pause is a second sentence, not a correction of the first.
+            model.chatDraft = model.chatDraft.isEmpty
+                ? text
+                : model.chatDraft.trimmingCharacters(in: .whitespaces) + " " + text
+            self.overlay.showChat()
+        }
+        voice.onNotice = { [weak self] text in
+            self?.systemMessage(text)
+            self?.refreshVoiceState()
+        }
+        voice.currentSessionId = { [weak self] in self?.overlay.model.selectedSessionId }
+
+        overlay.onToggleVoice = { [weak self] in self?.toggleVoice() }
+        applyVoiceSettings()
+        refreshVoiceState()
+    }
+
+    private func toggleVoice() {
+        guard let voice else { return }
+        let wasCapturing = voice.isCapturing
+        voice.toggleCapture()
+        // A recording that just started belongs on screen: the recognised text appears in the
+        // chat panel, and dictating into a panel nobody can see is guesswork.
+        if !wasCapturing, voice.isCapturing { overlay.showChat() }
+        refreshVoiceState()
+    }
+
+    /// Takes or gives up the push-to-talk key, and passes the duplex setting on.
+    ///
+    /// Called again whenever one of the three settings changes, so a combination picked in the
+    /// settings window is in effect on closing it and not on the next start.
+    private func applyVoiceSettings() {
+        guard let voice else { return }
+        voice.configuration.halfDuplex = settings.halfDuplexWhileSpeaking
+        trackVoiceSettings()
+
+        guard let hotkey else { return }
+        let combination = settings.pushToTalkHotkey
+        // The key is taken for the wakeword setting as well: there is no engine for a
+        // wakeword yet, and leaving that choice with no way to talk at all would be worse
+        // than one key more than asked for. The settings page says so in words.
+        let wantsKey = settings.voiceTrigger != .click
+        guard wantsKey else {
+            hotkey.unregister()
+            return
+        }
+        guard hotkey.registered != combination else { return }
+        do {
+            try hotkey.register(
+                combination,
+                onPress: { [weak self] in self?.pushToTalkPressed() },
+                onRelease: { [weak self] in self?.pushToTalkReleased() })
+        } catch let failure as HotkeyFailure {
+            systemMessage("\(failure.message) Eine andere Kombination steht in den Einstellungen.")
+        } catch {
+            systemMessage("Die Tastenkombination \(combination.display) liess sich nicht belegen: \(error)")
+        }
+    }
+
+    /// Watches the three voice settings. `withObservationTracking` fires once, so the next
+    /// watch is installed by the change it reported.
+    private func trackVoiceSettings() {
+        withObservationTracking {
+            _ = settings.pushToTalkHotkey
+            _ = settings.voiceTrigger
+            _ = settings.halfDuplexWhileSpeaking
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.applyVoiceSettings() }
+        }
+    }
+
+    private func pushToTalkPressed() {
+        guard let voice, !voice.isCapturing else { return }
+        voice.beginCapture()
+        overlay.showChat()
+        refreshVoiceState()
+    }
+
+    private func pushToTalkReleased() {
+        guard let voice else { return }
+        voice.endCapture()
+        refreshVoiceState()
+    }
+
+    /// Copies what the pipeline knows into the model the panels read.
+    private func refreshVoiceState() {
+        let model = overlay.model
+        guard let voice else {
+            model.isMicrophoneOpen = false
+            model.isVoiceAvailable = false
+            model.voiceUnavailableReason = "Diese Shell wurde ohne Sprache gestartet."
+            return
+        }
+        model.isMicrophoneOpen = voice.isCapturing
+        if case .unavailable(let reason) = voice.availability {
+            model.isVoiceAvailable = false
+            model.voiceUnavailableReason = reason
+        } else {
+            model.isVoiceAvailable = true
+            model.voiceUnavailableReason = nil
+        }
+    }
+
+    private var microphoneStatusText: String {
+        switch microphone?.authorization {
+        case .granted: return "freigegeben"
+        case .denied: return "nicht freigegeben"
+        case .undetermined: return "noch nicht gefragt"
+        case nil: return "ohne Sprache gestartet"
+        }
+    }
+
+    private var voiceStatusText: String {
+        switch voice?.availability {
+        case .available: return "kann Sprache"
+        case .untested: return "noch nicht ausprobiert"
+        case .unavailable(let reason): return reason
+        case nil: return "ohne Sprache gestartet"
+        }
+    }
+
+    /// Reads a failed request the way the voice pipeline needs it.
+    ///
+    /// `bad_request` counts as "does not know voice" together with `not_supported`: a daemon
+    /// that knows the name but not the fields cannot do anything with the audio either, and
+    /// asking again for every utterance would only repeat the refusal. The protocol version of
+    /// the handshake cannot answer this — voice is an additive change, and a daemon of the same
+    /// version may or may not have it.
+    private static func voiceFailure(_ failure: DaemonClient.RequestFailure) -> VoiceRequestFailure {
+        switch failure {
+        case .notConnected, .connectionLost:
+            return .notConnected
+        case .timedOut(let seconds):
+            return .failed("Der Daemon hat nicht innerhalb von \(Int(seconds)) Sekunden geantwortet.")
+        case .daemon(let error):
+            switch error.code {
+            case .notSupported, .badRequest, .unknownAdapter:
+                return .notSupported(error.message)
+            default:
+                return .failed(error.message)
+            }
+        }
+    }
+
     // MARK: - Sending
 
     private func send(_ text: String) {
@@ -247,6 +456,10 @@ public final class CompanionShell {
             model.daemonStatusText = "verbunden"
             model.daemonDetail = "Rolle \(welcome.role.rawValue), Daemon \(welcome.daemonVersion), Lauf \(welcome.runId)"
             lastSequence = nil
+            // A new connection may be a newer daemon, so an earlier "cannot do voice" is not
+            // held against this one.
+            voice?.connectionChanged()
+            refreshVoiceState()
             refreshSessions()
         case .refused(let error):
             model.isDaemonReady = false
@@ -323,6 +536,14 @@ public final class CompanionShell {
         lastSequence = envelope.sequence
 
         noteIgnoredMessages()
+
+        // Speech is not about a session's state: it says nothing about what a session is
+        // doing, and the transcript and the audio belong to the voice pipeline alone.
+        if let voiceEvent = envelope.event.voiceEvent {
+            voice?.handle(voiceEvent)
+            refreshVoiceState()
+            return
+        }
 
         let title = model.title(forSessionId: envelope.sessionId)
         applyToSessions(envelope)

@@ -23,6 +23,11 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>AGPL-3.0-only</string>
+	<!-- Shown in the system prompt on the first recording. Without this key macOS terminates
+	     the app instead of asking. It says where the audio goes, because that is the part a
+	     person is deciding about. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Der Companion nimmt auf, solange du sprichst, und schickt den Ton an die Spracherkennung, die du in den Einstellungen verbunden hast.</string>
 	<key>NSSupportsAutomaticTermination</key>
 	<false/>
 	<key>NSSupportsSuddenTermination</key>

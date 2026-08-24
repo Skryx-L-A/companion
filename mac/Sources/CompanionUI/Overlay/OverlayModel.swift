@@ -21,8 +21,20 @@ public final class OverlayModel {
     /// The session the chat panel talks to. Nil until the person picks one.
     public var selectedSessionId: SessionId?
     /// Text the speech recogniser has heard so far. Empty when nothing is being dictated.
-    /// Voice itself is phase 1b; the line is here so the chat panel already has its place.
+    /// Filled by `stt_partial` and cleared by `stt_final`.
     public var liveTranscript: String = ""
+    /// What stands in the input field. Owned by the model rather than by the text field,
+    /// because a recognised sentence is written into it from the outside: `stt_final` fills
+    /// the field, and the person decides whether it goes out.
+    public var chatDraft: String = ""
+    /// True while the microphone is open, so the panel can show it where a person is looking.
+    /// The figure shows the same thing, but not everyone has it in view.
+    public var isMicrophoneOpen = false
+    /// True while voice input can be used at all: the daemon knows the requests and the
+    /// microphone is not refused. False turns the button into a disabled one with a reason.
+    public var isVoiceAvailable = true
+    /// Why voice is off, for the button's tooltip. Nil while it works.
+    public var voiceUnavailableReason: String?
     public var daemonStatusText: String = "Daemon nicht verbunden"
     public var isDaemonReady = false
     /// What the handshake said, for the settings page: role, daemon version, run id.
