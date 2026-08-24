@@ -177,7 +177,13 @@ final class PreviewRenderTests: XCTestCase {
             DetectedTool(name: "codex", displayName: "Codex CLI", path: nil),
             DetectedTool(name: "ollama", displayName: "Ollama", path: "/usr/local/bin/ollama"),
         ]
-        let view = OnboardingView(settings: settings, tools: tools, onFinish: {}, onSkip: {})
+        let view = OnboardingView(
+            settings: settings,
+            flow: OnboardingFlow(settings: settings, path: .quickStart),
+            tools: tools,
+            microphoneStatus: "freigegeben",
+            onFinish: {}, onCancel: {}, onFullSetup: {},
+            onTrainWakeword: {}, onOpenEndpoints: {})
             .frame(width: OverlayLayout.panelWidth, height: OverlayLayout.onboardingHeight)
             .padding(24)
             .background(Color(nsColor: .underPageBackgroundColor))
@@ -424,13 +430,11 @@ final class PreviewRenderTests: XCTestCase {
             let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
             defer { defaults.removePersistentDomain(forName: suite) }
             let settings = AppSettings(defaults: defaults)
-            let controller = OverlayController(settings: settings)
-            let view = ShellSettingsView(
-                controller: controller,
+            // The pages are rendered one at a time rather than through the tab view: a
+            // `TabView` draws only the tab that is selected, and this is a picture of the
+            // whole page.
+            let view = ShellVoiceSettingsView(
                 settings: settings,
-                socketPath: "/Users/me/Library/Application Support/companion/companion.sock",
-                daemonStatus: "verbunden",
-                daemonDetail: "Rolle human, Daemon 0.1.0, Lauf d601e4ec",
                 microphoneStatus: "freigegeben",
                 voiceStatus: "kann Sprache",
                 wakewordStatus: "angelernt, aber nicht eingeschaltet",
@@ -443,6 +447,73 @@ final class PreviewRenderTests: XCTestCase {
             // Tall enough for the whole page: the wakeword section and the switch for
             // sending what was heard both came in after the first number here.
             try render(view, size: CGSize(width: 540, height: 1560), to: name, appearance: appearance)
+        }
+    }
+
+    /// The endpoints page with a profile unfolded and a measurement on it, in both
+    /// appearances. This is the page with the most text per row, so a line that does not wrap
+    /// shows here first.
+    func testRendersEndpointsSettings() throws {
+        for (name, appearance) in [
+            ("settings-endpoints-dark.png", NSAppearance(named: .darkAqua)),
+            ("settings-endpoints-light.png", NSAppearance(named: .aqua)),
+        ] {
+            let suite = "de.skryx.companion.preview.\(UUID().uuidString.prefix(8))"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let store = LocalEndpointDraftStore(defaults: defaults) { _, completion in
+                completion(.success([
+                    EndpointHealth(
+                        profile: "macos-say", protocolKind: .cli, reachable: true,
+                        latencyMs: .measured(3), checkedAtMs: 1),
+                    EndpointHealth(
+                        profile: "lokal-whisper", protocolKind: .whisperServer,
+                        reachable: false, latencyMs: .unknown, checkedAtMs: 1,
+                        detail: "Verbindung abgelehnt"),
+                ]))
+            }
+            store.saveEndpoints(EndpointConfig(
+                profiles: [
+                    EndpointProfile(id: "macos-say", protocolKind: .cli, url: "/usr/bin/say"),
+                    EndpointProfile(
+                        id: "lokal-whisper", protocolKind: .whisperServer,
+                        url: "http://127.0.0.1:8765", model: "large-v3"),
+                ],
+                roles: [
+                    .tts: RoleBinding(primary: "macos-say"),
+                    .stt: RoleBinding(primary: "lokal-whisper"),
+                ])) { _ in }
+            let controller = EndpointsController(service: store)
+            controller.load()
+            controller.probe()
+            let view = EndpointsSettingsView(controller: controller, expanded: ["lokal-whisper"])
+                .padding(20)
+                .background(Color(nsColor: .windowBackgroundColor))
+            try render(view, size: CGSize(width: 560, height: 2400), to: name, appearance: appearance)
+        }
+    }
+
+    /// The full setup, one picture per question, so all thirteen can be read in one go.
+    func testRendersFullSetupSteps() throws {
+        let suite = "de.skryx.companion.preview.\(UUID().uuidString.prefix(8))"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = AppSettings(defaults: defaults)
+        let tools = [
+            DetectedTool(name: "claude", displayName: "Claude Code", path: "/opt/homebrew/bin/claude"),
+            DetectedTool(name: "codex", displayName: "Codex CLI", path: nil),
+            DetectedTool(name: "ollama", displayName: "Ollama", path: "/usr/local/bin/ollama"),
+        ]
+        let flow = OnboardingFlow(settings: settings, path: .full)
+        for step in SetupPath.full.steps {
+            let view = SetupWindowView(
+                settings: settings, flow: flow, tools: tools,
+                microphoneStatus: "freigegeben",
+                onFinish: {}, onCancel: {}, onTrainWakeword: {}, onOpenEndpoints: {})
+            try render(
+                view, size: CGSize(width: 560, height: 520),
+                to: "setup-\(step.rawValue).png")
+            flow.advance()
         }
     }
 

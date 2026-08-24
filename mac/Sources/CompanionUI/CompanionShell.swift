@@ -25,8 +25,10 @@ public final class CompanionShell {
     private let client: DaemonClient
     private let paths: CompanionPaths
     private let socketPath: String
+    private let defaults: UserDefaults
     private var statusItem: StatusItemController?
     private let settingsWindow = SettingsWindowController()
+    private let setupWindow = SetupWindowController()
     private let auftragWindow = AuftragWindowController()
     private let excerptWindows = ExcerptWindowController()
     private let wakewordWindow = WakewordWindowController()
@@ -45,6 +47,22 @@ public final class CompanionShell {
     /// shell without voice can still be typed at.
     private let chat: ChatController
 
+    /// The endpoints page of the settings.
+    ///
+    /// Built on first use, because the settings window is the only thing that shows it and most
+    /// runs never open it. The draft lives on this machine: the daemon owns the settings file
+    /// and this protocol has no request that reads or writes it, so the page says so and
+    /// keeps what was typed until the day it can be sent.
+    private lazy var endpoints: EndpointsController = {
+        let store = LocalEndpointDraftStore(defaults: defaults) { [weak self] role, completion in
+            guard let self else {
+                return completion(.failure(ActionFailure("Die Shell ist nicht mehr da.")))
+            }
+            self.probeEndpoints(role: role, completion: completion)
+        }
+        return EndpointsController(service: store)
+    }()
+
     /// - Parameter voiceEnabled: false leaves the whole voice path unbuilt — no audio engine,
     ///   no global key. That is what a test run uses: a suite must not take a key combination
     ///   away from the person at the machine, and it must not open a microphone.
@@ -56,6 +74,7 @@ public final class CompanionShell {
     ) {
         self.paths = paths
         self.socketPath = socketPath ?? paths.socketPath
+        self.defaults = defaults
         self.settings = AppSettings(defaults: defaults)
         self.overlay = OverlayController(settings: settings)
         self.client = DaemonClient(paths: paths, socketPath: socketPath)
@@ -92,6 +111,9 @@ public final class CompanionShell {
         overlay.onSubmit = { [weak self] text in self?.chat.send(text) }
         overlay.onAnswer = { [weak self] question, text in self?.answer(question, with: text) }
         overlay.onOpenSettings = { [weak self] in self?.showSettings() }
+        overlay.onFullSetup = { [weak self] flow in self?.showFullSetup(continuing: flow) }
+        overlay.onTrainWakeword = { [weak self] in self?.openWakewordEnrollment() }
+        overlay.microphoneStatusText = microphoneStatusText
         overlay.sessionActions = SessionActions(
             send: { [weak self] id, text in self?.send(text, to: id) },
             read: { [weak self] id in self?.readExcerpt(of: id) },
@@ -149,6 +171,7 @@ public final class CompanionShell {
         // connection that fills it.
         auftragWindow.close()
         wakewordWindow.close()
+        setupWindow.close()
         excerptWindows.closeAll()
         overlay.stop()
     }
@@ -160,6 +183,7 @@ public final class CompanionShell {
             controller: overlay,
             socketPath: socketPath,
             daemonStatus: overlay.model.daemonStatusText,
+            endpoints: endpoints,
             daemonDetail: overlay.model.daemonDetail,
             microphoneStatus: microphoneStatusText,
             voiceStatus: voiceStatusText,
@@ -167,7 +191,49 @@ public final class CompanionShell {
             hasWakewordModel: wakewordStore.hasModel,
             onTrainWakeword: { [weak self] in self?.openWakewordEnrollment() },
             onDeleteWakeword: { [weak self] in self?.deleteWakeword() },
-            onSetWakewordEnabled: { [weak self] enabled in self?.setWakewordEnabled(enabled) })
+            onSetWakewordEnabled: { [weak self] enabled in self?.setWakewordEnabled(enabled) },
+            onFullSetup: { [weak self] in self?.showFullSetup() })
+    }
+
+    /// Opens the full setup. `DESIGN.md` section Ersteinrichtung: the second of the two paths.
+    ///
+    /// The tool detection runs again while the window is already up, the same way the quick
+    /// start does it: a login shell with a slow profile must not hold a window that is
+    /// otherwise ready.
+    private func showFullSetup(continuing flow: OnboardingFlow? = nil) {
+        overlay.microphoneStatusText = microphoneStatusText
+        setupWindow.show(
+            settings: settings,
+            continuing: flow,
+            tools: overlay.model.detectedTools,
+            microphoneStatus: microphoneStatusText,
+            onTrainWakeword: { [weak self] in self?.openWakewordEnrollment() },
+            onOpenEndpoints: { [weak self] in self?.showSettings() },
+            onClose: {})
+        ToolDetection.detectInBackground { [weak self] tools in
+            self?.overlay.model.detectedTools = tools
+        }
+    }
+
+    /// Measures what the daemon has configured. `DESIGN.md` section Endpoints.
+    private func probeEndpoints(
+        role: EndpointRole?,
+        completion: @escaping (Result<[EndpointHealth], ActionFailure>) -> Void
+    ) {
+        client.request(.probeEndpoints(role: role)) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(.endpoints(let health)):
+                completion(.success(health))
+            case .success(let body):
+                completion(.failure(ActionFailure("Unerwartete Antwort auf die Messung: \(body).")))
+            case .failure(.daemon(let error)) where error.code == .notSupported:
+                completion(.failure(ActionFailure(
+                    "Dieser Daemon misst keine Endpoints: \(error.message)")))
+            case .failure(let failure):
+                completion(.failure(ActionFailure(self.describe(failure))))
+            }
+        }
     }
 
     /// Sample content for looking at the panels without a daemon. Marked as such in the chat,

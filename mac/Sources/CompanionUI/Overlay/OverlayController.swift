@@ -36,6 +36,16 @@ public final class OverlayController {
     /// Opens the settings window. Set by the shell, which owns that window; nil leaves the
     /// notice in the chat panel without its link rather than with a dead one.
     public var onOpenSettings: (() -> Void)?
+    /// Opens the full setup in its own window, continuing the flow it is handed. Set by the
+    /// shell, which owns that window.
+    public var onFullSetup: ((OnboardingFlow) -> Void)?
+    /// Opens the wakeword enrollment. Set by the shell, which owns that window.
+    public var onTrainWakeword: (() -> Void)?
+    /// What macOS says about the microphone. Written by the shell, read by the setup.
+    public var microphoneStatusText: String = "unbekannt"
+
+    /// Which question the quick start is on. Nil while it is not open.
+    public private(set) var onboardingFlow: OnboardingFlow?
 
     public init(settings: AppSettings, spriteFolder: URL? = SpriteSet.defaultFolder) {
         self.settings = settings
@@ -196,6 +206,7 @@ public final class OverlayController {
         model.isChatOpen = false
         model.isSessionListOpen = false
         model.isOnboardingOpen = true
+        onboardingFlow = OnboardingFlow(settings: settings, path: .quickStart)
         relayout()
         panel?.makeKeyAndOrderFront(nil)
         ToolDetection.detectInBackground { [weak self] tools in
@@ -207,18 +218,39 @@ public final class OverlayController {
     }
 
     public func finishOnboarding() {
+        onboardingFlow?.finish()
         settings.hasCompletedOnboarding = true
         closeOnboarding()
     }
 
-    /// Leaving early keeps whatever was already picked and marks the quick start as done, so
-    /// it does not ask again on every start. Everything unanswered stays on its default.
-    public func skipOnboarding() {
+    /// Leaving early puts back what was in effect when the quick start opened and marks it as
+    /// done, so it does not ask again on every start. `DESIGN.md` section Ersteinrichtung:
+    /// an abort leaves standards behind, never half a state.
+    public func cancelOnboarding() {
+        onboardingFlow?.cancel()
         settings.hasCompletedOnboarding = true
         closeOnboarding()
+    }
+
+    /// Leaves the quick start for the full setup.
+    ///
+    /// Not an abort: the same flow travels into the window, so the answers given so far stay
+    /// and Abbrechen over there still rolls back to what was in effect before the quick start
+    /// opened.
+    public func handOverToFullSetup() {
+        guard let flow = onboardingFlow else { return }
+        flow.switchPath(to: .full)
+        onboardingFlow = nil
+        closeOnboardingPanel()
+        onFullSetup?(flow)
     }
 
     private func closeOnboarding() {
+        onboardingFlow = nil
+        closeOnboardingPanel()
+    }
+
+    private func closeOnboardingPanel() {
         guard model.isOnboardingOpen else { return }
         model.isOnboardingOpen = false
         panel?.makeFirstResponder(nil)

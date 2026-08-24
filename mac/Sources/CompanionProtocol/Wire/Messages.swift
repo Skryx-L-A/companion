@@ -218,6 +218,11 @@ public enum Request: Sendable, Equatable {
     /// says whether it did. A shell that speaks the answer itself, sentence by sentence while
     /// it is still being written, sends false. `Wire/Chat.swift` has the rest of the contract.
     case chatMessage(text: String, voice: Bool)
+    /// Measures the configured endpoints and answers with what the probe found.
+    ///
+    /// `DESIGN.md` section Endpoints uses the measurement to order the STT and TTS endpoints
+    /// during setup. `nil` measures every configured profile, a role measures only its own.
+    case probeEndpoints(role: EndpointRole?)
 
     /// The name the daemon dispatches on.
     public var name: String {
@@ -237,6 +242,7 @@ public enum Request: Sendable, Equatable {
         case .voiceEnd: return "voice_end"
         case .ttsSpeak: return "tts_speak"
         case .chatMessage: return "chat_message"
+        case .probeEndpoints: return "probe_endpoints"
         }
     }
 
@@ -304,6 +310,7 @@ extension ClientMessage: Encodable {
         case channels
         case language
         case voice
+        case role
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -371,6 +378,10 @@ extension ClientMessage: Encodable {
                 // is what the contract says: there it names a voice, here it says the question
                 // was spoken. Two requests, so nothing can read one for the other.
                 try container.encode(voice, forKey: .voice)
+            case .probeEndpoints(let role):
+                // Left off while it is nil, the way `list` leaves its options off: no role
+                // means every configured profile is measured.
+                try container.encodeIfPresent(role, forKey: .role)
             }
         }
     }
@@ -498,6 +509,8 @@ public enum ResponseBody: Sendable, Equatable {
     case auftrag(auftrag: Auftrag, hash: String, path: String, gateDisplay: [String])
     /// A dictation or a spoken answer was opened. Every event about it carries this id.
     case voiceStream(voiceId: VoiceId)
+    /// What the latency probe found, one entry per profile it measured.
+    case endpoints([EndpointHealth])
     /// The request was carried out and has nothing to return.
     case ack
     /// A body a newer daemon knows and this shell does not.
@@ -518,6 +531,7 @@ extension ResponseBody: Codable {
         case path
         case gateDisplay = "gate_display"
         case voiceId = "voice_id"
+        case endpoints
     }
 
     public init(from decoder: any Decoder) throws {
@@ -544,6 +558,8 @@ extension ResponseBody: Codable {
                 gateDisplay: try container.decodeIfPresent([String].self, forKey: .gateDisplay) ?? [])
         case "voice_stream":
             self = .voiceStream(voiceId: try container.decode(VoiceId.self, forKey: .voiceId))
+        case "endpoints":
+            self = .endpoints(try container.decode([EndpointHealth].self, forKey: .endpoints))
         case "ack":
             self = .ack
         default:
@@ -579,6 +595,9 @@ extension ResponseBody: Codable {
         case .voiceStream(let voiceId):
             try container.encode("voice_stream", forKey: .body)
             try container.encode(voiceId, forKey: .voiceId)
+        case .endpoints(let endpoints):
+            try container.encode("endpoints", forKey: .body)
+            try container.encode(endpoints, forKey: .endpoints)
         case .ack:
             try container.encode("ack", forKey: .body)
         case .unrecognised(let body):

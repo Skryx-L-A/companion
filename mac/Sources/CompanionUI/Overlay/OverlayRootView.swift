@@ -14,13 +14,18 @@ struct OverlayRootView: View {
         ZStack(alignment: .topLeading) {
             Color.clear
 
-            if let rect = layout.onboardingRect {
+            if let rect = layout.onboardingRect, let flow = controller.onboardingFlow {
                 let box = layout.flipped(rect)
                 OnboardingView(
                     settings: controller.settings,
+                    flow: flow,
                     tools: model.detectedTools,
+                    microphoneStatus: controller.microphoneStatusText,
                     onFinish: { controller.finishOnboarding() },
-                    onSkip: { controller.skipOnboarding() })
+                    onCancel: { controller.cancelOnboarding() },
+                    onFullSetup: { controller.handOverToFullSetup() },
+                    onTrainWakeword: { controller.onTrainWakeword?() },
+                    onOpenEndpoints: { controller.onOpenSettings?() })
                     .frame(width: box.width, height: box.height)
                     .offset(x: box.minX, y: box.minY)
             }

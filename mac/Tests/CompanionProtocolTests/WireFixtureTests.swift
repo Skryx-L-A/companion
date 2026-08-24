@@ -179,6 +179,9 @@ final class ServerMessageFixtureTests: XCTestCase {
             case .voiceStream:
                 // No fixture line for a dictation; `VoiceRequestWireTests` covers that body.
                 seen.insert("voice_stream")
+            case .endpoints:
+                // No fixture line for a measurement; `EndpointWireTests` covers that body.
+                seen.insert("endpoints")
             case .sessions, .unrecognised:
                 break
             }

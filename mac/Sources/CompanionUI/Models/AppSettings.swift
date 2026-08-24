@@ -26,6 +26,19 @@ public final class AppSettings {
         static let wakeword = "voice.wakeword"
         static let autoSend = "voice.autoSend"
         static let wakewordEnabled = "voice.wakewordEnabled"
+        static let agentBoundary = "setup.agentBoundary"
+        static let companionBoundary = "setup.companionBoundary"
+        static let autonomy = "setup.autonomy"
+        static let inventoryAllowed = "setup.inventoryAllowed"
+        static let budgetLimitPercent = "setup.budgetLimitPercent"
+        static let conversationStyle = "setup.conversationStyle"
+        static let addressForm = "setup.addressForm"
+        static let figureName = "setup.figureName"
+        static let skillLevel = "setup.skillLevel"
+        static let doneHandling = "setup.doneHandling"
+        static let reportChannels = "setup.reportChannels"
+        static let speechVoice = "setup.speechVoice"
+        static let setupCompleted = "setup.completed"
     }
 
     public var corner: ScreenCorner {
@@ -126,6 +139,79 @@ public final class AppSettings {
         isWakewordEnabled = false
     }
 
+    /// Full setup, point 2: how far a spawned agent may go on its own.
+    public var agentBoundary: ToolBoundary {
+        didSet { defaults.set(agentBoundary.rawValue, forKey: Key.agentBoundary) }
+    }
+
+    /// Full setup, point 13: how far the companion itself may go with its own tools.
+    public var companionBoundary: ToolBoundary {
+        didSet { defaults.set(companionBoundary.rawValue, forKey: Key.companionBoundary) }
+    }
+
+    /// Full setup, point 3: how far the companion acts when a session reports something.
+    public var autonomy: CompanionAutonomy {
+        didSet { defaults.set(autonomy.rawValue, forKey: Key.autonomy) }
+    }
+
+    /// Full setup, point 4: whether the companion may read what is installed — skills, tools,
+    /// MCP servers, workflows. Off unless somebody says yes, because reading a working
+    /// directory is reading somebody's work.
+    public var isInventoryAllowed: Bool {
+        didSet { defaults.set(isInventoryAllowed, forKey: Key.inventoryAllowed) }
+    }
+
+    /// Full setup, point 7: the share of the budget at which the companion stops starting
+    /// anything new. Zero means no limit.
+    public var budgetLimitPercent: Int {
+        didSet { defaults.set(budgetLimitPercent, forKey: Key.budgetLimitPercent) }
+    }
+
+    /// Full setup, point 8, first half: how much he says.
+    public var conversationStyle: ConversationStyle {
+        didSet { defaults.set(conversationStyle.rawValue, forKey: Key.conversationStyle) }
+    }
+
+    /// Full setup, point 8, second half: how he addresses the person.
+    public var addressForm: AddressForm {
+        didSet { defaults.set(addressForm.rawValue, forKey: Key.addressForm) }
+    }
+
+    /// Full setup, point 8, third half: what the figure is called.
+    public var figureName: String {
+        didSet { defaults.set(figureName, forKey: Key.figureName) }
+    }
+
+    /// Full setup, point 10: how much of the skill package goes into a recognised harness.
+    public var skillLevel: SkillLevel {
+        didSet { defaults.set(skillLevel.rawValue, forKey: Key.skillLevel) }
+    }
+
+    /// Full setup, point 11: what happens when a session reports that it is done.
+    public var doneHandling: DoneHandling {
+        didSet { defaults.set(doneHandling.rawValue, forKey: Key.doneHandling) }
+    }
+
+    /// Full setup, point 12: where the companion reaches the person. The figure alone by
+    /// default: every other channel either makes noise or leaves the machine.
+    public var reportChannels: Set<ReportChannel> {
+        didSet {
+            defaults.set(reportChannels.map(\.rawValue).sorted(), forKey: Key.reportChannels)
+        }
+    }
+
+    /// Full setup, point 6: which voice the speech output uses. Nil leaves it to the endpoint.
+    public var speechVoice: String? {
+        didSet { defaults.set(speechVoice, forKey: Key.speechVoice) }
+    }
+
+    /// True once the full setup has been walked through to the end. Separate from
+    /// `hasCompletedOnboarding`, which the quick start also sets: the settings page says which
+    /// of the two paths somebody took.
+    public var hasCompletedFullSetup: Bool {
+        didSet { defaults.set(hasCompletedFullSetup, forKey: Key.setupCompleted) }
+    }
+
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let storedCorner = defaults.string(forKey: Key.corner).flatMap(ScreenCorner.init(rawValue:))
@@ -151,5 +237,89 @@ public final class AppSettings {
         // off.
         sendVoiceAutomatically = defaults.object(forKey: Key.autoSend) as? Bool ?? true
         isWakewordEnabled = defaults.bool(forKey: Key.wakewordEnabled)
+        // Every one of these falls back to the sparing and harmless value, which is what
+        // `DESIGN.md` Grundprinzip asks of a default and what an aborted setup leaves behind.
+        agentBoundary = defaults.string(forKey: Key.agentBoundary)
+            .flatMap(ToolBoundary.init(rawValue:)) ?? .ask
+        companionBoundary = defaults.string(forKey: Key.companionBoundary)
+            .flatMap(ToolBoundary.init(rawValue:)) ?? .ask
+        autonomy = defaults.string(forKey: Key.autonomy)
+            .flatMap(CompanionAutonomy.init(rawValue:)) ?? .observe
+        isInventoryAllowed = defaults.bool(forKey: Key.inventoryAllowed)
+        budgetLimitPercent = defaults.object(forKey: Key.budgetLimitPercent) as? Int ?? 0
+        conversationStyle = defaults.string(forKey: Key.conversationStyle)
+            .flatMap(ConversationStyle.init(rawValue:)) ?? .terse
+        addressForm = defaults.string(forKey: Key.addressForm)
+            .flatMap(AddressForm.init(rawValue:)) ?? .informal
+        figureName = defaults.string(forKey: Key.figureName) ?? "Companion"
+        skillLevel = defaults.string(forKey: Key.skillLevel)
+            .flatMap(SkillLevel.init(rawValue:)) ?? .recommended
+        doneHandling = defaults.string(forKey: Key.doneHandling)
+            .flatMap(DoneHandling.init(rawValue:)) ?? .forward
+        let storedChannels = defaults.stringArray(forKey: Key.reportChannels)
+        reportChannels = storedChannels.map { Set($0.compactMap(ReportChannel.init(rawValue:))) }
+            ?? [.figure]
+        speechVoice = defaults.string(forKey: Key.speechVoice)
+        hasCompletedFullSetup = defaults.bool(forKey: Key.setupCompleted)
+    }
+
+    // MARK: - What the setup assistant owns
+
+    /// Every answer the setup assistant writes, in one value.
+    ///
+    /// `DESIGN.md` section Ersteinrichtung: an abort leaves standards behind and never half a
+    /// state. The assistant writes each answer the moment it is picked, so a crash cannot lose
+    /// one; cancelling puts this snapshot — taken when the assistant opened — back, so leaving
+    /// early leaves exactly what was in effect before.
+    public struct SetupAnswers: Sendable, Equatable {
+        public var workMode: WorkMode
+        public var defaultModelTool: String?
+        public var voiceTrigger: VoiceTrigger
+        public var pushToTalkHotkey: HotkeyCombination
+        public var speechVoice: String?
+        public var agentBoundary: ToolBoundary
+        public var companionBoundary: ToolBoundary
+        public var autonomy: CompanionAutonomy
+        public var isInventoryAllowed: Bool
+        public var budgetLimitPercent: Int
+        public var conversationStyle: ConversationStyle
+        public var addressForm: AddressForm
+        public var figureName: String
+        public var skillLevel: SkillLevel
+        public var doneHandling: DoneHandling
+        public var reportChannels: Set<ReportChannel>
+    }
+
+    public var setupAnswers: SetupAnswers {
+        get {
+            SetupAnswers(
+                workMode: workMode, defaultModelTool: defaultModelTool,
+                voiceTrigger: voiceTrigger, pushToTalkHotkey: pushToTalkHotkey,
+                speechVoice: speechVoice, agentBoundary: agentBoundary,
+                companionBoundary: companionBoundary, autonomy: autonomy,
+                isInventoryAllowed: isInventoryAllowed,
+                budgetLimitPercent: budgetLimitPercent,
+                conversationStyle: conversationStyle, addressForm: addressForm,
+                figureName: figureName, skillLevel: skillLevel, doneHandling: doneHandling,
+                reportChannels: reportChannels)
+        }
+        set {
+            workMode = newValue.workMode
+            defaultModelTool = newValue.defaultModelTool
+            voiceTrigger = newValue.voiceTrigger
+            pushToTalkHotkey = newValue.pushToTalkHotkey
+            speechVoice = newValue.speechVoice
+            agentBoundary = newValue.agentBoundary
+            companionBoundary = newValue.companionBoundary
+            autonomy = newValue.autonomy
+            isInventoryAllowed = newValue.isInventoryAllowed
+            budgetLimitPercent = newValue.budgetLimitPercent
+            conversationStyle = newValue.conversationStyle
+            addressForm = newValue.addressForm
+            figureName = newValue.figureName
+            skillLevel = newValue.skillLevel
+            doneHandling = newValue.doneHandling
+            reportChannels = newValue.reportChannels
+        }
     }
 }
