@@ -16,57 +16,67 @@ final class VoiceRequestWireTests: XCTestCase {
         return try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
-    func testVoiceBeginCarriesTheIdAndTheFormat() throws {
-        let written = try object(.voiceBegin(VoiceBegin(voiceId: "v-1")))
+    /// The request carries no id: the daemon makes it and answers with it.
+    func testVoiceBeginCarriesOnlyTheFormat() throws {
+        let written = try object(.voiceBegin(VoiceBegin()))
         XCTAssertEqual(written["type"] as? String, "request")
         XCTAssertEqual(written["request"] as? String, "voice_begin")
-        XCTAssertEqual(written["voice_id"] as? String, "v-1")
-        XCTAssertEqual(written["sample_rate"] as? Int, 16000)
+        XCTAssertEqual(written["sample_rate_hz"] as? Int, 16000)
         XCTAssertEqual(written["channels"] as? Int, 1)
-        XCTAssertEqual(written["encoding"] as? String, "pcm_s16le")
-        XCTAssertNil(written["session_id"], "without a picked session the field stays off the wire")
+        XCTAssertNil(written["language"], "no hint means the endpoint decides")
+        XCTAssertNil(written["voice_id"], "the id comes back, it is not sent")
     }
 
-    func testVoiceBeginNamesTheSessionWhenThereIsOne() throws {
-        let written = try object(.voiceBegin(VoiceBegin(
-            voiceId: "v-2", sessionId: "-Users-me-AI-companion")))
-        XCTAssertEqual(written["session_id"] as? String, "-Users-me-AI-companion")
+    func testALanguageHintGoesOnTheWireWhenThereIsOne() throws {
+        let written = try object(.voiceBegin(VoiceBegin(language: "de")))
+        XCTAssertEqual(written["language"] as? String, "de")
     }
 
-    func testVoiceChunkCarriesBase64AudioAndItsPlace() throws {
+    func testVoiceChunkCarriesBase64PCM() throws {
         let pcm = Data([0x01, 0x02, 0x03, 0x04])
-        let written = try object(.voiceChunk(voiceId: "v-1", seq: 7, audio: pcm))
+        let written = try object(.voiceChunk(voiceId: "voice-1", pcm: pcm))
         XCTAssertEqual(written["request"] as? String, "voice_chunk")
-        XCTAssertEqual(written["voice_id"] as? String, "v-1")
-        XCTAssertEqual(written["seq"] as? Int, 7)
-        let encoded = try XCTUnwrap(written["audio"] as? String)
+        XCTAssertEqual(written["voice_id"] as? String, "voice-1")
+        let encoded = try XCTUnwrap(written["pcm16_base64"] as? String)
         XCTAssertEqual(Data(base64Encoded: encoded), pcm, "the bytes survive the trip")
     }
 
-    func testVoiceEndSaysWhyItEnded() throws {
-        for reason in [VoiceEndReason.endpoint, .released, .cancelled] {
-            let written = try object(.voiceEnd(voiceId: "v-1", reason: reason))
-            XCTAssertEqual(written["request"] as? String, "voice_end")
-            XCTAssertEqual(written["reason"] as? String, reason.rawValue)
+    func testVoiceEndNamesTheDictation() throws {
+        let written = try object(.voiceEnd(voiceId: "voice-1"))
+        XCTAssertEqual(written["request"] as? String, "voice_end")
+        XCTAssertEqual(written["voice_id"] as? String, "voice-1")
+    }
+
+    func testTtsSpeakCarriesTextAndAnOptionalVoice() throws {
+        let plain = try object(.ttsSpeak(text: "Guten Morgen", voice: nil))
+        XCTAssertEqual(plain["request"] as? String, "tts_speak")
+        XCTAssertEqual(plain["text"] as? String, "Guten Morgen")
+        XCTAssertNil(plain["voice"])
+        let named = try object(.ttsSpeak(text: "Guten Morgen", voice: "Anna"))
+        XCTAssertEqual(named["voice"] as? String, "Anna")
+    }
+
+    /// The id of a dictation comes back in the answer, and every event about it carries it.
+    func testTheAnswerToVoiceBeginIsTheStreamId() throws {
+        let line = Data(#"{"type":"response","id":11,"status":"ok","payload":{"body":"voice_stream","voice_id":"voice-3"}}"#.utf8)
+        guard case .response(let response) = try WireCodec.decode(line),
+              case .success(let body) = response.result else {
+            return XCTFail("not a successful response")
         }
+        XCTAssertEqual(body, .voiceStream(voiceId: "voice-3"))
     }
 
-    func testAnUnknownEndReasonKeepsItsWord() {
-        let reason = VoiceEndReason(rawValue: "interrupted")
-        XCTAssertEqual(reason, .unrecognised("interrupted"))
-        XCTAssertEqual(reason.rawValue, "interrupted")
-    }
-
-    func testOnlyTheThreeVoiceRequestsAreVoice() {
-        XCTAssertTrue(Request.voiceBegin(VoiceBegin(voiceId: "v")).isVoice)
-        XCTAssertTrue(Request.voiceChunk(voiceId: "v", seq: 0, audio: Data()).isVoice)
-        XCTAssertTrue(Request.voiceEnd(voiceId: "v", reason: .released).isVoice)
+    func testOnlyTheFourVoiceRequestsAreVoice() {
+        XCTAssertTrue(Request.voiceBegin(VoiceBegin()).isVoice)
+        XCTAssertTrue(Request.voiceChunk(voiceId: "v", pcm: Data()).isVoice)
+        XCTAssertTrue(Request.voiceEnd(voiceId: "v").isVoice)
+        XCTAssertTrue(Request.ttsSpeak(text: "t", voice: nil).isVoice)
         XCTAssertFalse(Request.list(.all).isVoice)
         XCTAssertFalse(Request.send(sessionId: "s", text: "t").isVoice)
     }
 }
 
-/// The four events, read the way the daemon will write them.
+/// The four events, read the way the daemon writes them.
 final class VoiceEventWireTests: XCTestCase {
     private func event(_ payload: String) throws -> Event {
         let line = Data("""
@@ -80,71 +90,78 @@ final class VoiceEventWireTests: XCTestCase {
 
     func testPartialAndFinalTextAreRead() throws {
         XCTAssertEqual(
-            try event(#"{"event":"stt_partial","voice_id":"v-1","text":"bau mir"}"#),
-            .voice(.sttPartial(voiceId: "v-1", text: "bau mir")))
+            try event(#"{"event":"stt_partial","voice_id":"voice-1","text":"bau mir"}"#),
+            .voice(.sttPartial(voiceId: "voice-1", text: "bau mir")))
         XCTAssertEqual(
-            try event(#"{"event":"stt_final","voice_id":"v-1","text":"bau mir eine Liste"}"#),
-            .voice(.sttFinal(voiceId: "v-1", text: "bau mir eine Liste")))
+            try event(#"{"event":"stt_final","voice_id":"voice-1","text":"bau mir eine Liste"}"#),
+            .voice(.sttFinal(voiceId: "voice-1", text: "bau mir eine Liste", endpoint: nil)))
     }
 
-    func testTextWithoutAVoiceIdIsStillRead() throws {
+    /// Which profile answered is on the stream, so a fallback is a fact and not only a line in
+    /// somebody's log.
+    func testTheFinalTextNamesItsEndpointWhenTheDaemonSaysOne() throws {
         XCTAssertEqual(
-            try event(#"{"event":"stt_final","text":"ohne Kennung"}"#),
-            .voice(.sttFinal(voiceId: nil, text: "ohne Kennung")))
+            try event(#"{"event":"stt_final","voice_id":"voice-1","text":"fertig","endpoint":"whisper-lokal"}"#),
+            .voice(.sttFinal(voiceId: "voice-1", text: "fertig", endpoint: "whisper-lokal")))
     }
 
-    func testAudioChunkCarriesItsFormat() throws {
-        let pcm = Data([0x10, 0x20, 0x30, 0x40])
+    func testAnAudioChunkCarriesItsContainerAndItsPlace() throws {
+        let audio = Data([0x10, 0x20, 0x30, 0x40])
         let payload = """
-        {"event":"tts_chunk","speech_id":"s-1","seq":2,"audio":"\(pcm.base64EncodedString())",\
-        "sample_rate":24000,"channels":1,"encoding":"pcm_s16le"}
+        {"event":"tts_chunk","voice_id":"voice-2","sequence":2,"format":"wav",\
+        "audio_base64":"\(audio.base64EncodedString())"}
         """
-        guard case .voice(.ttsChunk(let speechId, let seq, let audio, let format)) =
+        guard case .voice(.ttsChunk(let voiceId, let sequence, let format, let bytes)) =
             try event(payload) else {
             return XCTFail("not a tts chunk")
         }
-        XCTAssertEqual(speechId, "s-1")
-        XCTAssertEqual(seq, 2)
-        XCTAssertEqual(audio, pcm)
-        XCTAssertEqual(format.sampleRate, 24000)
-        XCTAssertTrue(format.isSigned16LittleEndian)
+        XCTAssertEqual(voiceId, "voice-2")
+        XCTAssertEqual(sequence, 2)
+        XCTAssertEqual(format, .wav)
+        XCTAssertEqual(bytes, audio)
     }
 
-    /// A chunk without the three format fields is played at the capture format rather than
-    /// refused: leaving them out means "the usual", and a refusal would be the worse answer.
-    func testAChunkWithoutAFormatFallsBackToTheCaptureFormat() throws {
-        let payload = #"{"event":"tts_chunk","audio":"AAEC"}"#
-        guard case .voice(.ttsChunk(_, _, _, let format)) = try event(payload) else {
+    /// A container this shell cannot take apart still has to be readable, so it can be named
+    /// in the notice instead of being played as noise.
+    func testAnUnknownContainerKeepsItsName() throws {
+        let payload = #"{"event":"tts_chunk","voice_id":"voice-2","sequence":0,"format":"opus","audio_base64":"AAEC"}"#
+        guard case .voice(.ttsChunk(_, _, let format, _)) = try event(payload) else {
             return XCTFail("not a tts chunk")
         }
-        XCTAssertEqual(format, VoiceFormat.capture)
+        XCTAssertEqual(format, .unrecognised("opus"))
+        XCTAssertEqual(format.rawValue, "opus")
     }
 
-    /// Broken base64 is a broken line. Playing an empty buffer instead would be a gap in the
-    /// speech that nobody could explain.
-    func testAChunkWithBrokenAudioIsNotReadAsSilence() throws {
-        let event = try event(#"{"event":"tts_chunk","audio":"!!!not base64!!!"}"#)
-        XCTAssertEqual(event, .unrecognised(kind: "tts_chunk"))
-        XCTAssertNil(event.voiceEvent)
+    /// Broken base64 makes the whole line undecodable, which is what happens to any event of a
+    /// known kind whose payload is wrong. The shell reports it through `onUndecodableLine` and
+    /// drops it. Reading it as an empty buffer would be a gap in the speech that nobody could
+    /// explain, and reading it as an unknown event would hide a broken daemon.
+    func testAChunkWithBrokenAudioIsNotReadAsSilence() {
+        XCTAssertThrowsError(
+            try event(#"{"event":"tts_chunk","voice_id":"voice-2","sequence":0,"format":"wav","audio_base64":"!!!nope!!!"}"#)
+        ) { error in
+            guard case DecodingError.dataCorrupted(let context) = error else {
+                return XCTFail("expected a decoding error, got \(error)")
+            }
+            XCTAssertEqual(context.debugDescription, "audio is not base64")
+        }
     }
 
-    func testDoneCarriesItsReasonWhenThereIsOne() throws {
+    func testDoneNamesItsEndpointWhenThereIsOne() throws {
         XCTAssertEqual(
-            try event(#"{"event":"tts_done","speech_id":"s-1","reason":"finished"}"#),
-            .voice(.ttsDone(speechId: "s-1", reason: "finished")))
+            try event(#"{"event":"tts_done","voice_id":"voice-2","endpoint":"say"}"#),
+            .voice(.ttsDone(voiceId: "voice-2", endpoint: "say")))
         XCTAssertEqual(
-            try event(#"{"event":"tts_done"}"#),
-            .voice(.ttsDone(speechId: nil, reason: nil)))
+            try event(#"{"event":"tts_done","voice_id":"voice-2"}"#),
+            .voice(.ttsDone(voiceId: "voice-2", endpoint: nil)))
     }
 
     func testEveryVoiceEventSurvivesARoundTrip() throws {
         let events: [VoiceEvent] = [
-            .sttPartial(voiceId: "v", text: "halb"),
-            .sttFinal(voiceId: nil, text: "ganz"),
-            .ttsChunk(
-                speechId: "s", seq: 0, audio: Data([1, 2, 3, 4]),
-                format: VoiceFormat(sampleRate: 22050, channels: 1)),
-            .ttsDone(speechId: "s", reason: nil),
+            .sttPartial(voiceId: "voice-1", text: "halb"),
+            .sttFinal(voiceId: "voice-1", text: "ganz", endpoint: "whisper"),
+            .ttsChunk(voiceId: "voice-2", sequence: 0, format: .wav, audio: Data([1, 2, 3, 4])),
+            .ttsDone(voiceId: "voice-2", endpoint: nil),
         ]
         for event in events {
             let data = try JSONEncoder().encode(Event.voice(event))
@@ -152,18 +169,21 @@ final class VoiceEventWireTests: XCTestCase {
         }
     }
 
-    /// The four names are deliberately absent from `EventKind`: that enum is held against the
-    /// schema the Rust crate generates, and it does not have them yet. When it does, this test
-    /// is what says the four can move over.
-    func testTheVoiceEventsAreNotAmongTheThirteen() {
-        XCTAssertEqual(EventKind.allCases.count, 13)
+    /// The four voice kinds are part of the seventeen the protocol has, and the shell knows
+    /// each of them by its own name.
+    func testTheFourVoiceKindsAreAmongTheSeventeen() {
+        XCTAssertEqual(EventKind.allCases.count, 17)
         for kind in VoiceEventKind.allCases {
-            XCTAssertNil(EventKind(rawValue: kind.rawValue), "\(kind.rawValue) is in EventKind now")
+            let matching = EventKind(rawValue: kind.rawValue)
+            XCTAssertNotNil(matching, "\(kind.rawValue) is missing from EventKind")
+            XCTAssertEqual(matching?.isVoice, true)
         }
-        XCTAssertNil(Event.voice(.ttsDone(speechId: nil, reason: nil)).kind)
+        XCTAssertEqual(
+            Event.voice(.ttsDone(voiceId: "voice-2", endpoint: nil)).kind, .ttsDone)
+        XCTAssertEqual(EventKind.busy.isVoice, false)
     }
 
-    /// An event that is neither one of the thirteen nor one of the four stays unrecognised
+    /// Something that is neither one of the thirteen nor one of the four stays unrecognised
     /// with its name, the way it did before voice existed.
     func testSomethingElseUnknownIsStillJustUnknown() throws {
         XCTAssertEqual(try event(#"{"event":"wakeword","word":"companion"}"#),
@@ -172,25 +192,35 @@ final class VoiceEventWireTests: XCTestCase {
 }
 
 final class VoiceFormatTests: XCTestCase {
-    func testCaptureFormatIsWhatARecogniserWants() {
-        XCTAssertEqual(VoiceFormat.capture.sampleRate, 16000)
-        XCTAssertEqual(VoiceFormat.capture.channels, 1)
-        XCTAssertTrue(VoiceFormat.capture.isSigned16LittleEndian)
-        XCTAssertEqual(VoiceFormat.capture.bytesPerSecond, 32000)
+    func testTheCaptureFormatIsWhatARecogniserWants() {
+        XCTAssertEqual(VoiceCaptureFormat.default.sampleRateHz, 16000)
+        XCTAssertEqual(VoiceCaptureFormat.default.channels, 1)
+        XCTAssertEqual(VoiceCaptureFormat.default.bytesPerSecond, 32000)
     }
 
-    func testAnUnknownEncodingIsNotTreatedAsPCM() {
-        let format = VoiceFormat(sampleRate: 24000, channels: 1, encoding: "opus")
-        XCTAssertFalse(format.isSigned16LittleEndian)
+    func testAChannelCountOfZeroIsNotDividedBy() {
+        let odd = VoiceCaptureFormat(sampleRateHz: 16000, channels: 0)
+        XCTAssertEqual(odd.bytesPerSecond, 32000)
     }
 
-    /// The audio never reaches a log line. What a person said is in those bytes.
-    func testTheDescriptionOfAChunkHasNoAudioInIt() {
-        let event = VoiceEvent.ttsChunk(
-            speechId: "s", seq: 1, audio: Data(repeating: 0x41, count: 4096),
-            format: .capture)
-        let text = event.description
-        XCTAssertFalse(text.contains("QUFB"), "base64 of the audio must not be printed")
-        XCTAssertTrue(text.contains("4096 Bytes"))
+    func testTheContainerNamesSurviveARoundTrip() throws {
+        for format in [AudioFormat.wav, .aiff, .mp3, .unrecognised("opus")] {
+            let data = try JSONEncoder().encode(format)
+            XCTAssertEqual(try JSONDecoder().decode(AudioFormat.self, from: data), format)
+        }
+    }
+
+    /// Neither the audio nor the text reaches a log line. What a person said is in both.
+    func testTheDescriptionOfAnEventCarriesNeitherAudioNorWords() {
+        let chunk = VoiceEvent.ttsChunk(
+            voiceId: "voice-2", sequence: 1, format: .wav,
+            audio: Data(repeating: 0x41, count: 4096))
+        XCTAssertFalse(chunk.description.contains("QUFB"), "no base64 of the audio")
+        XCTAssertTrue(chunk.description.contains("4096 Bytes"))
+
+        let final = VoiceEvent.sttFinal(
+            voiceId: "voice-1", text: "mein Passwort ist Hummel", endpoint: nil)
+        XCTAssertFalse(final.description.contains("Hummel"), "no spoken words")
+        XCTAssertTrue(final.description.contains("24 Zeichen"))
     }
 }

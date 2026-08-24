@@ -223,10 +223,10 @@ public final class CompanionShell {
             guard let self else { return completion(.failure(.notConnected)) }
             self.client.request(request) { result in
                 switch result {
-                case .success:
-                    completion(.success(()))
+                case .success(let body):
+                    completion(.success(body))
                 case .failure(let failure):
-                    completion(.failure(Self.voiceFailure(failure)))
+                    completion(.failure(Self.voiceFailure(failure, for: request)))
                 }
             }
         }
@@ -252,7 +252,6 @@ public final class CompanionShell {
             self?.systemMessage(text)
             self?.refreshVoiceState()
         }
-        voice.currentSessionId = { [weak self] in self?.overlay.model.selectedSessionId }
 
         overlay.onToggleVoice = { [weak self] in self?.toggleVoice() }
         applyVoiceSettings()
@@ -365,12 +364,14 @@ public final class CompanionShell {
 
     /// Reads a failed request the way the voice pipeline needs it.
     ///
-    /// `bad_request` counts as "does not know voice" together with `not_supported`: a daemon
-    /// that knows the name but not the fields cannot do anything with the audio either, and
-    /// asking again for every utterance would only repeat the refusal. The protocol version of
-    /// the handshake cannot answer this — voice is an additive change, and a daemon of the same
-    /// version may or may not have it.
-    private static func voiceFailure(_ failure: DaemonClient.RequestFailure) -> VoiceRequestFailure {
+    /// `not_supported` is the daemon saying it understood the request and has nothing to serve
+    /// it with — no speech endpoint configured, usually — so voice goes off until something
+    /// changes. `bad_request` is the client's mistake and stays with the one utterance, with
+    /// one exception: on `voice_begin` there is nothing a client could get wrong except the
+    /// name of the request itself, so a daemon that predates voice is read there.
+    private static func voiceFailure(
+        _ failure: DaemonClient.RequestFailure, for request: Request
+    ) -> VoiceRequestFailure {
         switch failure {
         case .notConnected, .connectionLost:
             return .notConnected
@@ -378,8 +379,13 @@ public final class CompanionShell {
             return .failed("Der Daemon hat nicht innerhalb von \(Int(seconds)) Sekunden geantwortet.")
         case .daemon(let error):
             switch error.code {
-            case .notSupported, .badRequest, .unknownAdapter:
+            case .notSupported:
                 return .notSupported(error.message)
+            case .badRequest:
+                if case .voiceBegin = request { return .notSupported(error.message) }
+                return .failed(error.message)
+            case .unknownSession:
+                return .unknownStream(error.message)
             default:
                 return .failed(error.message)
             }

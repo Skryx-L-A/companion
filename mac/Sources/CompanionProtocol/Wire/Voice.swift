@@ -2,107 +2,43 @@
 
 import Foundation
 
-/// The voice half of the protocol: three requests carrying microphone audio to the daemon and
-/// four events carrying recognised text and spoken audio back.
+/// The voice half of the protocol: four requests carrying microphone audio and text to the
+/// daemon, four events carrying recognised text and spoken audio back.
 ///
-/// `DESIGN.md` section Voice. These are built here before the daemon knows them, so everything
-/// in this file is written to be inert until it does: the requests are refused with
-/// `not_supported` or `bad_request` by a daemon of the current version, and the events arrive
-/// as `Event.unrecognised` from one that never sends them. Neither leaves the shell in a state
-/// whose reason a person cannot see.
-///
-/// The four event names are deliberately *not* in `EventKind`. That enum is held against
-/// `app/protocol/schema/server_message.json` by `SchemaTests`, and the schema is generated
-/// from the Rust crate, which does not have them yet. They live in `VoiceEventKind` instead
-/// and reach the shell through `Event.voice`; once the daemon side lands, the schema test is
-/// what says they can be promoted.
+/// `DESIGN.md` section Voice. The daemon does no voice activity detection of its own: the
+/// shell decides where an utterance begins and ends, which is right where the microphone and
+/// the barge-in state are. What the daemon owns is the endpoint, the transcript and the
+/// speech.
 
-// MARK: - Format
+/// Identifies one dictation or one spoken answer. Made by the daemon, not by the shell: the
+/// answer to `voice_begin` is what says which id the chunks have to carry.
+public typealias VoiceId = String
 
-/// How a block of audio is laid out. The capture side of the shell produces exactly one shape
-/// — 16 kHz mono signed 16-bit little-endian — because that is what a streaming recogniser
-/// wants and it is the cheapest thing to send. What comes back from a speech synthesiser is
-/// whatever it produces, so playback reads the format off the event instead of assuming it.
-public struct VoiceFormat: Codable, Sendable, Equatable, Hashable {
-    /// Samples per second.
-    public var sampleRate: UInt32
-    public var channels: UInt32
-    /// Sample encoding. Only `pcm_s16le` is understood; anything else is reported rather than
-    /// played, because playing bytes in the wrong encoding is noise at full volume.
-    public var encoding: String
-
-    /// Signed 16-bit little-endian PCM, the one encoding this shell reads and writes.
-    public static let pcmSigned16LittleEndian = "pcm_s16le"
-
-    /// What the microphone path produces.
-    public static let capture = VoiceFormat(sampleRate: 16000, channels: 1)
-
-    public init(
-        sampleRate: UInt32,
-        channels: UInt32,
-        encoding: String = VoiceFormat.pcmSigned16LittleEndian
-    ) {
-        self.sampleRate = sampleRate
-        self.channels = channels
-        self.encoding = encoding
-    }
-
-    /// True when the bytes are the interleaved 16-bit little-endian samples this shell can
-    /// hand to an audio engine.
-    public var isSigned16LittleEndian: Bool { encoding == Self.pcmSigned16LittleEndian }
-
-    /// Bytes one second of this format takes, for the buffer arithmetic of the VAD.
-    public var bytesPerSecond: Int { Int(sampleRate) * Int(channels) * 2 }
-
-    private enum CodingKeys: String, CodingKey {
-        case sampleRate = "sample_rate"
-        case channels
-        case encoding
-    }
-
-    /// Reads the three fields where they are present and falls back to the capture format for
-    /// the ones that are not. A daemon that leaves them out means "the usual", and refusing to
-    /// play in that case would be a worse answer than playing at the rate everything else uses.
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        sampleRate = try container.decodeIfPresent(UInt32.self, forKey: .sampleRate)
-            ?? VoiceFormat.capture.sampleRate
-        channels = try container.decodeIfPresent(UInt32.self, forKey: .channels)
-            ?? VoiceFormat.capture.channels
-        encoding = try container.decodeIfPresent(String.self, forKey: .encoding)
-            ?? VoiceFormat.pcmSigned16LittleEndian
-    }
-}
-
-// MARK: - Requests
-
-/// Why a recording stopped. The daemon needs the difference: an utterance that ended by
-/// itself is meant to be recognised, one the person threw away is not.
-public enum VoiceEndReason: Sendable, Equatable, Hashable {
-    /// The voice activity detection found enough trailing silence.
-    case endpoint
-    /// The person let go of the key, or clicked the figure a second time.
-    case released
-    /// The recording is to be dropped, not recognised.
-    case cancelled
+/// Container format of one piece of audio on the wire.
+public enum AudioFormat: Sendable, Equatable, Hashable {
+    /// RIFF/WAVE around little-endian PCM16.
+    case wav
+    /// Apple AIFF, which is what `say -o` writes when it is not asked for WAVE.
+    case aiff
+    case mp3
     case unrecognised(String)
 }
 
-extension VoiceEndReason: RawRepresentable, Codable {
+extension AudioFormat: RawRepresentable, Codable {
     public init(rawValue: String) {
         switch rawValue {
-        case "endpoint": self = .endpoint
-        case "released": self = .released
-        case "cancelled": self = .cancelled
+        case "wav": self = .wav
+        case "aiff": self = .aiff
+        case "mp3": self = .mp3
         default: self = .unrecognised(rawValue)
         }
     }
 
     public var rawValue: String {
         switch self {
-        case .endpoint: return "endpoint"
-        case .released: return "released"
-        case .cancelled: return "cancelled"
+        case .wav: return "wav"
+        case .aiff: return "aiff"
+        case .mp3: return "mp3"
         case .unrecognised(let raw): return raw
         }
     }
@@ -117,24 +53,39 @@ extension VoiceEndReason: RawRepresentable, Codable {
     }
 }
 
-/// Opens one utterance.
+/// How the recorded audio is laid out.
 ///
-/// The id is made by the shell, so a partial result can be matched to the recording it came
-/// from even while the next one is already running. `sessionId` says which session the text is
-/// meant for when one is picked; it is left off the wire while it is nil.
-public struct VoiceBegin: Sendable, Equatable {
-    public var voiceId: String
-    public var sessionId: SessionId?
-    public var format: VoiceFormat
+/// One shape leaves the shell: 16 kHz mono signed 16-bit little-endian. That is what a
+/// streaming recogniser wants, and it is the cheapest thing to put on the wire.
+public struct VoiceCaptureFormat: Sendable, Equatable, Hashable {
+    public var sampleRateHz: UInt32
+    public var channels: UInt16
 
-    public init(voiceId: String, sessionId: SessionId? = nil, format: VoiceFormat = .capture) {
-        self.voiceId = voiceId
-        self.sessionId = sessionId
-        self.format = format
+    public static let `default` = VoiceCaptureFormat(sampleRateHz: 16000, channels: 1)
+
+    public init(sampleRateHz: UInt32 = 16000, channels: UInt16 = 1) {
+        self.sampleRateHz = sampleRateHz
+        self.channels = channels
     }
+
+    /// Bytes one second of this format takes, for the buffer arithmetic of the VAD.
+    public var bytesPerSecond: Int { Int(sampleRateHz) * Int(max(1, channels)) * 2 }
 }
 
-// MARK: - Events
+/// Opens one dictation.
+///
+/// Carries no id: the daemon makes it and answers with it. `language` is a hint for the
+/// endpoint and is left off the wire while it is nil, because the language hangs on the model
+/// and not on the app.
+public struct VoiceBegin: Sendable, Equatable {
+    public var format: VoiceCaptureFormat
+    public var language: String?
+
+    public init(format: VoiceCaptureFormat = .default, language: String? = nil) {
+        self.format = format
+        self.language = language
+    }
+}
 
 /// The four voice events, by name on the wire.
 public enum VoiceEventKind: String, Sendable, Codable, Hashable, CaseIterable {
@@ -146,15 +97,16 @@ public enum VoiceEventKind: String, Sendable, Codable, Hashable, CaseIterable {
 
 /// What the daemon reports about speech in either direction.
 public enum VoiceEvent: Sendable, Equatable {
-    /// Text recognised so far. Replaces the line the panel shows, it does not append to it.
-    case sttPartial(voiceId: String?, text: String)
-    /// The recogniser's final answer for this utterance.
-    case sttFinal(voiceId: String?, text: String)
-    /// A block of synthesised audio. `seq` is only for noticing a gap; playback is in arrival
-    /// order, because reordering would mean holding audio back.
-    case ttsChunk(speechId: String?, seq: UInt32?, audio: Data, format: VoiceFormat)
-    /// No more chunks for this utterance.
-    case ttsDone(speechId: String?, reason: String?)
+    /// Text recognised so far. Replaces what the last partial of the same dictation said; it
+    /// is never appended to it.
+    case sttPartial(voiceId: VoiceId, text: String)
+    /// The finished transcript of one dictation, and which profile produced it.
+    case sttFinal(voiceId: VoiceId, text: String, endpoint: String?)
+    /// One piece of spoken audio, in the order it has to be played. Only the first piece of a
+    /// `wav` or `aiff` stream carries the container header; the rest continue it.
+    case ttsChunk(voiceId: VoiceId, sequence: UInt32, format: AudioFormat, audio: Data)
+    /// The spoken answer is complete. No further chunk of this id follows.
+    case ttsDone(voiceId: VoiceId, endpoint: String?)
 
     public var kind: VoiceEventKind {
         switch self {
@@ -164,17 +116,26 @@ public enum VoiceEvent: Sendable, Equatable {
         case .ttsDone: return .ttsDone
         }
     }
+
+    /// The dictation or the spoken answer this is about.
+    public var voiceId: VoiceId {
+        switch self {
+        case .sttPartial(let id, _), .sttFinal(let id, _, _),
+             .ttsChunk(let id, _, _, _), .ttsDone(let id, _):
+            return id
+        }
+    }
 }
 
 extension VoiceEvent: Codable {
     private enum CodingKeys: String, CodingKey {
         case event
         case voiceId = "voice_id"
-        case speechId = "speech_id"
-        case seq
+        case sequence
+        case format
         case text
-        case audio
-        case reason
+        case audioBase64 = "audio_base64"
+        case endpoint
     }
 
     /// Fails for anything that is not one of the four names, so `Event` can fall through to
@@ -186,67 +147,69 @@ extension VoiceEvent: Codable {
             throw DecodingError.dataCorruptedError(
                 forKey: .event, in: container, debugDescription: "not a voice event: \(tag)")
         }
+        let voiceId = try container.decode(VoiceId.self, forKey: .voiceId)
         switch kind {
         case .sttPartial:
             self = .sttPartial(
-                voiceId: try container.decodeIfPresent(String.self, forKey: .voiceId),
-                text: try container.decode(String.self, forKey: .text))
+                voiceId: voiceId, text: try container.decode(String.self, forKey: .text))
         case .sttFinal:
             self = .sttFinal(
-                voiceId: try container.decodeIfPresent(String.self, forKey: .voiceId),
-                text: try container.decode(String.self, forKey: .text))
+                voiceId: voiceId,
+                text: try container.decode(String.self, forKey: .text),
+                endpoint: try container.decodeIfPresent(String.self, forKey: .endpoint))
         case .ttsChunk:
             // Base64 that does not decode is a broken line, not silence: an empty buffer
             // would be played as a gap and nobody would know why.
-            let encoded = try container.decode(String.self, forKey: .audio)
+            let encoded = try container.decode(String.self, forKey: .audioBase64)
             guard let audio = Data(base64Encoded: encoded) else {
                 throw DecodingError.dataCorruptedError(
-                    forKey: .audio, in: container, debugDescription: "audio is not base64")
+                    forKey: .audioBase64, in: container, debugDescription: "audio is not base64")
             }
             self = .ttsChunk(
-                speechId: try container.decodeIfPresent(String.self, forKey: .speechId),
-                seq: try container.decodeIfPresent(UInt32.self, forKey: .seq),
-                audio: audio,
-                format: try VoiceFormat(from: decoder))
+                voiceId: voiceId,
+                sequence: try container.decode(UInt32.self, forKey: .sequence),
+                format: try container.decode(AudioFormat.self, forKey: .format),
+                audio: audio)
         case .ttsDone:
             self = .ttsDone(
-                speechId: try container.decodeIfPresent(String.self, forKey: .speechId),
-                reason: try container.decodeIfPresent(String.self, forKey: .reason))
+                voiceId: voiceId,
+                endpoint: try container.decodeIfPresent(String.self, forKey: .endpoint))
         }
     }
 
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(kind.rawValue, forKey: .event)
+        try container.encode(voiceId, forKey: .voiceId)
         switch self {
-        case .sttPartial(let voiceId, let text), .sttFinal(let voiceId, let text):
-            try container.encodeIfPresent(voiceId, forKey: .voiceId)
+        case .sttPartial(_, let text):
             try container.encode(text, forKey: .text)
-        case .ttsChunk(let speechId, let seq, let audio, let format):
-            try container.encodeIfPresent(speechId, forKey: .speechId)
-            try container.encodeIfPresent(seq, forKey: .seq)
-            try container.encode(audio.base64EncodedString(), forKey: .audio)
-            try format.encode(to: encoder)
-        case .ttsDone(let speechId, let reason):
-            try container.encodeIfPresent(speechId, forKey: .speechId)
-            try container.encodeIfPresent(reason, forKey: .reason)
+        case .sttFinal(_, let text, let endpoint):
+            try container.encode(text, forKey: .text)
+            // Left out while absent, the way the daemon writes it.
+            try container.encodeIfPresent(endpoint, forKey: .endpoint)
+        case .ttsChunk(_, let sequence, let format, let audio):
+            try container.encode(sequence, forKey: .sequence)
+            try container.encode(format, forKey: .format)
+            try container.encode(audio.base64EncodedString(), forKey: .audioBase64)
+        case .ttsDone(_, let endpoint):
+            try container.encodeIfPresent(endpoint, forKey: .endpoint)
         }
     }
 }
 
-/// Never prints the audio. A log line of a chunk is otherwise kilobytes of base64 per tenth
-/// of a second, and what somebody said is in there.
+/// Never prints the audio and never the text. What a person said is in both.
 extension VoiceEvent: CustomStringConvertible {
     public var description: String {
         switch self {
-        case .sttPartial(let voiceId, let text):
-            return "stt_partial(voice_id: \(voiceId ?? "-"), \(text.count) Zeichen)"
-        case .sttFinal(let voiceId, let text):
-            return "stt_final(voice_id: \(voiceId ?? "-"), \(text.count) Zeichen)"
-        case .ttsChunk(let speechId, let seq, let audio, let format):
-            return "tts_chunk(speech_id: \(speechId ?? "-"), seq: \(seq.map(String.init) ?? "-"), \(audio.count) Bytes, \(format.sampleRate) Hz)"
-        case .ttsDone(let speechId, let reason):
-            return "tts_done(speech_id: \(speechId ?? "-"), \(reason ?? "-"))"
+        case .sttPartial(let id, let text):
+            return "stt_partial(\(id), \(text.count) Zeichen)"
+        case .sttFinal(let id, let text, let endpoint):
+            return "stt_final(\(id), \(text.count) Zeichen, \(endpoint ?? "-"))"
+        case .ttsChunk(let id, let sequence, let format, let audio):
+            return "tts_chunk(\(id), \(sequence), \(format.rawValue), \(audio.count) Bytes)"
+        case .ttsDone(let id, let endpoint):
+            return "tts_done(\(id), \(endpoint ?? "-"))"
         }
     }
 }

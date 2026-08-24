@@ -46,8 +46,9 @@ extension EndReason: RawRepresentable, Codable {
     }
 }
 
-/// The name of an event without its payload. The thirteen kinds of the protocol, in the
-/// order `DESIGN.md` section Session-Adapter lists them.
+/// The name of an event without its payload: the thirteen an adapter or the bus produces, in
+/// the order `DESIGN.md` section Session-Adapter lists them, and the four the voice pipeline
+/// produces. No adapter ever delivers a voice event; they belong to no session.
 public enum EventKind: String, Sendable, Codable, Hashable, CaseIterable {
     case sessionStarted = "session_started"
     case sessionEnded = "session_ended"
@@ -62,6 +63,18 @@ public enum EventKind: String, Sendable, Codable, Hashable, CaseIterable {
     case iteration
     case error
     case eventsDropped = "events_dropped"
+    case sttPartial = "stt_partial"
+    case sttFinal = "stt_final"
+    case ttsChunk = "tts_chunk"
+    case ttsDone = "tts_done"
+
+    /// True for the four that come from the voice pipeline rather than from a session.
+    public var isVoice: Bool {
+        switch self {
+        case .sttPartial, .sttFinal, .ttsChunk, .ttsDone: return true
+        default: return false
+        }
+    }
 }
 
 /// Everything an adapter can report about a session.
@@ -90,8 +103,9 @@ public enum Event: Sendable, Equatable {
     case error(message: String)
     /// Events were lost between an adapter and the bus before they could be numbered.
     case eventsDropped(missed: UInt64)
-    /// Speech, in either direction. `Wire/Voice.swift` says why these four are not in
-    /// `EventKind`: the schema the enum is held against does not have them yet.
+    /// Speech, in either direction. Kept as one case rather than four, because the whole
+    /// voice pipeline of the shell reads it as one thing and nothing else in the interface
+    /// looks at it at all.
     case voice(VoiceEvent)
     /// An event a newer daemon knows and this shell does not. Kept so the sequence stays
     /// readable instead of the whole line being dropped.
@@ -112,7 +126,14 @@ public enum Event: Sendable, Equatable {
         case .iteration: return .iteration
         case .error: return .error
         case .eventsDropped: return .eventsDropped
-        case .voice, .unrecognised: return nil
+        case .voice(let voice):
+            switch voice.kind {
+            case .sttPartial: return .sttPartial
+            case .sttFinal: return .sttFinal
+            case .ttsChunk: return .ttsChunk
+            case .ttsDone: return .ttsDone
+            }
+        case .unrecognised: return nil
         }
     }
 
@@ -191,14 +212,10 @@ extension Event: Codable {
             self = .error(message: try container.decode(String.self, forKey: .message))
         case .eventsDropped:
             self = .eventsDropped(missed: try container.decode(UInt64.self, forKey: .missed))
+        case .sttPartial, .sttFinal, .ttsChunk, .ttsDone:
+            self = .voice(try VoiceEvent(from: decoder))
         case nil:
-            // Not one of the thirteen. The four voice names are read here rather than in
-            // `EventKind`, and everything else stays unrecognised with its name kept.
-            if let voice = try? VoiceEvent(from: decoder) {
-                self = .voice(voice)
-            } else {
-                self = .unrecognised(kind: tag)
-            }
+            self = .unrecognised(kind: tag)
         }
     }
 

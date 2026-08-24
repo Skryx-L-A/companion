@@ -30,11 +30,11 @@ public final class MicrophoneCapture: AudioCapturing {
     /// stays at ten messages a second.
     private let blockSeconds = 0.1
 
-    public init(format: VoiceFormat = .capture) {
+    public init(format: VoiceCaptureFormat = .default) {
         // Interleaved 16-bit is what goes on the wire; mono, because a recogniser gains
         // nothing from a second channel and it would double the bytes.
         self.target = AVAudioFormat(
-            commonFormat: .pcmFormatInt16, sampleRate: Double(format.sampleRate),
+            commonFormat: .pcmFormatInt16, sampleRate: Double(format.sampleRateHz),
             channels: AVAudioChannelCount(format.channels), interleaved: true)
             ?? AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1)!
     }

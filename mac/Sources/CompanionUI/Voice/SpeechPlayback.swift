@@ -4,16 +4,16 @@ import AVFoundation
 import CompanionProtocol
 import Foundation
 
-/// Plays the blocks of audio the daemon sends for one spoken sentence.
+/// Plays the pieces of audio the daemon sends for one spoken answer.
 ///
 /// `DESIGN.md` section Voice: the model speaks sentence by sentence while it is still writing,
 /// so the audio arrives in pieces and playback has to start on the first one. An
 /// `AVAudioPlayerNode` is built for exactly that — buffers are scheduled behind each other and
 /// play gaplessly — and `stop()` drops what is queued, which is what barge-in needs.
 ///
-/// The format comes off the event, not from an assumption: what a speech synthesiser produces
-/// is its business, and 22.05 or 24 kHz are as common as 16. Blocks arrive as signed 16-bit
-/// and are converted to float here, because that is the format an engine graph runs in.
+/// What arrives is a WAV file cut into pieces, so the samples come out of `WavStreamReader`
+/// and the graph is wired from what its header says. Nothing is assumed about the rate: the
+/// `say` path of the daemon writes 22.05 kHz, an HTTP endpoint writes whatever it likes.
 @MainActor
 public final class SpeechPlayback: SpeechPlaying {
     public var onFinished: (() -> Void)?
@@ -21,32 +21,43 @@ public final class SpeechPlayback: SpeechPlaying {
 
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
-    /// The format the graph is currently wired for, nil while nothing has been played.
-    private var wiredFormat: VoiceFormat?
-    /// Blocks handed to the player that have not finished playing.
+    private var reader = WavStreamReader()
+    /// The format the graph is currently wired for, nil while nothing is playing.
+    private var wiredFormat: VoiceCaptureFormat?
+    /// Pieces handed to the player that have not finished playing.
     private var outstanding = 0
-    /// True once the daemon said the utterance is over, so draining means finished.
+    /// True once the daemon said the answer is over, so draining means finished.
     private var isEndOfSpeech = false
 
     public init() {}
 
-    public func enqueue(_ pcm: Data, format: VoiceFormat) throws {
-        guard format.isSigned16LittleEndian else {
-            throw AudioFailure.engine("Tonformat \(format.encoding) wird nicht abgespielt")
+    public func begin(format: AudioFormat) throws {
+        guard format == .wav else {
+            throw AudioFailure.unplayableFormat(format.rawValue.uppercased())
         }
-        guard !pcm.isEmpty else { return }
-        // A block that arrives after the end was announced belongs to the next utterance, so
-        // the mark is cleared rather than the block being dropped.
+        // A new answer replaces the old one. Two of them at once would be two voices.
+        if isPlaying || outstanding > 0 { stop() }
+        reader = WavStreamReader()
         isEndOfSpeech = false
+    }
+
+    public func enqueue(_ audio: Data) throws {
+        guard !audio.isEmpty else { return }
+        // A piece that arrives after the end was announced belongs to the next answer, so the
+        // mark is cleared rather than the piece being dropped.
+        isEndOfSpeech = false
+
+        let pcm = try reader.push(audio)
+        guard !pcm.isEmpty, let format = reader.format else { return }
         try wire(for: format)
         guard let buffer = Self.buffer(from: pcm, format: format) else {
-            throw AudioFailure.engine("Tonblock von \(pcm.count) Bytes liess sich nicht lesen")
+            throw AudioFailure.brokenAudio("\(pcm.count) Bytes ergeben keinen ganzen Abtastwert.")
         }
 
         outstanding += 1
         player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.blockFinished() }
+                MainActor.assumeIsolated { self?.pieceFinished() }
             }
         }
         if !player.isPlaying {
@@ -57,7 +68,7 @@ public final class SpeechPlayback: SpeechPlaying {
 
     public func markEndOfSpeech() {
         isEndOfSpeech = true
-        // Nothing left to play: the utterance is over the moment the daemon says so.
+        // Nothing left to play: the answer is over the moment the daemon says so.
         if outstanding == 0 { finish() }
     }
 
@@ -76,7 +87,7 @@ public final class SpeechPlayback: SpeechPlaying {
 
     // MARK: - Private
 
-    private func blockFinished() {
+    private func pieceFinished() {
         guard outstanding > 0 else { return }
         outstanding -= 1
         guard outstanding == 0, isEndOfSpeech else { return }
@@ -92,15 +103,15 @@ public final class SpeechPlayback: SpeechPlaying {
         onFinished?()
     }
 
-    /// Builds the graph for a format, and rebuilds it when the format changes between
-    /// utterances. The node is attached once; only the connection carries the format.
-    private func wire(for format: VoiceFormat) throws {
+    /// Builds the graph for a format, and rebuilds it when the next answer has another one.
+    /// The node is attached once; only the connection carries the format.
+    private func wire(for format: VoiceCaptureFormat) throws {
         if wiredFormat == format, engine.isRunning { return }
         guard let processing = AVAudioFormat(
-            standardFormatWithSampleRate: Double(format.sampleRate),
+            standardFormatWithSampleRate: Double(format.sampleRateHz),
             channels: AVAudioChannelCount(format.channels))
         else {
-            throw AudioFailure.engine("\(format.sampleRate) Hz, \(format.channels) Kanaele")
+            throw AudioFailure.engine("\(format.sampleRateHz) Hz, \(format.channels) Kanaele")
         }
 
         if engine.isRunning { engine.stop() }
@@ -116,17 +127,19 @@ public final class SpeechPlayback: SpeechPlaying {
         wiredFormat = format
     }
 
-    /// Interleaved signed 16-bit little-endian bytes as the float buffer the graph plays.
+    /// Interleaved signed 16-bit little-endian samples as the float buffer the graph plays.
     ///
     /// Arithmetic on bytes and nothing else, so it is not on the main actor: that is what lets
     /// a test check the conversion without an audio device existing anywhere.
-    nonisolated static func buffer(from pcm: Data, format: VoiceFormat) -> AVAudioPCMBuffer? {
+    nonisolated static func buffer(
+        from pcm: Data, format: VoiceCaptureFormat
+    ) -> AVAudioPCMBuffer? {
         let channels = max(1, Int(format.channels))
         let bytesPerFrame = channels * EnergyVAD.sampleBytes
         let frames = pcm.count / bytesPerFrame
         guard frames > 0,
               let processing = AVAudioFormat(
-                standardFormatWithSampleRate: Double(format.sampleRate),
+                standardFormatWithSampleRate: Double(format.sampleRateHz),
                 channels: AVAudioChannelCount(channels)),
               let buffer = AVAudioPCMBuffer(
                 pcmFormat: processing, frameCapacity: AVAudioFrameCount(frames)),

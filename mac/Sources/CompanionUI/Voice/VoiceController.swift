@@ -3,14 +3,18 @@
 import CompanionProtocol
 import Foundation
 
-/// Why a voice request did not go through, in the three kinds that matter here.
+/// Why a voice request did not go through.
 public enum VoiceRequestFailure: Error, Equatable, Sendable {
-    /// This daemon does not know the voice requests. Read from `not_supported` and from
-    /// `bad_request` alike: both mean the other side cannot do anything with what was sent,
-    /// and asking again for the next utterance would only repeat it.
+    /// The daemon understood the request and has nothing to serve it with: no speech endpoint
+    /// configured, or a protocol that cannot do it. Voice stays off until something changes,
+    /// so this is not asked again for every utterance.
     case notSupported(String)
+    /// The daemon does not know this dictation any more. The recording is over; nothing else
+    /// about voice is wrong.
+    case unknownStream(String)
     case notConnected
-    /// Anything else, with what the daemon or the connection said.
+    /// Anything else, with what the daemon or the connection said. One utterance fails, voice
+    /// stays on.
     case failed(String)
 }
 
@@ -22,15 +26,14 @@ public enum VoiceRequestFailure: Error, Equatable, Sendable {
 /// `AudioCapturing`, `SpeechPlaying` and `MicrophoneAuthorizing`, so the whole thing can be
 /// driven from a test without a microphone being opened or a speaker making a sound.
 ///
-/// The feature is inert until the daemon knows the three requests. The first refusal switches
-/// voice off for the connection and says so once; it does not ask again per utterance and it
-/// does not leave a running microphone behind.
+/// Where the endpointing lives is a decision of the protocol, not of this file: the daemon
+/// transcribes what it is given and does no voice activity detection, because the audio and
+/// the barge-in state are here, next to the microphone.
 ///
-/// Audio waits for the answer to `voice_begin` before it is sent. That is not caution about
-/// the network but about the daemon: it answers every request in a task of its own, so two
-/// requests written back to back are not necessarily handled in that order, and a chunk
-/// overtaking the opening of its own utterance would be a chunk for an utterance that does
-/// not exist yet.
+/// Two things about the daemon shape the flow. It hands out the id of a dictation in the
+/// answer to `voice_begin`, so audio recorded before that answer waits. And it works every
+/// request in a task of its own, so two chunks in flight could be appended in the wrong
+/// order — which is why exactly one chunk is unanswered at any time.
 @MainActor
 public final class VoiceController {
     /// What is known about the daemon's side of voice.
@@ -42,8 +45,8 @@ public final class VoiceController {
         case unavailable(String)
     }
 
-    /// What the pipeline is doing. Both halves can be true at once, which is exactly the
-    /// case barge-in exists for.
+    /// What the pipeline is doing. Both halves can be true at once, which is exactly the case
+    /// barge-in exists for.
     public struct Phase: Equatable, Sendable {
         public var isCapturing: Bool
         public var isSpeaking: Bool
@@ -54,40 +57,40 @@ public final class VoiceController {
         /// Microphone muted while the figure speaks. The fallback when there is no echo
         /// cancellation, and a setting for anyone who wants it anyway.
         public var halfDuplex: Bool
-        /// How much audio may pile up while `voice_begin` is unanswered before the utterance
-        /// is given up on. Without a cap, a daemon that never answers would grow the buffer
-        /// until its request deadline, holding whole minutes of speech in memory.
-        public var maxPendingSeconds: Double
+        /// How much audio may pile up unsent before the recording is given up on. Without a
+        /// cap, a daemon that never answers would grow the queue until its request deadline,
+        /// holding whole minutes of speech in memory.
+        public var maxQueuedSeconds: Double
 
         public init(
             vad: EnergyVAD.Tuning = EnergyVAD.Tuning(),
             halfDuplex: Bool = false,
-            maxPendingSeconds: Double = 5
+            maxQueuedSeconds: Double = 5
         ) {
             self.vad = vad
             self.halfDuplex = halfDuplex
-            self.maxPendingSeconds = maxPendingSeconds
+            self.maxQueuedSeconds = maxQueuedSeconds
         }
     }
 
-    /// One recording, from the key going down until `voice_end` is on its way.
-    private struct Utterance {
-        let id: String
-        /// True once the daemon acknowledged `voice_begin`.
-        var isOpen = false
-        /// Audio recorded before that acknowledgement.
-        var pending: [Data] = []
-        var pendingBytes = 0
-        var seq: UInt32 = 0
-        /// Set when the recording ended while the opening was still unanswered. The close is
-        /// sent as soon as the answer arrives.
-        var endReason: VoiceEndReason?
+    /// One dictation, from the key going down until `voice_end` is on its way.
+    private struct Recording {
+        /// Assigned by the daemon in its answer to `voice_begin`, nil until it arrives.
+        var voiceId: VoiceId?
+        /// Audio waiting to go out. One piece is in flight at a time.
+        var queue: [Data] = []
+        var queuedBytes = 0
+        var isSending = false
+        /// True once the microphone is off; the close follows when the queue has drained.
+        var isMicrophoneClosed = false
+        /// True when the transcript is to be thrown away.
+        var isDiscarded = false
     }
 
     // MARK: - Wiring
 
     /// Sends one request and reports what came back. Set by the shell; a test hands in its own.
-    public var perform: ((Request, @escaping (Result<Void, VoiceRequestFailure>) -> Void) -> Void)?
+    public var perform: ((Request, @escaping (Result<ResponseBody, VoiceRequestFailure>) -> Void) -> Void)?
     /// What the figure should show.
     public var onFigureEvent: ((FigureEvent) -> Void)?
     /// The line the recogniser is filling. An empty string clears it.
@@ -97,8 +100,6 @@ public final class VoiceController {
     public var onFinalText: ((String) -> Void)?
     /// A sentence for the chat, for everything a person has to be told once.
     public var onNotice: ((String) -> Void)?
-    /// Which session the utterance is meant for, when one is picked.
-    public var currentSessionId: (() -> SessionId?)?
 
     public private(set) var availability: Availability = .untested
     public var configuration: Configuration
@@ -109,15 +110,17 @@ public final class VoiceController {
     private let captureFactory: () -> AudioCapturing
     private let playerFactory: () -> SpeechPlaying
     private let authorization: MicrophoneAuthorizing
-    private let nextVoiceId: () -> String
 
     private var capture: AudioCapturing?
     private var player: SpeechPlaying?
-    /// Every utterance that is not finished yet: the one being recorded, plus any whose close
-    /// is waiting for the answer to its opening.
-    private var utterances: [String: Utterance] = [:]
-    /// The utterance the microphone is feeding, nil while nothing is being recorded.
-    private var activeId: String?
+    private var recording: Recording?
+    /// Dictations whose transcript is to be dropped. The protocol has no way to cancel one,
+    /// so a discarded recording is still closed and still transcribed; what changes is that
+    /// nothing is done with the result.
+    private var discarded: Set<VoiceId> = []
+    /// The spoken answer that is playing, and where its numbering stands.
+    private var speakingId: VoiceId?
+    private var expectedSequence: UInt32 = 0
     private var vad = EnergyVAD()
     private var isSpeaking = false
     /// True once this playback was already cut short, so barge-in happens once and not on
@@ -128,22 +131,19 @@ public final class VoiceController {
         configuration: Configuration = Configuration(),
         capture: @escaping () -> AudioCapturing,
         player: @escaping () -> SpeechPlaying,
-        authorization: MicrophoneAuthorizing,
-        voiceId: (() -> String)? = nil
+        authorization: MicrophoneAuthorizing
     ) {
         self.configuration = configuration
         self.captureFactory = capture
         self.playerFactory = player
         self.authorization = authorization
-        var sequence = 0
-        self.nextVoiceId = voiceId ?? {
-            sequence += 1
-            return "v-\(UInt64(Date().timeIntervalSince1970 * 1000))-\(sequence)"
-        }
     }
 
     /// True while the microphone is open.
-    public var isCapturing: Bool { activeId != nil }
+    public var isCapturing: Bool {
+        guard let recording else { return false }
+        return !recording.isMicrophoneClosed
+    }
 
     public var phase: Phase {
         Phase(isCapturing: isCapturing, isSpeaking: isSpeaking)
@@ -153,7 +153,7 @@ public final class VoiceController {
     /// the system gave no echo cancellation.
     public var isHalfDuplex: Bool { configuration.halfDuplex || isForcedToHalfDuplex }
 
-    /// A new connection means a new daemon, which may well be one that knows voice.
+    /// A new connection means a new daemon, which may well have speech configured.
     public func connectionChanged() {
         dropEverything()
         availability = .untested
@@ -168,8 +168,9 @@ public final class VoiceController {
     }
 
     private func dropEverything() {
-        if isCapturing { closeCapture(reason: .cancelled, clearTranscript: true) }
-        utterances.removeAll()
+        if isCapturing { closeCapture(discard: true) }
+        recording = nil
+        discarded.removeAll()
         stopSpeaking()
     }
 
@@ -177,7 +178,7 @@ public final class VoiceController {
 
     /// Push to talk went down, or the figure was clicked while nothing was recording.
     public func beginCapture() {
-        guard !isCapturing else { return }
+        guard recording == nil else { return }
         if case .unavailable(let reason) = availability {
             onNotice?(reason)
             return
@@ -205,13 +206,13 @@ public final class VoiceController {
     /// Push to talk came up, or the figure was clicked a second time. What was said is sent,
     /// not thrown away.
     public func endCapture() {
-        closeCapture(reason: .released, clearTranscript: false)
+        closeCapture(discard: false)
     }
 
-    /// Escape, or a change of mind: the recording is dropped.
+    /// Escape, or a change of mind: what was said is not used.
     public func cancelCapture() {
         guard isCapturing else { return }
-        closeCapture(reason: .cancelled, clearTranscript: true)
+        closeCapture(discard: true)
         onNotice?("Die Aufnahme wurde verworfen.")
     }
 
@@ -224,16 +225,21 @@ public final class VoiceController {
 
     public func handle(_ event: VoiceEvent) {
         switch event {
-        case .sttPartial(_, let text):
+        case .sttPartial(let voiceId, let text):
+            guard !discarded.contains(voiceId) else { return }
             onPartialTranscript?(text)
-        case .sttFinal(_, let text):
+        case .sttFinal(let voiceId, let text, _):
+            // A dictation the person threw away is still transcribed, because the protocol has
+            // no cancel; the result is dropped here, where the decision was made.
+            if discarded.remove(voiceId) != nil { return }
             onPartialTranscript?("")
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
             onFinalText?(trimmed)
-        case .ttsChunk(_, _, let audio, let format):
-            play(audio, format: format)
-        case .ttsDone:
+        case .ttsChunk(let voiceId, let sequence, let format, let audio):
+            play(audio, of: voiceId, sequence: sequence, format: format)
+        case .ttsDone(let voiceId, _):
+            guard voiceId == speakingId else { return }
             player?.markEndOfSpeech()
         }
     }
@@ -241,7 +247,7 @@ public final class VoiceController {
     // MARK: - Recording
 
     private func startRecording() {
-        guard !isCapturing else { return }
+        guard recording == nil else { return }
         // An explicit press is the interruption. Whatever the figure was saying stops before
         // the microphone opens, in both duplex modes: a person reaching for the key does not
         // want to be talked over, and in half duplex the two must not run at once.
@@ -267,49 +273,42 @@ public final class VoiceController {
         }
 
         vad = EnergyVAD(tuning: configuration.vad)
-        let voiceId = nextVoiceId()
-        utterances[voiceId] = Utterance(id: voiceId)
-        activeId = voiceId
+        recording = Recording()
         onFigureEvent?(.voiceCaptureStarted)
 
-        let begin = VoiceBegin(voiceId: voiceId, sessionId: currentSessionId?(), format: .capture)
-        send(.voiceBegin(begin)) { [weak self] result in
-            self?.beginAnswered(voiceId: voiceId, result: result)
+        // No language hint: which language is understood hangs on the model behind the
+        // endpoint, not on the app.
+        send(.voiceBegin(VoiceBegin(format: .default))) { [weak self] result in
+            self?.beginAnswered(result)
         }
     }
 
-    private func beginAnswered(voiceId: String, result: Result<Void, VoiceRequestFailure>) {
-        guard var utterance = utterances[voiceId] else {
-            if case .failure(let failure) = result { noteUnavailable(failure) }
+    private func beginAnswered(_ result: Result<ResponseBody, VoiceRequestFailure>) {
+        guard var current = recording, current.voiceId == nil else {
+            // The recording is already gone. A dictation the daemon opened for it would stay
+            // open, so it is closed right away.
+            if case .success(.voiceStream(let voiceId)) = result { close(voiceId) }
+            if case .failure(let failure) = result { note(failure) }
             return
         }
         switch result {
-        case .success:
+        case .success(.voiceStream(let voiceId)):
             availability = .available
-            utterance.isOpen = true
-            let held = utterance.pending
-            utterance.pending = []
-            utterance.pendingBytes = 0
-            utterances[voiceId] = utterance
-            for block in held { sendChunk(block, of: voiceId) }
-            // The recording ended before the opening was confirmed; the close was held back
-            // for exactly this moment.
-            if let reason = utterances[voiceId]?.endReason {
-                finish(voiceId, reason: reason)
-            }
+            current.voiceId = voiceId
+            if current.isDiscarded { discarded.insert(voiceId) }
+            recording = current
+            pump()
+        case .success(let body):
+            onNotice?("Unerwartete Antwort auf den Beginn der Aufnahme: \(body).")
+            abortRecording()
         case .failure(let failure):
-            noteUnavailable(failure)
-            utterances[voiceId] = nil
-            guard activeId == voiceId else { return }
-            stopMicrophone()
-            activeId = nil
-            onPartialTranscript?("")
-            onFigureEvent?(.voiceCaptureStopped)
+            note(failure)
+            abortRecording()
         }
     }
 
     private func received(_ pcm: Data) {
-        guard let voiceId = activeId, var utterance = utterances[voiceId] else { return }
+        guard var current = recording, !current.isMicrophoneClosed else { return }
         vad.feed(pcm)
 
         // Barge-in: the microphone was already open when the figure started speaking, and now
@@ -320,73 +319,110 @@ public final class VoiceController {
             stopSpeaking()
         }
 
-        if utterance.isOpen {
-            sendChunk(pcm, of: voiceId)
-        } else {
-            utterance.pending.append(pcm)
-            utterance.pendingBytes += pcm.count
-            utterances[voiceId] = utterance
-            let cap = Int(configuration.maxPendingSeconds * Double(VoiceFormat.capture.bytesPerSecond))
-            if utterance.pendingBytes > cap {
-                onNotice?(
-                    "Der Daemon hat die Aufnahme nicht bestaetigt. Sie wird verworfen, damit der Ton nicht weiter im Speicher liegt.")
-                utterances[voiceId] = nil
-                stopMicrophone()
-                activeId = nil
-                onPartialTranscript?("")
-                onFigureEvent?(.voiceCaptureStopped)
-                return
-            }
-        }
+        current.queue.append(pcm)
+        current.queuedBytes += pcm.count
+        recording = current
 
-        // The endpoint is read after the audio went out, so the last block of the sentence is
-        // on its way before the close follows it.
-        if vad.hasEnded { closeCapture(reason: .endpoint, clearTranscript: false) }
-    }
-
-    private func sendChunk(_ pcm: Data, of voiceId: String) {
-        guard var utterance = utterances[voiceId] else { return }
-        let seq = utterance.seq
-        utterance.seq += 1
-        utterances[voiceId] = utterance
-        send(.voiceChunk(voiceId: voiceId, seq: seq, audio: pcm)) { [weak self] result in
-            guard let self, case .failure(let failure) = result else { return }
-            self.noteUnavailable(failure)
-            // A chunk that did not arrive means the rest is pointless: the daemon holds half
-            // an utterance and this shell would keep pushing into it.
-            self.utterances[voiceId] = nil
-            guard self.activeId == voiceId else { return }
-            self.stopMicrophone()
-            self.activeId = nil
-            self.onFigureEvent?(.voiceCaptureStopped)
-        }
-    }
-
-    /// Ends the recording. `.released` and `.endpoint` have it recognised, `.cancelled` throws
-    /// it away; either way the daemon is told, so no utterance stays open on its side.
-    private func closeCapture(reason: VoiceEndReason, clearTranscript: Bool) {
-        guard let voiceId = activeId, let utterance = utterances[voiceId] else { return }
-        stopMicrophone()
-        activeId = nil
-        if clearTranscript { onPartialTranscript?("") }
-        onFigureEvent?(.voiceCaptureStopped)
-        guard utterance.isOpen else {
-            // Still waiting for the answer to `voice_begin`. The reason is kept and the close
-            // goes out the moment the answer arrives.
-            utterances[voiceId]?.endReason = reason
-            utterances[voiceId]?.pending = []
-            utterances[voiceId]?.pendingBytes = 0
+        let cap = Int(configuration.maxQueuedSeconds * Double(VoiceCaptureFormat.default.bytesPerSecond))
+        if current.queuedBytes > cap {
+            onNotice?(
+                "Der Daemon nimmt den Ton nicht schnell genug an. Die Aufnahme wird verworfen, damit sie nicht weiter im Speicher waechst.")
+            abortRecording()
             return
         }
-        finish(voiceId, reason: reason)
+
+        pump()
+        // The endpoint is read after the audio was queued, so the last piece of the sentence
+        // is on its way before the close follows it.
+        if vad.hasEnded { closeCapture(discard: false) }
     }
 
-    private func finish(_ voiceId: String, reason: VoiceEndReason) {
-        utterances[voiceId] = nil
-        send(.voiceEnd(voiceId: voiceId, reason: reason)) { [weak self] result in
-            guard case .failure(let failure) = result else { return }
-            self?.noteUnavailable(failure)
+    /// Hands over the next piece of audio, one at a time.
+    ///
+    /// One in flight and no more: the daemon answers every request in a task of its own, so
+    /// two chunks written back to back could be appended in the wrong order, and a dictation
+    /// with its middle swapped is not something a recogniser can repair.
+    private func pump() {
+        guard var current = recording, let voiceId = current.voiceId, !current.isSending else {
+            return
         }
+        guard !current.queue.isEmpty else {
+            finishIfDrained()
+            return
+        }
+        let piece = current.queue.removeFirst()
+        current.queuedBytes -= piece.count
+        current.isSending = true
+        recording = current
+
+        send(.voiceChunk(voiceId: voiceId, pcm: piece)) { [weak self] result in
+            guard let self, var current = self.recording, current.voiceId == voiceId else { return }
+            current.isSending = false
+            self.recording = current
+            switch result {
+            case .success:
+                self.pump()
+            case .failure(let failure):
+                self.note(failure)
+                // Half a dictation is nothing the daemon can use, and pushing more into it
+                // would only make that worse. A stream it has already forgotten needs no
+                // closing.
+                if case .unknownStream = failure {
+                    self.abortRecording(closeStream: false)
+                } else {
+                    self.abortRecording()
+                }
+            }
+        }
+    }
+
+    /// Ends the recording. The audio that is already queued still goes out; `voice_end`
+    /// follows it.
+    private func closeCapture(discard: Bool) {
+        guard var current = recording, !current.isMicrophoneClosed else { return }
+        stopMicrophone()
+        current.isMicrophoneClosed = true
+        current.isDiscarded = current.isDiscarded || discard
+        if discard {
+            // Nothing more of this is worth sending. The dictation is still closed, because
+            // the protocol has no cancel and an open one would stay open.
+            current.queue = []
+            current.queuedBytes = 0
+            if let voiceId = current.voiceId { discarded.insert(voiceId) }
+            onPartialTranscript?("")
+        }
+        recording = current
+        onFigureEvent?(.voiceCaptureStopped)
+        if current.isSending { return }
+        pump()
+    }
+
+    private func finishIfDrained() {
+        guard let current = recording, current.isMicrophoneClosed,
+              current.queue.isEmpty, !current.isSending, let voiceId = current.voiceId
+        else { return }
+        recording = nil
+        close(voiceId)
+    }
+
+    private func close(_ voiceId: VoiceId) {
+        send(.voiceEnd(voiceId: voiceId)) { [weak self] result in
+            guard case .failure(let failure) = result else { return }
+            self?.note(failure)
+        }
+    }
+
+    /// Gives up on the recording. The dictation is closed unless the daemon has already
+    /// forgotten it.
+    private func abortRecording(closeStream: Bool = true) {
+        guard let current = recording else { return }
+        stopMicrophone()
+        recording = nil
+        onPartialTranscript?("")
+        if !current.isMicrophoneClosed { onFigureEvent?(.voiceCaptureStopped) }
+        guard closeStream, let voiceId = current.voiceId else { return }
+        discarded.insert(voiceId)
+        close(voiceId)
     }
 
     private func stopMicrophone() {
@@ -396,21 +432,38 @@ public final class VoiceController {
 
     // MARK: - Playback
 
-    private func play(_ audio: Data, format: VoiceFormat) {
+    private func play(_ audio: Data, of voiceId: VoiceId, sequence: UInt32, format: AudioFormat) {
         let sink = player ?? playerFactory()
         if player == nil {
             sink.onFinished = { [weak self] in self?.playbackFinished() }
             player = sink
         }
+
+        let isNewAnswer = voiceId != speakingId
         do {
-            try sink.enqueue(audio, format: format)
+            if isNewAnswer {
+                try sink.begin(format: format)
+                speakingId = voiceId
+                expectedSequence = 0
+            }
+            if sequence != expectedSequence {
+                // Said rather than smoothed over: a missing piece is a hole in a sentence, and
+                // holding audio back to reorder it would cost the very latency streaming buys.
+                onNotice?(
+                    "Im gesprochenen Text fehlt ein Stueck (erwartet \(expectedSequence), kam \(sequence)).")
+            }
+            expectedSequence = sequence &+ 1
+            try sink.enqueue(audio)
         } catch let failure as AudioFailure {
             onNotice?(failure.message)
+            speakingId = nil
             return
         } catch {
             onNotice?(AudioFailure.engine(error.localizedDescription).message)
+            speakingId = nil
             return
         }
+
         guard !isSpeaking else { return }
         isSpeaking = true
         hasBargedIn = false
@@ -419,7 +472,7 @@ public final class VoiceController {
         if isCapturing && isHalfDuplex {
             // Half duplex: the two never run together. What was said so far is sent rather
             // than dropped, so nobody loses a sentence to the figure starting to talk.
-            closeCapture(reason: .released, clearTranscript: false)
+            closeCapture(discard: false)
         } else if isCapturing {
             // Full duplex: keep listening, with the higher threshold, because the canceller
             // leaves a little of the figure's own voice in the microphone.
@@ -437,6 +490,7 @@ public final class VoiceController {
     private func playbackFinished() {
         guard isSpeaking else { return }
         isSpeaking = false
+        speakingId = nil
         onFigureEvent?(.speechFinished)
         if isCapturing { vad.retune(configuration.vad) }
     }
@@ -444,7 +498,7 @@ public final class VoiceController {
     // MARK: - Requests
 
     private func send(
-        _ request: Request, completion: @escaping (Result<Void, VoiceRequestFailure>) -> Void
+        _ request: Request, completion: @escaping (Result<ResponseBody, VoiceRequestFailure>) -> Void
     ) {
         guard let perform else {
             completion(.failure(.notConnected))
@@ -453,14 +507,17 @@ public final class VoiceController {
         perform(request, completion)
     }
 
-    /// Switches voice off for this connection when the daemon cannot do it, and says so once.
-    private func noteUnavailable(_ failure: VoiceRequestFailure) {
+    /// Says what went wrong, and switches voice off when the answer means it will keep going
+    /// wrong.
+    private func note(_ failure: VoiceRequestFailure) {
         switch failure {
         case .notSupported(let reason):
             let text = AudioFailure.daemonWithoutVoice(reason).message
             guard availability != .unavailable(text) else { return }
             availability = .unavailable(text)
             onNotice?(text)
+        case .unknownStream(let reason):
+            onNotice?("Der Daemon kennt diese Aufnahme nicht mehr: \(reason)")
         case .notConnected:
             // Not the daemon's doing. The connection status says it already, and the next
             // handshake resets the availability anyway.

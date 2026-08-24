@@ -199,12 +199,17 @@ public enum Request: Sendable, Equatable {
     case runGate(
         sessionId: SessionId, gateIndex: UInt32, project: String, auftragId: AuftragId,
         expectedHash: String)
-    /// Opens one spoken utterance. `DESIGN.md` section Voice; details in `Wire/Voice.swift`.
+    /// Opens one dictation. The answer carries the id every chunk of it has to name.
+    /// `DESIGN.md` section Voice; details in `Wire/Voice.swift`.
     case voiceBegin(VoiceBegin)
-    /// One block of microphone audio of the utterance that is open.
-    case voiceChunk(voiceId: String, seq: UInt32, audio: Data)
-    /// Closes the utterance, saying whether it is to be recognised or thrown away.
-    case voiceEnd(voiceId: String, reason: VoiceEndReason)
+    /// One block of microphone audio of the dictation that is open.
+    case voiceChunk(voiceId: VoiceId, pcm: Data)
+    /// Closes the dictation. The transcript follows as an `stt_final` event, not as the
+    /// answer to this: waiting for it here would hold the connection for as long as the
+    /// endpoint takes.
+    case voiceEnd(voiceId: VoiceId)
+    /// Has a text spoken. The audio arrives as `tts_chunk` events, the end as `tts_done`.
+    case ttsSpeak(text: String, voice: String?)
 
     /// The name the daemon dispatches on.
     public var name: String {
@@ -222,6 +227,7 @@ public enum Request: Sendable, Equatable {
         case .voiceBegin: return "voice_begin"
         case .voiceChunk: return "voice_chunk"
         case .voiceEnd: return "voice_end"
+        case .ttsSpeak: return "tts_speak"
         }
     }
 
@@ -230,7 +236,7 @@ public enum Request: Sendable, Equatable {
     /// switches voice off for the connection rather than asking again per utterance.
     public var isVoice: Bool {
         switch self {
-        case .voiceBegin, .voiceChunk, .voiceEnd: return true
+        case .voiceBegin, .voiceChunk, .voiceEnd, .ttsSpeak: return true
         default: return false
         }
     }
@@ -276,9 +282,11 @@ extension ClientMessage: Encodable {
         case auftrag
         case expectedHash = "expected_hash"
         case voiceId = "voice_id"
-        case seq
-        case audio
-        case reason
+        case pcm16Base64 = "pcm16_base64"
+        case sampleRateHz = "sample_rate_hz"
+        case channels
+        case language
+        case voice
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -327,19 +335,19 @@ extension ClientMessage: Encodable {
                 try container.encode(auftragId, forKey: .auftragId)
                 try container.encode(expectedHash, forKey: .expectedHash)
             case .voiceBegin(let begin):
-                try container.encode(begin.voiceId, forKey: .voiceId)
-                // Left off while no session is picked, the way `list` leaves its options off.
-                try container.encodeIfPresent(begin.sessionId, forKey: .sessionId)
-                // Flattened onto the request, so the three format fields sit next to the id
-                // rather than in an object of their own.
-                try begin.format.encode(to: encoder)
-            case .voiceChunk(let voiceId, let seq, let audio):
+                try container.encode(begin.format.sampleRateHz, forKey: .sampleRateHz)
+                try container.encode(begin.format.channels, forKey: .channels)
+                // Left off while it is nil, the way `list` leaves its options off: no hint
+                // means the endpoint decides the language.
+                try container.encodeIfPresent(begin.language, forKey: .language)
+            case .voiceChunk(let voiceId, let pcm):
                 try container.encode(voiceId, forKey: .voiceId)
-                try container.encode(seq, forKey: .seq)
-                try container.encode(audio.base64EncodedString(), forKey: .audio)
-            case .voiceEnd(let voiceId, let reason):
+                try container.encode(pcm.base64EncodedString(), forKey: .pcm16Base64)
+            case .voiceEnd(let voiceId):
                 try container.encode(voiceId, forKey: .voiceId)
-                try container.encode(reason, forKey: .reason)
+            case .ttsSpeak(let text, let voice):
+                try container.encode(text, forKey: .text)
+                try container.encodeIfPresent(voice, forKey: .voice)
             }
         }
     }
@@ -465,6 +473,8 @@ public enum ResponseBody: Sendable, Equatable {
     /// A job file together with the two things a person needs in order to approve it: the
     /// exact text they are shown, and the hash of the canonical form of it.
     case auftrag(auftrag: Auftrag, hash: String, path: String, gateDisplay: [String])
+    /// A dictation or a spoken answer was opened. Every event about it carries this id.
+    case voiceStream(voiceId: VoiceId)
     /// The request was carried out and has nothing to return.
     case ack
     /// A body a newer daemon knows and this shell does not.
@@ -484,6 +494,7 @@ extension ResponseBody: Codable {
         case hash
         case path
         case gateDisplay = "gate_display"
+        case voiceId = "voice_id"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -508,6 +519,8 @@ extension ResponseBody: Codable {
                 hash: try container.decode(String.self, forKey: .hash),
                 path: try container.decode(String.self, forKey: .path),
                 gateDisplay: try container.decodeIfPresent([String].self, forKey: .gateDisplay) ?? [])
+        case "voice_stream":
+            self = .voiceStream(voiceId: try container.decode(VoiceId.self, forKey: .voiceId))
         case "ack":
             self = .ack
         default:
@@ -540,6 +553,9 @@ extension ResponseBody: Codable {
             try container.encode(hash, forKey: .hash)
             try container.encode(path, forKey: .path)
             try container.encode(gateDisplay, forKey: .gateDisplay)
+        case .voiceStream(let voiceId):
+            try container.encode("voice_stream", forKey: .body)
+            try container.encode(voiceId, forKey: .voiceId)
         case .ack:
             try container.encode("ack", forKey: .body)
         case .unrecognised(let body):

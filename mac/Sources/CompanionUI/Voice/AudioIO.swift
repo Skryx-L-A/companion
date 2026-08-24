@@ -20,8 +20,13 @@ public enum AudioFailure: Error, Equatable, Sendable {
     case engine(String)
     /// No input device at all.
     case noInputDevice
-    /// The daemon of this connection does not know the voice requests.
+    /// The daemon understood the request and has nothing to serve it with: no speech
+    /// endpoint configured, or one whose protocol cannot do it.
     case daemonWithoutVoice(String)
+    /// A container this shell cannot take apart on the fly.
+    case unplayableFormat(String)
+    /// The audio did not match its own header.
+    case brokenAudio(String)
 
     /// A sentence for the panel. Says what happened and what the person can do about it.
     public var message: String {
@@ -35,7 +40,13 @@ public enum AudioFailure: Error, Equatable, Sendable {
         case .noInputDevice:
             return "Es ist kein Mikrofon angeschlossen."
         case .daemonWithoutVoice(let reason):
-            return "Dieser Daemon kennt noch keine Sprache: \(reason) Die Spracheingabe bleibt aus, bis er sie kann."
+            // The daemon's own sentence, because it is the one that names the missing piece:
+            // usually a speech recognition endpoint that nobody has connected yet.
+            return "Sprache steht nicht zur Verfuegung: \(reason)"
+        case .unplayableFormat(let name):
+            return "Die Antwort kam als \(name). Diese Shell spielt bisher nur WAV ab; ein anderer Endpoint laesst sich in den Einstellungen waehlen."
+        case .brokenAudio(let detail):
+            return "Der Ton liess sich nicht abspielen: \(detail)"
         }
     }
 }
@@ -70,15 +81,21 @@ public protocol AudioCapturing: AnyObject {
     func stop()
 }
 
-/// Plays the blocks of PCM the daemon sends for one spoken utterance.
+/// Plays the pieces of audio the daemon sends for one spoken answer.
+///
+/// The pieces are cut out of a container stream, not out of raw samples: only the first one of
+/// a `wav` or `aiff` answer carries the header, the rest continue it. `begin` is what says a
+/// new answer starts, so the reader of that container can start over.
 @MainActor
 public protocol SpeechPlaying: AnyObject {
     var isPlaying: Bool { get }
-    /// Called once after the last enqueued block has been played out, or after `stop()`.
+    /// Called once after the last enqueued piece has been played out, or after `stop()`.
     var onFinished: (() -> Void)? { get set }
-    /// Adds one block. The first one starts playback.
-    func enqueue(_ pcm: Data, format: VoiceFormat) throws
-    /// No more blocks are coming; finish what is queued and then report finished.
+    /// A new spoken answer starts. Whatever was playing is dropped.
+    func begin(format: AudioFormat) throws
+    /// Adds one piece of the answer that is open.
+    func enqueue(_ audio: Data) throws
+    /// No more pieces are coming; finish what is queued and then report finished.
     func markEndOfSpeech()
     /// Barge-in: drop what is queued and go quiet now.
     func stop()

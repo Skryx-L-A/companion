@@ -335,6 +335,89 @@ final class PreviewRenderTests: XCTestCase {
     /// `ImageRenderer` cannot draw views that are backed by an AppKit view, and a scroll view
     /// or a text field is exactly that: it paints the yellow "not supported" placeholder over
     /// them. Hosting the view and caching its display gives the real layout instead.
+    /// The chat panel while somebody is dictating: the microphone button in its running
+    /// state, the line the recogniser is filling, and the sentence it already finished
+    /// standing in the input field where the person can still change it.
+    func testRendersChatPanelWhileDictating() throws {
+        try render(dictatingPanel(), size: CGSize(width: 388, height: 428), to: "chat-panel-voice.png")
+    }
+
+    /// The same panel at the largest accessibility text size. A fixed height or a fixed point
+    /// size in the new row shows up here as an overlap or as a line that stops growing.
+    func testRendersChatPanelWhileDictatingAtLargestAccessibilityTextSize() throws {
+        try render(
+            dictatingPanel().environment(\.dynamicTypeSize, .accessibility5),
+            size: CGSize(width: 388, height: 560), to: "chat-panel-voice-accessibility5.png")
+    }
+
+    /// The panel with voice switched off, which is what a daemon without a speech endpoint
+    /// leaves behind: a disabled button whose label says why.
+    func testRendersChatPanelWithoutVoice() throws {
+        let model = OverlayModel()
+        model.isDaemonReady = true
+        model.sessions = [SessionSnapshot(SessionStatus(
+            id: "-Users-me-AI-companion", adapter: "workbench", state: .idle))]
+        model.selectedSessionId = model.sessions.first?.id
+        model.isVoiceAvailable = false
+        model.voiceUnavailableReason =
+            "Sprache steht nicht zur Verfuegung: no endpoint for role stt"
+        model.messages = [ChatMessage(
+            author: .system, text: model.voiceUnavailableReason ?? "")]
+        let view = ChatPanelView(
+            model: model, onSubmit: { _ in }, onToggleSessionList: {}, onClose: {})
+            .frame(width: OverlayLayout.panelWidth, height: OverlayLayout.chatHeight)
+            .padding(24)
+            .background(Color(nsColor: .underPageBackgroundColor))
+        try render(view, size: CGSize(width: 388, height: 428), to: "chat-panel-no-voice.png")
+    }
+
+    /// The settings page, in both appearances, because that is where a hardwired colour or a
+    /// line of text that does not wrap would show first.
+    func testRendersVoiceSettings() throws {
+        for (name, appearance) in [
+            ("settings-voice-dark.png", NSAppearance(named: .darkAqua)),
+            ("settings-voice-light.png", NSAppearance(named: .aqua)),
+        ] {
+            let suite = "de.skryx.companion.preview.\(UUID().uuidString.prefix(8))"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let settings = AppSettings(defaults: defaults)
+            let controller = OverlayController(settings: settings)
+            let view = ShellSettingsView(
+                controller: controller,
+                settings: settings,
+                socketPath: "/Users/me/Library/Application Support/companion/companion.sock",
+                daemonStatus: "verbunden",
+                daemonDetail: "Rolle human, Daemon 0.1.0, Lauf d601e4ec",
+                microphoneStatus: "freigegeben",
+                voiceStatus: "kann Sprache")
+                .padding(20)
+                .background(Color(nsColor: .windowBackgroundColor))
+            try render(view, size: CGSize(width: 540, height: 1180), to: name, appearance: appearance)
+        }
+    }
+
+    private func dictatingPanel() -> some View {
+        let model = OverlayModel()
+        model.isDaemonReady = true
+        model.sessions = [SessionSnapshot(SessionStatus(
+            id: "-Users-me-AI-companion", adapter: "workbench",
+            project: "/Users/me/AI/companion", state: .idle))]
+        model.selectedSessionId = model.sessions.first?.id
+        model.messages = [
+            ChatMessage(author: .human, text: "Wie steht es um den Zweig?"),
+            ChatMessage(author: .companion, text: "Der Zweig ist gebaut und die Tests sind gruen."),
+        ]
+        model.isMicrophoneOpen = true
+        model.liveTranscript = "und dann bitte noch"
+        model.chatDraft = "Bau die Sitzungsliste um."
+        return ChatPanelView(
+            model: model, onSubmit: { _ in }, onToggleSessionList: {}, onClose: {})
+            .frame(width: OverlayLayout.panelWidth, height: OverlayLayout.chatHeight)
+            .padding(24)
+            .background(Color(nsColor: .underPageBackgroundColor))
+    }
+
     private func render(
         _ view: some View, size: CGSize, to name: String, appearance: NSAppearance? = nil
     ) throws {

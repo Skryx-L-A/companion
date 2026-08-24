@@ -145,11 +145,14 @@ struct ChatPanelView: View {
 
     private var input: some View {
         HStack(spacing: 8) {
+            // Not disabled while voice is unavailable, dimmed instead: a plain icon button
+            // that is switched off looks exactly like one that is on, so a click would do
+            // nothing and say nothing. Pressing it writes the reason into the chat.
             PanelIconButton(
                 symbol: model.isMicrophoneOpen ? "mic.fill" : "mic",
                 label: voiceButtonLabel,
                 action: onToggleVoice)
-                .disabled(!model.isVoiceAvailable)
+                .foregroundStyle(model.isVoiceAvailable ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
             TextField(placeholder, text: draft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...4)

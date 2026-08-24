@@ -112,8 +112,10 @@ struct FigureView: View {
     @ViewBuilder
     private var menu: some View {
         Button(model.isChatOpen ? "Chat schliessen" : "Chat oeffnen") { controller.toggleChat() }
+        // Greyed out only where there is no voice at all. A daemon without a speech endpoint
+        // leaves the item usable, because pressing it is what puts the reason in the chat.
         Button(model.isMicrophoneOpen ? "Aufnahme beenden" : "Sprechen") { controller.toggleVoice() }
-            .disabled(controller.onToggleVoice == nil || !model.isVoiceAvailable)
+            .disabled(controller.onToggleVoice == nil)
         Button(model.isSessionListOpen ? "Sessionliste schliessen" : "Sessionliste zeigen") {
             controller.toggleSessionList()
         }

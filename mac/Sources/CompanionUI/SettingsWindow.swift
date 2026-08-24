@@ -82,11 +82,10 @@ struct ShellSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                LabeledContent("Weckwort") {
-                    TextField("Weckwort", text: $settings.wakeword)
-                        .frame(width: 180)
-                        .disabled(true)
-                }
+                // The field carries its own label in a Form, so it is not wrapped in a
+                // `LabeledContent`: that would print the word twice.
+                TextField("Weckwort", text: $settings.wakeword)
+                    .disabled(true)
                 Text("Das Weckwort ist noch nicht eingebaut; bis dahin startet die Taste die Aufnahme. Ein dauerhaft mithoerendes Mikrofon wird eine Einstellung mit Datenschutzhinweis, kein Standard.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -109,7 +108,9 @@ struct ShellSettingsView: View {
             Section("Schnellstart") {
                 LabeledContent("Arbeitsmodus", value: settings.workMode.label)
                 LabeledContent("Standardwerkzeug", value: settings.defaultModelTool ?? "keines")
-                LabeledContent("Spracheingabe", value: settings.voiceTrigger.label)
+                // The third answer of the quick start is not echoed here any more: the
+                // section above owns it now, and the same setting in two places reads as two
+                // settings.
                 Button("Schnellstart erneut zeigen") { controller.startOnboarding() }
             }
         }
