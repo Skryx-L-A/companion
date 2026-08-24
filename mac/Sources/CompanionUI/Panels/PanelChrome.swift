@@ -98,3 +98,29 @@ struct PanelIconButton: View {
         .help(label)
     }
 }
+
+/// A line that says something went wrong.
+///
+/// The red sits on the symbol, not on the words. Coloured body text would have to clear
+/// 4.5 : 1 against its background (HIG, Accessibility, Vision), and the system red does not
+/// manage that on a light window; the label colour does, in both appearances. The symbol and
+/// the wording carry the meaning for anyone who cannot separate the colours.
+struct NoticeLine: View {
+    let text: String
+    var symbol: String = "exclamationmark.circle.fill"
+    var font: Font = .callout
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: symbol)
+                .foregroundStyle(Color(nsColor: .systemRed))
+                .accessibilityHidden(true)
+            Text(text)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .font(font)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(text)
+    }
+}

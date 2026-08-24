@@ -26,6 +26,11 @@ public final class OverlayController {
     public var onSubmit: ((String) -> Void)?
     /// Called when the human answers a question a session asked.
     public var onAnswer: ((OpenQuestion, String) -> Void)?
+    /// What a row of the session list can do. Set by the shell before the overlay starts, so
+    /// the first panel that opens already has them.
+    public var sessionActions: SessionActions = .inert
+    /// Called when the human asks for a new job. Nil while there is no daemon to write it.
+    public var onNewAuftrag: (() -> Void)?
 
     public init(settings: AppSettings, spriteFolder: URL? = SpriteSet.defaultFolder) {
         self.settings = settings

@@ -10,6 +10,7 @@ import SwiftUI
 struct SessionListView: View {
     let model: OverlayModel
     var onSelect: (SessionId) -> Void = { _ in }
+    var actions: SessionActions = .inert
     let onClose: () -> Void
 
     var body: some View {
@@ -51,6 +52,8 @@ struct SessionListView: View {
                         SessionRow(
                             session: session,
                             isSelected: session.id == model.selectedSessionId,
+                            gates: model.approvedAuftrag(for: session)?.gateDisplay ?? [],
+                            actions: actions,
                             onSelect: { onSelect(session.id) })
                         // Separators sit between rows only; a line under the last one would
                         // read as a row that failed to load.
@@ -67,49 +70,86 @@ struct SessionListView: View {
 struct SessionRow: View {
     let session: SessionSnapshot
     let isSelected: Bool
+    /// The gate lines of this session's approved job, empty when there is none.
+    var gates: [String] = []
+    var actions: SessionActions = .inert
     let onSelect: () -> Void
 
     @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
-        Button(action: onSelect) {
-            Group {
-                // At the accessibility text sizes the dot and the text no longer fit on one
-                // line, so the row breaks into two instead of clipping the name.
-                if typeSize.isAccessibilitySize {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 8) {
-                            StatusDot(session: session)
-                            Text(session.activityDisplay).font(.caption)
-                        }
-                        texts
-                    }
-                } else {
-                    HStack(alignment: .top, spacing: 10) {
-                        StatusDot(session: session)
-                            .padding(.top, 2)
-                        VStack(alignment: .leading, spacing: 2) {
-                            texts
-                            Text(session.activityDisplay)
-                                .font(.caption)
-                                .foregroundStyle(session.needsAttention ? .primary : .secondary)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                }
+        // The selecting button and the action menu are siblings, not one inside the other: a
+        // menu inside the button's label would hand its clicks to the button, and picking an
+        // action would silently move the chat to another session on the way.
+        HStack(alignment: .top, spacing: 0) {
+            Button(action: onSelect) {
+                content
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, 14)
+                    .padding(.vertical, 8)
+                    .contentShape(Rectangle())
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(session.accessibilityDescription)
+            .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+            .accessibilityHint("Waehlt die Session fuer den Chat")
+
+            actionMenu
+                .padding(.trailing, 10)
+                .padding(.top, 6)
         }
-        .buttonStyle(.plain)
         // The system accent colour, not a colour of our own: the person chose it.
         .background(isSelected ? Color.accentColor.opacity(0.18) : Color.clear)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(session.accessibilityDescription)
-        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
-        .accessibilityHint("Waehlt die Session fuer den Chat")
+        // Right-click is the Mac way into the actions of a row, and the button next to it is
+        // the way that works without a mouse.
+        .contextMenu { SessionMenu(session: session, gates: gates, actions: actions) }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        // At the accessibility text sizes the dot and the text no longer fit on one line, so
+        // the row breaks into two instead of clipping the name.
+        if typeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    StatusDot(session: session)
+                    Text(session.activityDisplay).font(.caption)
+                }
+                texts
+            }
+        } else {
+            HStack(alignment: .top, spacing: 10) {
+                StatusDot(session: session)
+                    .padding(.top, 2)
+                VStack(alignment: .leading, spacing: 2) {
+                    texts
+                    Text(session.activityDisplay)
+                        .font(.caption)
+                        .foregroundStyle(session.needsAttention ? .primary : .secondary)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    /// The actions of the row, reachable with the keyboard as well as with the pointer.
+    private var actionMenu: some View {
+        Menu {
+            SessionMenu(session: session, gates: gates, actions: actions)
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.body)
+                // The macOS default control size, 28 by 28 points (HIG, Accessibility,
+                // Mobility). Smaller would be under the minimum of 20.
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .frame(width: 28, height: 28)
+        .accessibilityLabel("Aktionen fuer \(session.title)")
+        .help("Aktionen fuer diese Session")
     }
 
     @ViewBuilder
@@ -127,6 +167,44 @@ struct SessionRow: View {
                 .font(.caption)
                 .lineLimit(2)
         }
+    }
+}
+
+/// What a row offers to do with its session.
+///
+/// Reading and interrupting are reversible and go straight through. Stopping ends the session,
+/// so its title carries the ellipsis that says a question follows. A gate is offered only
+/// where this shell holds the approval of the job it belongs to, because the request has to
+/// carry the approved hash.
+struct SessionMenu: View {
+    let session: SessionSnapshot
+    let gates: [String]
+    let actions: SessionActions
+
+    var body: some View {
+        Button("Verlauf lesen") { actions.read(session.id) }
+        Button("Unterbrechen") { actions.interrupt(session.id) }
+            .disabled(!session.isRunning)
+        Button("Beenden...") { actions.stop(session.id) }
+            .disabled(!session.isRunning)
+        Divider()
+        if gates.isEmpty {
+            Button(gateAbsenceReason) {}
+                .disabled(true)
+        } else {
+            Menu("Gate ausfuehren") {
+                ForEach(Array(gates.enumerated()), id: \.offset) { index, line in
+                    Button(line) { actions.runGate(session.id, index) }
+                }
+            }
+        }
+    }
+
+    /// Why there is no gate to run. A greyed out entry without a reason leaves the person
+    /// guessing whether the job or the shell is at fault.
+    private var gateAbsenceReason: String {
+        guard session.status.auftragId != nil else { return "Kein Auftrag zu dieser Session" }
+        return "Auftrag in dieser Sitzung nicht freigegeben"
     }
 }
 
