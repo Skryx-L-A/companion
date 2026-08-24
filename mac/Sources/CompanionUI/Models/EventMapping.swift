@@ -63,7 +63,10 @@ public enum EventMapping {
             return "Fehler in \(session): \(message)"
         case .eventsDropped(let missed):
             return "Zwischen Adapter und Bus sind \(missed) Ereignisse verloren gegangen. Die Liste wird neu gelesen."
-        case .busy, .idle, .contextLevel, .budgetLevel, .iteration, .unrecognised:
+        // Speech has its own place in the panel: the transcript line while it is being heard,
+        // the input field once it is recognised. A chat line for every partial would push the
+        // history away under a sentence that is still being said.
+        case .busy, .idle, .contextLevel, .budgetLevel, .iteration, .voice, .unrecognised:
             return nil
         }
     }

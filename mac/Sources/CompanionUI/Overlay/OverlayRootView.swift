@@ -42,6 +42,7 @@ struct OverlayRootView: View {
                     model: model,
                     onSubmit: { controller.submit($0) },
                     onAnswer: { controller.answer($0, with: $1) },
+                    onToggleVoice: { controller.toggleVoice() },
                     onToggleSessionList: { controller.toggleSessionList() },
                     onClose: { controller.toggleChat() })
                     .frame(width: box.width, height: box.height)
@@ -79,13 +80,21 @@ struct FigureView: View {
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: model.figureState)
         .contentShape(Circle())
         .onHover { isHovered = $0 }
-        .onTapGesture { controller.toggleChat() }
+        .onTapGesture { controller.figureClicked() }
         .contextMenu { menu }
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel("Companion, \(model.figureState.label)")
-        .accessibilityHint(model.isChatOpen ? "Schliesst den Chat" : "Oeffnet den Chat")
+        .accessibilityHint(tapHint)
         .accessibilityValue(model.openQuestionCount > 0 ? "\(model.openQuestionCount) offene Fragen" : "")
+    }
+
+    /// What a click will do. It depends on the setting, so it cannot be a fixed sentence.
+    private var tapHint: String {
+        if controller.settings.voiceTrigger == .click && controller.onToggleVoice != nil {
+            return model.isMicrophoneOpen ? "Beendet die Aufnahme" : "Startet die Aufnahme"
+        }
+        return model.isChatOpen ? "Schliesst den Chat" : "Oeffnet den Chat"
     }
 
     /// The only hover feedback the figure gets. It costs nothing while nobody points at it,
@@ -103,6 +112,10 @@ struct FigureView: View {
     @ViewBuilder
     private var menu: some View {
         Button(model.isChatOpen ? "Chat schliessen" : "Chat oeffnen") { controller.toggleChat() }
+        // Greyed out only where there is no voice at all. A daemon without a speech endpoint
+        // leaves the item usable, because pressing it is what puts the reason in the chat.
+        Button(model.isMicrophoneOpen ? "Aufnahme beenden" : "Sprechen") { controller.toggleVoice() }
+            .disabled(controller.onToggleVoice == nil)
         Button(model.isSessionListOpen ? "Sessionliste schliessen" : "Sessionliste zeigen") {
             controller.toggleSessionList()
         }

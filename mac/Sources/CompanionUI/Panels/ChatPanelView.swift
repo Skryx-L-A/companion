@@ -12,12 +12,19 @@ struct ChatPanelView: View {
     let model: OverlayModel
     let onSubmit: (String) -> Void
     var onAnswer: (OpenQuestion, String) -> Void = { _, _ in }
+    /// Starts or ends a recording. The same toggle the figure and the push-to-talk key use.
+    var onToggleVoice: () -> Void = {}
     let onToggleSessionList: () -> Void
     let onClose: () -> Void
 
-    @State private var draft: String = ""
     @State private var answer: String = ""
     @FocusState private var isInputFocused: Bool
+
+    /// The input field writes into the model, not into a `@State` of its own: a recognised
+    /// sentence arrives from outside the view and has to land in the same place typing does.
+    private var draft: Binding<String> {
+        Binding(get: { model.chatDraft }, set: { model.chatDraft = $0 })
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -55,7 +62,7 @@ struct ChatPanelView: View {
             PanelPlaceholder(
                 symbol: "text.bubble",
                 title: "Noch keine Nachricht",
-                detail: "Waehle eine Session in der Liste und schreib, was sie tun soll. Sprache kommt in einer spaeteren Phase dazu.")
+                detail: "Waehle eine Session in der Liste und schreib oder sprich, was sie tun soll.")
         } else {
             ScrollViewReader { proxy in
                 ScrollView {
@@ -112,16 +119,17 @@ struct ChatPanelView: View {
         }
     }
 
-    /// Live speech-to-text. Empty until the voice phase fills it; the row keeps its place so
-    /// the panel does not jump the first time dictation starts.
+    /// Live speech-to-text. Present while the microphone is open, so the row appears with the
+    /// recording and not only with the first recognised word: a person who pressed the key
+    /// needs to see that something is listening.
     @ViewBuilder
     private var transcriptLine: some View {
-        if !model.liveTranscript.isEmpty {
+        if model.isMicrophoneOpen || !model.liveTranscript.isEmpty {
             HStack(spacing: 8) {
                 Image(systemName: "waveform")
                     .foregroundStyle(Color(red: 0.204, green: 0.753, blue: 0.663))
                     .accessibilityHidden(true)
-                Text(model.liveTranscript)
+                Text(model.liveTranscript.isEmpty ? "hoert zu" : model.liveTranscript)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -130,23 +138,39 @@ struct ChatPanelView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 6)
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("Gehoert: \(model.liveTranscript)")
+            .accessibilityLabel(
+                model.liveTranscript.isEmpty ? "Das Mikrofon ist offen" : "Gehoert: \(model.liveTranscript)")
         }
     }
 
     private var input: some View {
         HStack(spacing: 8) {
-            TextField(placeholder, text: $draft, axis: .vertical)
+            // Not disabled while voice is unavailable, dimmed instead: a plain icon button
+            // that is switched off looks exactly like one that is on, so a click would do
+            // nothing and say nothing. Pressing it writes the reason into the chat.
+            PanelIconButton(
+                symbol: model.isMicrophoneOpen ? "mic.fill" : "mic",
+                label: voiceButtonLabel,
+                action: onToggleVoice)
+                .foregroundStyle(model.isVoiceAvailable ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+            TextField(placeholder, text: draft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...4)
                 .focused($isInputFocused)
                 .onSubmit(send)
                 .accessibilityLabel("Nachricht an die gewaehlte Session")
             PanelIconButton(symbol: "arrow.up.circle.fill", label: "Senden", action: send)
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+
+    /// The button says what it will do, and when it can do nothing it says why: a control that
+    /// is grey without a reason is the harder thing to work out.
+    private var voiceButtonLabel: String {
+        if let reason = model.voiceUnavailableReason, !model.isVoiceAvailable { return reason }
+        return model.isMicrophoneOpen ? "Aufnahme beenden" : "Sprechen"
     }
 
     private var placeholder: String {
@@ -154,8 +178,8 @@ struct ChatPanelView: View {
     }
 
     private func send() {
-        let text = draft
-        draft = ""
+        let text = model.chatDraft
+        model.chatDraft = ""
         onSubmit(text)
     }
 
