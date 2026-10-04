@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 //! The trained word model and the training procedure that builds one from a handful of
 //! recordings. A model is a set of MFCC templates (one per usable recording) plus a

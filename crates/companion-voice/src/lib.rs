@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 //! The voice half of the daemon: the drivers for speech to text and text to speech, the
 //! latency probe of the configured endpoints, and the engine that ties them to the event

@@ -22,7 +22,7 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>AGPL-3.0-only</string>
+	<string>Copyright Skryx-L-A. PolyForm-Noncommercial-1.0.0</string>
 	<!-- Shown in the system prompt on the first recording. Without this key macOS terminates
 	     the app instead of asking. It says where the audio goes, because that is the part a
 	     person is deciding about. -->

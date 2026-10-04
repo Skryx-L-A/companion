@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 //! Minimal WAV reading: only what the CLI and the measurement rig need — RIFF/WAVE,
 //! PCM, 16 bit. Multi-channel input is downmixed to mono by averaging. A full audio

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 [package]
 name = "companion-wakeword"
 description = "Local wakeword engine: MFCC frontend plus subsequence-DTW template matching, trainable from a few user recordings, no external DSP or model runtime."

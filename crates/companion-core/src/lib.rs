@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 //! The part of the companion that has no user interface: the session adapters, the event
 //! bus they feed, the register, the settings file and the role model that guards the

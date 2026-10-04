@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 //! The HTTP side the drivers share: one client, one error type, one way to build a URL and
 //! to attach a key.

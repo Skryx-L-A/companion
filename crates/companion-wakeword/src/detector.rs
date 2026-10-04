@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 //! The streaming detector: feed it 16 kHz mono PCM16 in chunks of any size, it emits a
 //! detection when a trained word appears in the audio.

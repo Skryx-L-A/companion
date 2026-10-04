@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 //! Signal frontend: framing, Hamming window, a fixed-size radix-2 FFT, a mel filterbank
 //! and the DCT that turns log-mel energies into MFCC vectors.

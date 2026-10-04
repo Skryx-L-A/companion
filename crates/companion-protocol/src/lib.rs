@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 //! Wire types shared by the companion daemon, the native shells and any orchestrator
 //! that docks onto the daemon socket.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 //! Exports the JSON Schema of the wire types to `app/protocol/schema/` so the Swift shell
 //! can build against them.

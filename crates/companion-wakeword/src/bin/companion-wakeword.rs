@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 //! Training and detection CLI — the example binary the measurement rig drives, and the
 //! reference for how a shell embeds the engine.
