@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+[package]
+name = "companion-macos-ffi"
+description = "The Objective-C calls behind CoreLocation and EventKit: the one crate that touches them, so no other crate has to."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "companion_macos_ffi"
+
+[dependencies]
+
+# Deliberately NOT `[lints] workspace = true`: the workspace forbids `unsafe_code`, and
+# calling CoreLocation and EventKit through their Objective-C runtime is unsafe by
+# definition — the same reasoning `companion-wakeword-ffi` already carries for its C ABI.
+# This is the one other crate in the workspace where unsafe is the point.
+[lints.rust]
+unsafe_code = "allow"
+missing_docs = "warn"
+
+# Every dependency here is Apple-only and would not even resolve on another target, so they
+# stay behind the same `cfg` the module they serve lives behind — a build on any other
+# platform sees an empty crate rather than a dependency it cannot use.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2.workspace = true
+objc2 = "0.6"
+objc2-core-location = { version = "0.3", default-features = false, features = [
+    "std",
+    "CLLocationManager",
+    "CLLocation",
+] }
+objc2-event-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "EKEventStore",
+    "EKEvent",
+    "EKReminder",
+    "EKCalendar",
+    "EKCalendarItem",
+    "EKObject",
+    "EKTypes",
+    "EventKitDefines",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSDate",
+    "NSString",
+    "NSError",
+    "NSArray",
+    "NSPredicate",
+    "NSCalendar",
+] }

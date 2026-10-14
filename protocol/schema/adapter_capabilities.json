@@ -80,6 +80,7 @@
         "session_ended",
         "question_open",
         "waiting_for_input",
+        "permission_refused",
         "busy",
         "idle",
         "done",
@@ -96,7 +97,8 @@
         "chat_delta",
         "chat_tool",
         "chat_done",
-        "settings_changed"
+        "settings_changed",
+        "proactive_notice"
       ]
     },
     "StatusField": {
@@ -113,13 +115,24 @@
             "iteration",
             "last_output",
             "open_question",
-            "auftrag_id"
+            "auftrag_id",
+            "display_name"
           ]
         },
         {
           "description": "Whether the adapter can say what a session is doing at all. An adapter that leaves\nthis out reports `unknown` and `lost` instead of guessing between busy and idle.",
           "type": "string",
           "const": "state"
+        },
+        {
+          "description": "Whether the adapter can say that a session is an orchestrator or a worker. An\nadapter that leaves this out reports neither, and the session list keeps showing\nits sessions rather than filtering on a guess.",
+          "type": "string",
+          "const": "kind"
+        },
+        {
+          "description": "Whether the adapter can name the machine a session runs on in a stable way. Most\ncannot: the daemon fills its own machine in for anything that runs here.",
+          "type": "string",
+          "const": "machine_identity"
         }
       ]
     }

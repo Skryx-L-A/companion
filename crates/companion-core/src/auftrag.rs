@@ -10,13 +10,25 @@
 //! - the copy in the file, for display;
 //! - the record in the register outside the project, which decides.
 //!
+//! **How far that separation carries (stated plainly 2026-09-03, security review).** It is a
+//! separation of *place*, not a cryptographic one. The register is a SQLite file under the
+//! configuration directory, mode 0600 in a 0700 directory, owned by the same account the
+//! commanded session runs under. It is out of the way of a session that edits its own
+//! project — which is the attack this was built against, and that one it stops — but any
+//! process of this account with a shell can open the file and write a row, and a forged row
+//! is indistinguishable from a real one: there is no MAC and no signature over an approval.
+//! Making the register unreachable rather than merely separate needs a key an ordinary
+//! process of the account cannot read, and on this machine that means the keychain with an
+//! access list bound to a signed build. `TASKS.md` carries that as open work, next to the
+//! same dependency the token store already has.
+//!
 //! The hash runs over defined bytes: the canonical form of the file **without** the
 //! `approval` field, so the hash is never part of the text it certifies, and two spellings
 //! of the same data give the same value.
 
 use std::path::{Path, PathBuf};
 
-use companion_protocol::{Approval, Auftrag, AuftragId};
+use companion_protocol::{Approval, ApprovalConfirmation, Auftrag, AuftragId, DeviceId};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -151,12 +163,22 @@ pub fn read(project: &Path, id: &AuftragId) -> Result<Auftrag, AuftragError> {
 /// canonicalises the file again and refuses if the two differ: that is what ties the
 /// approval to a text a person actually read, rather than to whatever is on disk now.
 ///
-/// The record goes into the register first, because the register is the part the commanded
-/// session cannot reach.
+/// `device` and `confirmation` say where the approval came from and how the person proved
+/// it was them. `DESIGN.md` § Mobil, Freigaben vom Handy requires both to be written down,
+/// and requiring them as arguments rather than defaulting them is what keeps a caller from
+/// forgetting one: the shell at the machine passes `None` and
+/// [`ApprovalConfirmation::Shell`], a phone passes its device and what it actually asked
+/// for.
+///
+/// The record goes into the register first, because the register is the part a session that
+/// edits its own project does not touch. It is a different place, not an unreachable one —
+/// see the module documentation for what that separation does and does not carry.
 pub fn approve(
     project: &Path,
     id: &AuftragId,
     expected_hash: &str,
+    device: Option<DeviceId>,
+    confirmation: ApprovalConfirmation,
     registry: &Registry,
 ) -> Result<Approval, AuftragError> {
     let mut auftrag = read(project, id)?;
@@ -172,11 +194,15 @@ pub fn approve(
     let approval = Approval {
         approved_at_ms: now_ms(),
         text_sha256: hash.clone(),
+        device: device.clone(),
+        confirmation,
     };
     registry.record_approval(&ApprovalRecord {
         auftrag_id: id.clone(),
         project: project.display().to_string(),
         hash,
+        device,
+        confirmation,
         approved_at_ms: approval.approved_at_ms,
     })?;
 
@@ -187,14 +213,19 @@ pub fn approve(
     Ok(approval)
 }
 
-/// Reads a job and proves it is the one that was approved.
+/// Reads a job and proves the register knows it as approved, exactly as it stands now.
 ///
-/// Three things have to agree: the file as it is now, the record in the register, and the
-/// hash the caller expects. Anything else is refused with the reason named.
-pub fn verify_approved(
+/// Two things have to agree: the file as it is now and the record in the register. That is
+/// the whole check where no person was shown a text just now — a spawn that names a job id,
+/// or the middle autonomy rung looking up what it may answer by itself. The commanded
+/// session can write the file, so a file that says it is approved proves nothing;
+/// [`read`] alone must never stand in for this.
+///
+/// Where a caller *was* shown a text, [`verify_approved`] adds that third party to the
+/// comparison.
+pub fn read_approved(
     project: &Path,
     id: &AuftragId,
-    expected_hash: &str,
     registry: &Registry,
 ) -> Result<Auftrag, AuftragError> {
     let auftrag = read(project, id)?;
@@ -211,6 +242,26 @@ pub fn verify_approved(
             found,
         });
     }
+    Ok(auftrag)
+}
+
+/// Reads a job and proves it is the one that was approved.
+///
+/// Three things have to agree: the file as it is now, the record in the register, and the
+/// hash the caller expects. Anything else is refused with the reason named.
+///
+/// `expected_hash` is only worth something when it comes from somewhere other than this
+/// file — the shell that displayed the text, over the wire. A caller that hashes the file
+/// it just read and hands that in compares a value with itself; that caller wants
+/// [`read_approved`], which says so.
+pub fn verify_approved(
+    project: &Path,
+    id: &AuftragId,
+    expected_hash: &str,
+    registry: &Registry,
+) -> Result<Auftrag, AuftragError> {
+    let auftrag = read_approved(project, id, registry)?;
+    let found = hash_of(&auftrag)?;
     if expected_hash != found {
         return Err(AuftragError::HashMismatch {
             id: id.clone(),
@@ -295,6 +346,8 @@ mod tests {
         approved.approval = Some(Approval {
             approved_at_ms: 1_700_000_000_000,
             text_sha256: "whatever".to_owned(),
+            device: None,
+            confirmation: ApprovalConfirmation::Shell,
         });
         assert_eq!(hash_of(&plain).unwrap(), hash_of(&approved).unwrap());
     }
@@ -327,8 +380,18 @@ mod tests {
         write(&project, &auftrag).unwrap();
         let hash = hash_of(&auftrag).unwrap();
 
-        let approval = approve(&project, &auftrag.id, &hash, &registry).unwrap();
+        let approval = approve(
+            &project,
+            &auftrag.id,
+            &hash,
+            None,
+            ApprovalConfirmation::Shell,
+            &registry,
+        )
+        .unwrap();
         assert_eq!(approval.text_sha256, hash);
+        assert_eq!(approval.device, None);
+        assert_eq!(approval.confirmation, ApprovalConfirmation::Shell);
 
         let on_disk = read(&project, &auftrag.id).unwrap();
         assert!(on_disk.is_approved(), "the file shows the approval");
@@ -337,6 +400,8 @@ mod tests {
             .unwrap()
             .expect("the register holds the record");
         assert_eq!(record.hash, hash);
+        assert_eq!(record.device, None, "the shell at the machine is no device");
+        assert_eq!(record.confirmation, ApprovalConfirmation::Shell);
 
         // And the copy in the file did not change what the hash is over.
         assert_eq!(hash_of(&on_disk).unwrap(), hash);
@@ -352,8 +417,15 @@ mod tests {
         let auftrag = job("2026-08-24-zwei");
         write(&project, &auftrag).unwrap();
 
-        let error = approve(&project, &auftrag.id, "not-the-hash", &registry)
-            .expect_err("the approval must match what was displayed");
+        let error = approve(
+            &project,
+            &auftrag.id,
+            "not-the-hash",
+            None,
+            ApprovalConfirmation::Shell,
+            &registry,
+        )
+        .expect_err("the approval must match what was displayed");
         assert!(matches!(error, AuftragError::HashMismatch { .. }));
         assert!(
             registry
@@ -375,7 +447,15 @@ mod tests {
         let auftrag = job("2026-08-24-drei");
         write(&project, &auftrag).unwrap();
         let approved_hash = hash_of(&auftrag).unwrap();
-        approve(&project, &auftrag.id, &approved_hash, &registry).unwrap();
+        approve(
+            &project,
+            &auftrag.id,
+            &approved_hash,
+            None,
+            ApprovalConfirmation::Shell,
+            &registry,
+        )
+        .unwrap();
 
         let mut tampered = read(&project, &auftrag.id).unwrap();
         tampered.gate_commands.push(GateCommand {
@@ -387,6 +467,8 @@ mod tests {
         tampered.approval = Some(Approval {
             approved_at_ms: now_ms(),
             text_sha256: hash_of(&tampered).unwrap(),
+            device: None,
+            confirmation: ApprovalConfirmation::Shell,
         });
         write(&project, &tampered).unwrap();
 

@@ -30,9 +30,23 @@ pub enum VoiceError {
     MissingKey { profile: String, key_ref: String },
     #[error("cannot read the key store: {0}")]
     Secrets(#[from] companion_core::SecretError),
-    #[error("profile {profile} is not reachable: {source}")]
+    /// A request that never produced an answer: no connection, a timeout, a body that broke
+    /// off.
+    ///
+    /// The `Display` deliberately does **not** print `source`. `reqwest::Error` appends
+    /// ` for url (…)` to its own text, with the query string intact, and this error is
+    /// quoted back to every authenticated client over the socket and written into the log —
+    /// so a provider that takes its key as `?key=…` put that key on the wire on every failed
+    /// request (audit 2026-09-03). `reason` carries the same address shortened by
+    /// [`companion_protocol::without_credentials`], and `transport_detail` says what kind of
+    /// failure it was in words of this program. The `#[source]` stays, so whoever debugs the
+    /// daemon still has the whole chain in hand; it is only no longer part of the sentence
+    /// that travels.
+    #[error("profile {profile} is not reachable at {reason}: {}", transport_detail(.source))]
     Transport {
         profile: String,
+        /// The endpoint address without userinfo, query or fragment.
+        reason: String,
         #[source]
         source: reqwest::Error,
     },
@@ -64,7 +78,42 @@ pub enum VoiceError {
     ChainExhausted { role: &'static str, detail: String },
 }
 
+/// What kind of failure a `reqwest::Error` is, in words that carry no url.
+///
+/// Every branch is a fixed string of this program, never the library's own text: a message
+/// that is assembled rather than quoted cannot grow a url in the next release of a
+/// dependency.
+pub(crate) fn transport_detail(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "the request timed out"
+    } else if error.is_connect() {
+        "no connection could be made"
+    } else if error.is_decode() {
+        "the answer could not be read"
+    } else if error.is_body() {
+        "the body broke off"
+    } else if error.is_redirect() {
+        "it redirected too often"
+    } else if error.is_request() {
+        "the request could not be sent"
+    } else {
+        "the request failed"
+    }
+}
+
 impl VoiceError {
+    /// A failed request, with the address shortened to the part that is safe to show.
+    ///
+    /// The one way to build [`Self::Transport`]: a call site that filled the fields itself
+    /// would be one `?` away from putting the raw url back into the message.
+    pub fn transport(profile: &str, url: &str, source: reqwest::Error) -> Self {
+        Self::Transport {
+            profile: profile.to_owned(),
+            reason: companion_protocol::without_credentials(url),
+            source,
+        }
+    }
+
     pub fn unsupported(profile: &EndpointProfile) -> Self {
         Self::Unsupported {
             profile: profile.id.clone(),
@@ -142,9 +191,15 @@ pub fn authorize(
 }
 
 /// Turns a failed response into an error that quotes the beginning of the body.
+///
+/// The body goes through `secretish` before it becomes part of the error: this text reaches
+/// every authenticated client over the socket (`server.rs`, wiring not owned here), a
+/// gate-coupled phone included, and a reverse proxy that bounces the request back can put an
+/// `Authorization` header straight into it (audit 2026-09-03, `client.rs:145`).
 pub async fn status_error(profile: &str, response: reqwest::Response) -> VoiceError {
     let status = response.status().as_u16();
     let body = response.text().await.unwrap_or_default();
+    let body = companion_core::redact::secretish(&body);
     let mut body = body.trim().replace('\n', " ");
     if body.chars().count() > MAX_ERROR_BODY {
         body = body.chars().take(MAX_ERROR_BODY).collect::<String>() + " [cut off]";

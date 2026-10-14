@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
+# Deliberately its own workspace, next to `app/` rather than inside it.
+#
+# `app/Cargo.toml` is the core, and `tools/publish-public.sh` splits `app/` out to the root
+# of the public repository, where it has to build on every machine that clones it. A member
+# crate that links GTK4 would make `cargo build --workspace` in `app/` fail on macOS and
+# Windows, where there is no gtk4 pkg-config file — so the Linux shell keeps its own
+# workspace, the way `app/mac` is its own Swift package and `tests/` its own workspace.
+# It still lives under `app/`, so it travels with the public split and the path dependency
+# below stays inside it.
+[workspace]
+
+[package]
+name = "companion-linux"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/Skryx-L-A/companion"
+description = "The Linux shell of companion: the figure as a layer-shell overlay, the session list and the chat."
+
+[dependencies]
+# Only the wire contract, never the daemon's innards: a shell talks to the daemon over the
+# socket like any other client (`DESIGN.md` § Architektur, IPC).
+companion-protocol = { path = "../crates/companion-protocol" }
+
+async-channel = "2"
+# `png` so `--bilder` can write a frame out on a machine with no compositor. Cairo comes
+# in through gtk4 either way; naming it here is what turns that feature on.
+cairo-rs = { version = "0.22", features = ["png"] }
+# `v4_12` is what the shell builds against: it is three years old, every distribution
+# that ships gtk4-layer-shell is well past it, and it is where `load_from_string` and the
+# rest of the current API live.
+gtk4 = { version = "0.11", features = ["v4_12"] }
+gtk4-layer-shell = "0.8"
+serde_json = "1"
+# The tray (`org.kde.StatusNotifierItem`), chosen over hand-rolling it on raw zbus: see the
+# comparison in the result file for the track that added it. `async-io` instead of the
+# default `tokio` keeps a second async runtime out of a GTK app that already has glib's;
+# `blocking` is the non-async surface the rest of this crate calls into.
+ksni = { version = "0.3", default-features = false, features = ["async-io", "blocking"] }
+
+[lints.rust]
+unsafe_code = "forbid"

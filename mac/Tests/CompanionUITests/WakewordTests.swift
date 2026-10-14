@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
+import CompanionProtocol
 import CompanionWakeword
 import XCTest
 
@@ -82,9 +83,12 @@ final class WakewordListenerTests: XCTestCase {
         try await super.tearDown()
     }
 
-    private func makeListener() -> WakewordListener {
+    private func makeListener(
+        prerollSeconds: TimeInterval = WakewordListener.defaultPrerollSeconds
+    ) -> WakewordListener {
         WakewordListener(
-            store: store, capture: { [capture] in capture! }, authorization: permission)
+            store: store, capture: { [capture] in capture! }, authorization: permission,
+            prerollSeconds: prerollSeconds)
     }
 
     /// A buffer with the word in it wakes the figure. The audio goes in the way the audio unit
@@ -92,7 +96,7 @@ final class WakewordListenerTests: XCTestCase {
     func testTheWordInAPlayedBufferFires() throws {
         let listener = makeListener()
         var heard: [WakewordDetection] = []
-        listener.onDetected = { heard.append($0) }
+        listener.onDetected = { detection, _ in heard.append(detection) }
         listener.start()
         XCTAssertEqual(listener.state, .listening)
         XCTAssertEqual(listener.word, "melodie")
@@ -106,11 +110,16 @@ final class WakewordListenerTests: XCTestCase {
     }
 
     /// Waking pauses the listener before the caller is told, so the dictation that this starts
-    /// finds the microphone free instead of racing it.
+    /// finds the microphone free instead of racing it — and it pauses without stopping the
+    /// device, because the dictation is about to take that very one over.
     func testWakingUpHandsTheMicrophoneOver() throws {
         let listener = makeListener()
         var stateWhenHeard: WakewordListener.State?
-        listener.onDetected = { _ in stateWhenHeard = listener.state }
+        var runningWhenHeard: Bool?
+        listener.onDetected = { _, _ in
+            stateWhenHeard = listener.state
+            runningWhenHeard = self.capture.isRunning
+        }
         listener.start()
 
         for block in WakewordFixture.blocks(
@@ -118,13 +127,67 @@ final class WakewordListenerTests: XCTestCase {
             capture.deliver(block)
         }
         XCTAssertEqual(stateWhenHeard, .paused)
-        XCTAssertFalse(capture.isRunning, "the microphone stayed open after waking")
+        XCTAssertEqual(runningWhenHeard, true, "the device is handed over running, not stopped")
+        XCTAssertEqual(capture.stopCount, 0)
+    }
+
+    /// And nothing of what is said from here on is scored: the promise of review M6 is that
+    /// the listener has no engine on the device while a dictation runs, and leaving the device
+    /// running must not quietly undo it.
+    func testAHandedOverListenerScoresNothingMore() throws {
+        let listener = makeListener()
+        var heard = 0
+        listener.onDetected = { _, _ in heard += 1 }
+        listener.start()
+
+        let word = WakewordFixture.padded(WakewordFixture.word([300, 800, 500]), before: 1, after: 0.3)
+        for block in WakewordFixture.blocks(of: word) { capture.deliver(block) }
+        XCTAssertEqual(heard, 1)
+
+        // The same word again, on the same still-running device.
+        for block in WakewordFixture.blocks(of: word) { capture.deliver(block) }
+        XCTAssertEqual(heard, 1, "a paused listener must not wake on the dictation's own audio")
+    }
+
+    /// Taking the device back after a handover that led nowhere — a dictation that was
+    /// refused, or a wakeword heard while no recogniser is configured at all. The listener
+    /// subscribes to the device it left running; nothing is stopped and nothing restarted.
+    func testTakingTheDeviceBackAfterAHandoverThatLedNowhere() throws {
+        let listener = makeListener()
+        listener.start()
+        listener.pause(handingTheDeviceOver: true)
+        XCTAssertTrue(capture.isRunning)
+
+        listener.resume()
+        XCTAssertEqual(listener.state, .listening)
+        XCTAssertTrue(capture.isRunning)
+        XCTAssertEqual(capture.stopCount, 0)
+        XCTAssertEqual(capture.startCount, 1, "a running device is not started a second time")
+
+        // And it really hears again: the word fires on the same stream.
+        var heard = 0
+        listener.onDetected = { _, _ in heard += 1 }
+        for block in WakewordFixture.blocks(
+            of: WakewordFixture.padded(WakewordFixture.word([300, 800, 500]), before: 1, after: 0.3)) {
+            capture.deliver(block)
+        }
+        XCTAssertEqual(heard, 1)
+    }
+
+    /// A listener that was stopped rather than handed over does close the device: the
+    /// enrollment window wants it for a capture of its own.
+    func testPausingForTheEnrollmentStopsTheDevice() throws {
+        let listener = makeListener()
+        listener.start()
+        listener.pause()
+        XCTAssertFalse(capture.isRunning)
+        XCTAssertEqual(capture.stopCount, 1)
     }
 
     func testAnotherWordDoesNotWakeIt() throws {
         let listener = makeListener()
         var heard = 0
-        listener.onDetected = { _ in heard += 1 }
+        listener.onDetected = { _, _ in heard += 1 }
         listener.start()
         for block in WakewordFixture.blocks(
             of: WakewordFixture.padded(WakewordFixture.word([1200, 400, 2000]), before: 1, after: 1)) {
@@ -184,6 +247,227 @@ final class WakewordListenerTests: XCTestCase {
             return XCTFail("expected a failed state, got \(listener.state)")
         }
         XCTAssertEqual(reason, AudioFailure.permissionDenied.message)
+    }
+
+    /// The listener refuses on a managed machine the way a dictation does, with the sentence
+    /// that names the profile rather than one that sends somebody into System Settings.
+    func testARestrictedMicrophoneNamesTheProfile() throws {
+        permission.authorization = .restricted
+        let listener = makeListener()
+        var notices: [String] = []
+        var blocked: [MicrophoneAuthorization] = []
+        listener.onNotice = { notices.append($0) }
+        listener.onMicrophoneBlocked = { blocked.append($0) }
+        listener.start()
+
+        XCTAssertEqual(capture.startCount, 0)
+        XCTAssertEqual(notices, [AudioFailure.permissionRestricted.message])
+        XCTAssertEqual(blocked, [.restricted])
+        XCTAssertEqual(listener.state, .failed(AudioFailure.permissionRestricted.message))
+    }
+
+    /// The shell's own wiring in miniature. `CompanionShell` pauses the listener the instant
+    /// a capture starts and resumes it on `.voiceCaptureStopped` — an event a capture that
+    /// never opened the microphone does not raise. Review 2026-09-03: a wakeword that fired
+    /// once while the recogniser was down left the listener paused for the rest of the
+    /// session, and the word never worked again.
+    func testARefusedDictationGivesTheListenerItsMicrophoneBack() throws {
+        let listener = makeListener()
+        listener.start()
+        let harness = VoiceHarness()
+        harness.controller.onCaptureRefused = { listener.resume() }
+
+        // The daemon has nothing to recognise with, so voice goes off for this connection.
+        harness.answersAtOnce = false
+        harness.controller.beginCapture(endsOnSilence: true)
+        harness.answer("voice_begin", with: .failure(.notSupported("no endpoint for role stt")))
+        harness.answersAtOnce = true
+
+        // Now the word fires: the listener hands the microphone over, and the dictation it
+        // starts is refused before anything opens.
+        listener.pause()
+        XCTAssertEqual(listener.state, .paused)
+        XCTAssertFalse(harness.controller.beginCapture(endsOnSilence: true))
+        XCTAssertEqual(listener.state, .listening, "the listener must not stay paused for ever")
+        XCTAssertTrue(capture.isRunning)
+    }
+
+    /// The enrollment pauses the listener to get the microphone, and the training that
+    /// follows ends with `reloadModel()`. Review 2026-09-03: that call read
+    /// `isWanted && !isPaused`, which the enrollment's own pause had just made false, so a
+    /// freshly trained word left the always-on listener dead until the next restart.
+    func testAWordTrainedWhileTheListenerIsPausedBringsItBack() throws {
+        let listener = makeListener()
+        listener.start()
+        listener.pause()
+        XCTAssertEqual(listener.state, .paused)
+
+        listener.reloadModel()
+        XCTAssertEqual(listener.state, .listening)
+        XCTAssertTrue(capture.isRunning)
+    }
+
+    /// And a listener nobody switched on stays off: reloading a word is not a way in.
+    func testReloadingDoesNotStartAListenerNobodyWants() throws {
+        let listener = makeListener()
+        listener.reloadModel()
+        XCTAssertEqual(listener.state, .off)
+        XCTAssertEqual(capture.startCount, 0)
+    }
+
+    /// The other half of the same leak: closing the enrollment window without training
+    /// anything left the listener paused, because only `onTrained` led anywhere.
+    func testClosingTheEnrollmentWindowGivesTheMicrophoneBack() throws {
+        let listener = makeListener()
+        listener.start()
+        listener.pause()
+
+        let window = WakewordWindowController()
+        window.onClosed = { listener.resume() }
+        window.windowIsGone()
+
+        XCTAssertEqual(listener.state, .listening)
+        XCTAssertTrue(capture.isRunning)
+    }
+
+    // MARK: - The preroll ring buffer
+
+    /// The seconds before the word come with the detection, so the dictation can start where
+    /// the person did rather than where the engine finished scoring.
+    func testTheSecondsBeforeTheWordComeWithIt() throws {
+        let listener = makeListener()
+        var preroll: Data?
+        listener.onDetected = { _, buffered in preroll = buffered }
+        listener.start()
+
+        // Three seconds of audio, the word at the end of it: more than the buffer holds, so
+        // what comes back has to be the tail and not everything.
+        let stream = WakewordFixture.padded(
+            WakewordFixture.word([300, 800, 500]), before: 3, after: 0.3)
+        var delivered = Data()
+        for block in WakewordFixture.blocks(of: stream) {
+            capture.deliver(block)
+            delivered.append(block)
+            if preroll != nil { break }
+        }
+
+        let buffered = try XCTUnwrap(preroll, "the word never fired")
+        let expected = Int(
+            WakewordListener.defaultPrerollSeconds
+                * Double(VoiceCaptureFormat.default.bytesPerSecond))
+        XCTAssertEqual(buffered.count, expected, "1.5 seconds of 16 kHz mono PCM16")
+        XCTAssertEqual(
+            buffered, delivered.suffix(expected),
+            "the buffer has to be the audio right before the word, not any other slice")
+    }
+
+    /// The window is a setting, and zero means the path behaves as it did before the buffer
+    /// existed. Whoever wants no audio held at all can have that.
+    func testAZeroWindowKeepsNothing() throws {
+        let listener = makeListener(prerollSeconds: 0)
+        var preroll: Data?
+        listener.onDetected = { _, buffered in preroll = buffered }
+        listener.start()
+
+        for block in WakewordFixture.blocks(
+            of: WakewordFixture.padded(WakewordFixture.word([300, 800, 500]), before: 2, after: 0.3)) {
+            capture.deliver(block)
+        }
+        XCTAssertEqual(try XCTUnwrap(preroll), Data())
+    }
+
+    /// A pause ends the audio stream, and the buffer goes with it. Otherwise the dictation
+    /// after the next wakeword would open with a second and a half of whatever was said
+    /// before the listener gave the microphone up.
+    func testTheBufferDoesNotSurviveAPause() throws {
+        let listener = makeListener()
+        var preroll: Data?
+        listener.onDetected = { _, buffered in preroll = buffered }
+        listener.start()
+
+        // Something loud and recognisable, then the microphone changes hands and comes back.
+        let before = SyntheticAudio.sine(seconds: 1, frequency: 1750, amplitude: 0.4)
+        for block in WakewordFixture.blocks(of: before) { capture.deliver(block) }
+        listener.pause()
+        listener.resume()
+
+        for block in WakewordFixture.blocks(
+            of: WakewordFixture.padded(WakewordFixture.word([300, 800, 500]), before: 0.2, after: 0.3)) {
+            capture.deliver(block)
+        }
+        let buffered = try XCTUnwrap(preroll, "the word never fired")
+        XCTAssertNil(
+            buffered.range(of: Data(before.prefix(64))),
+            "audio from before the pause must not reach the next dictation")
+    }
+
+    // MARK: - The handover to the dictation
+
+    /// The whole point of the shared device, end to end: the word fires, the dictation takes
+    /// over, and between the two the microphone is neither stopped nor started again.
+    ///
+    /// It used to be: `close()` stopped the capture and `VoiceController` started the same
+    /// object a line later. On the real device that is the settle window of the audio unit —
+    /// hundreds of milliseconds in which nothing is recorded and every word spoken is gone
+    /// (measured 2026-08-28, see `SharedMicrophone`).
+    func testTheHandoverNeitherStopsNorRestartsTheDevice() throws {
+        let listener = makeListener()
+        let harness = VoiceHarness(capture: capture)
+        harness.controller.onCaptureRefused = { listener.resume() }
+        listener.onDetected = { _, preroll in
+            harness.controller.beginCapture(endsOnSilence: true, preroll: preroll)
+        }
+        listener.start()
+        XCTAssertEqual(capture.startCount, 1)
+
+        for block in WakewordFixture.blocks(
+            of: WakewordFixture.padded(WakewordFixture.word([300, 800, 500]), before: 2, after: 0.2)) {
+            capture.deliver(block)
+        }
+
+        XCTAssertTrue(harness.controller.isCapturing, "the word never started a dictation")
+        XCTAssertEqual(capture.stopCount, 0, "the device must not be stopped for the handover")
+        XCTAssertEqual(capture.startCount, 1, "and must not be started a second time")
+        XCTAssertTrue(capture.isRunning)
+    }
+
+    /// And the audio runs through it without a seam: the 1.5 seconds the listener had
+    /// buffered go out first, and the very next block the device delivers follows them with
+    /// nothing missing in between.
+    ///
+    /// This is the byte-level half of the proof and not the whole of it: a fake capture stops
+    /// and starts in no time at all, so the settle window that swallowed the words on the real
+    /// device cannot be reproduced here. What rules that window out is the test above, that
+    /// there is no stop and no second start to settle from.
+    func testThePrerollRunsSeamlesslyIntoTheDictation() throws {
+        let listener = makeListener()
+        let harness = VoiceHarness(capture: capture)
+        var buffered: Data?
+        listener.onDetected = { _, preroll in
+            buffered = preroll
+            harness.controller.beginCapture(endsOnSilence: true, preroll: preroll)
+        }
+        listener.start()
+
+        // Everything the device delivers, so the dictation can be held against it.
+        var delivered = Data()
+        for block in WakewordFixture.blocks(
+            of: WakewordFixture.padded(WakewordFixture.word([300, 800, 500]), before: 2, after: 0.2)) {
+            capture.deliver(block)
+            delivered.append(block)
+        }
+
+        let preroll = try XCTUnwrap(buffered, "the word never fired")
+        let dictation = harness.chunks(of: "voice-1").reduce(into: Data()) { $0 += $1 }
+        XCTAssertEqual(
+            dictation.prefix(preroll.count), preroll,
+            "the dictation has to open with the seconds before the word")
+        XCTAssertEqual(
+            dictation, delivered.suffix(dictation.count),
+            "and continue with the audio that followed it, block for block")
+        XCTAssertGreaterThan(
+            dictation.count, preroll.count,
+            "the blocks after the word have to arrive in the dictation, not in the gap")
     }
 
     /// A new word replaces the old one without a restart of the shell.
@@ -348,7 +632,7 @@ final class WakewordEnrollmentTests: XCTestCase {
 @MainActor
 final class WakewordSettingTests: XCTestCase {
     private func makeSettings() throws -> (AppSettings, String) {
-        let suite = "de.skryx.companion.wakeword.\(UUID().uuidString.prefix(8))"
+        let suite = "de.skryx.companion.wakeword.\(fixedSuiteSuffix)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         return (AppSettings(defaults: defaults), suite)
     }
@@ -379,7 +663,7 @@ final class WakewordSettingTests: XCTestCase {
     }
 
     func testTheArmedStateSurvivesARestart() throws {
-        let suite = "de.skryx.companion.wakeword.\(UUID().uuidString.prefix(8))"
+        let suite = "de.skryx.companion.wakeword.\(fixedSuiteSuffix)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
 

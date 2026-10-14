@@ -59,6 +59,7 @@ impl EventBus {
             adapter,
             session_id: event.session_id,
             event: event.event,
+            audience: event.audience,
         };
         // An error here only means nobody is subscribed right now.
         let _ = self.sender.send(envelope.clone());

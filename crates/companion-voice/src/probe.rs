@@ -7,6 +7,15 @@
 //! that costs nothing and answers quickly — a model list, a tag list, the root of a whisper
 //! server — so the number is the round trip and not the work of a model.
 //!
+//! The second of those two was a description of something that did not exist until
+//! 2026-09-03 (F9 of `notizen/audit-2026-09-03/brain-voice.md`): no failure counter existed
+//! anywhere, the chain walked, logged and forgot. It exists now, next to the chains that
+//! count: `VoiceEngine`'s `ChainHealth`, `FAILURES_BEFORE_REMEASURING`, and the
+//! `demote_unreachable` that puts a profile this measurement could not reach at the back of
+//! the next walk. What the measurement never does is remove a profile from the chain or
+//! rewrite the person's configured order on disk — the order is theirs, and a verdict from
+//! one moment is not a reason to change it.
+//!
 //! The result carries its origin. An endpoint that did not answer has no latency, and
 //! `Provenance::Unknown` is the only honest thing to put there: a zero would sort it to the
 //! front as the fastest one.
@@ -66,7 +75,9 @@ pub async fn probe(
         );
     }
 
-    let key = match profile.key_ref.as_deref() {
+    // The profile's own id, never a name it may point at freely: see
+    // `EndpointProfile::key_name`.
+    let key = match profile.key_name() {
         Some(name) => match secrets.secret(name) {
             Ok(Some(value)) => Some(value),
             Ok(None) => {
@@ -118,6 +129,10 @@ fn ping_path(protocol: EndpointProtocol) -> &'static str {
 }
 
 /// A transport failure in one line, without the chain of sources reqwest prints.
+///
+/// The fallback is a word of this program and never `error.to_string()` (changed
+/// 2026-09-03): that text ends in ` for url (…)` with the query string intact, and the
+/// detail line of a probe goes back to every client that asked for `probe_endpoints`.
 fn short_reason(error: &reqwest::Error) -> String {
     if error.is_timeout() {
         return format!("no answer within {} seconds", PROBE_TIMEOUT.as_secs());
@@ -125,7 +140,7 @@ fn short_reason(error: &reqwest::Error) -> String {
     if error.is_connect() {
         return "cannot connect".to_owned();
     }
-    error.to_string()
+    crate::client::transport_detail(error).to_owned()
 }
 
 #[cfg(test)]
@@ -164,7 +179,10 @@ mod tests {
             EndpointProtocol::OpenaiCompat,
             "http://127.0.0.1:1",
         );
-        profile.key_ref = Some("not-stored".to_owned());
+        // The profile names a foreign key, which is what a settings file written before
+        // 2026-09-03 may still do. What is looked up, and what the message names, is the
+        // profile's own id: a key belongs to the profile it was stored for.
+        profile.key_ref = Some("openai".to_owned());
 
         let health = probe(&VoiceHttp::default(), &profile, &NoSecrets, 7).await;
         assert!(!health.reachable);
@@ -172,7 +190,7 @@ mod tests {
             health
                 .detail
                 .as_deref()
-                .is_some_and(|detail| detail.contains("not-stored")),
+                .is_some_and(|detail| detail.contains("cloud") && !detail.contains("openai")),
             "the name of the entry belongs in the message: {health:?}"
         );
     }

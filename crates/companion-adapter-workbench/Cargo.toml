@@ -15,8 +15,14 @@ async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync", "time", "rt", "process", "io-util"] }
+tokio = { workspace = true, features = ["sync", "time", "rt", "process", "io-util", "net"] }
 tracing.workspace = true
+
+# Reading who is at the other end of a unix socket, and asking whether a pid is alive.
+# Both through safe wrappers: this workspace forbids `unsafe`, so the raw `getsockopt` the
+# workbench's own tool uses is not an option here.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.28", features = ["signal", "socket"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

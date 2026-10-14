@@ -18,7 +18,7 @@ final class SettingsBridgeTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        suiteName = "de.skryx.companion.bridgetest.\(UUID().uuidString.prefix(8))"
+        suiteName = "de.skryx.companion.bridgetest.\(fixedSuiteSuffix)"
         defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
     }
 
@@ -212,8 +212,157 @@ final class SettingsBridgeTests: XCTestCase {
         }
     }
 
+    // MARK: - Audio that leaves the machine
+
+    private func speechDocument(sttProfile: EndpointProfile) -> DaemonSettings {
+        var document = DaemonSettings()
+        document.endpoints = EndpointConfig(
+            profiles: [sttProfile], roles: [.stt: RoleBinding(primary: sttProfile.id)])
+        return document
+    }
+
+    /// `DESIGN.md:342` names it beside the always-on wakeword: "ebenso ein Cloud-Endpoint für
+    /// STT oder S2S, weil Audio die Maschine verlässt". Until 2026-09-03 `highRiskRaises`
+    /// never looked at the endpoints at all, and the shell told the person the opposite in a
+    /// comment — a speech role could be pointed at a cloud URL with no warning anywhere.
+    ///
+    /// The sentence is the daemon's own, word for word
+    /// (`companion-protocol/src/settings.rs`, `high_risk_changes`, and its test
+    /// `putting_a_speech_role_on_a_cloud_endpoint_needs_a_person`): the daemon is the side
+    /// that refuses, and one refusal must not read as two problems.
+    func testASpeechRoleThatLeavesTheMachineIsARaise() {
+        let local = speechDocument(sttProfile: EndpointProfile(
+            id: "whisper-lokal", protocolKind: .whisperServer, url: "http://127.0.0.1:8080"))
+        let cloud = speechDocument(sttProfile: EndpointProfile(
+            id: "openai", protocolKind: .openaiCompat, url: "https://api.openai.com/v1"))
+
+        XCTAssertEqual(
+            cloud.highRiskRaises(comparedTo: local),
+            [
+                "the role stt goes to the endpoint openai at api.openai.com, which is not this "
+                    + "machine, so what is spoken into the microphone leaves it",
+            ])
+
+        XCTAssertTrue(cloud.highRiskRaises(comparedTo: cloud).isEmpty, "already in force")
+        XCTAssertTrue(local.highRiskRaises(comparedTo: cloud).isEmpty, "coming back is free")
+        XCTAssertTrue(
+            local.highRiskRaises(comparedTo: DaemonSettings()).isEmpty,
+            "a local speech endpoint raises nothing")
+    }
+
+    /// A fallback counts too: the chain is what the daemon works with, not the primary. And
+    /// the same profile name with the address moved off the machine is the same step, even
+    /// though no binding changed.
+    func testTheWholeChainDecidesAndSoDoesAMovedAddress() {
+        var local = speechDocument(sttProfile: EndpointProfile(
+            id: "whisper-lokal", protocolKind: .whisperServer, url: "http://127.0.0.1:8080"))
+        var withFallback = local
+        withFallback.endpoints.profiles.append(EndpointProfile(
+            id: "peer", protocolKind: .whisperServer, url: "http://peer.local:8080"))
+        withFallback.endpoints.roles[.stt] = RoleBinding(
+            primary: "whisper-lokal", fallback: ["peer"])
+        XCTAssertEqual(withFallback.endpoints.chain(.stt).count, 2)
+        XCTAssertEqual(local.highRiskRaises(comparedTo: withFallback).count, 0, "the other way")
+        XCTAssertEqual(withFallback.highRiskRaises(comparedTo: local).count, 1)
+
+        var moved = local
+        moved.endpoints.profiles[0].url = "https://stt.example/v1"
+        XCTAssertEqual(moved.highRiskRaises(comparedTo: local).count, 1)
+
+        // A chat model in the cloud is not a speech role and is nobody's warning here.
+        local.endpoints.profiles.append(EndpointProfile(
+            id: "cloud-chat", protocolKind: .anthropic, url: "https://api.anthropic.com"))
+        var chat = local
+        chat.endpoints.roles[.chatLlm] = RoleBinding(primary: "cloud-chat")
+        XCTAssertTrue(chat.highRiskRaises(comparedTo: local).isEmpty)
+    }
+
+    /// The output role as well: the text a speech endpoint is given is the answer the
+    /// companion is about to say out loud.
+    func testACloudVoiceForTheAnswersIsARaiseOfItsOwn() {
+        var cloudSpeaker = DaemonSettings()
+        cloudSpeaker.endpoints = EndpointConfig(
+            profiles: [EndpointProfile(
+                id: "eleven", protocolKind: .openaiCompat, url: "https://api.elevenlabs.io")],
+            roles: [.tts: RoleBinding(primary: "eleven")])
+        XCTAssertEqual(
+            cloudSpeaker.highRiskRaises(comparedTo: DaemonSettings()),
+            [
+                "the role tts goes to the endpoint eleven at api.elevenlabs.io, which is not "
+                    + "this machine, so every sentence the companion says leaves it",
+            ])
+    }
+
+    /// What counts as staying here, rule for rule with `endpoint_leaves_the_machine` on the
+    /// Rust side: a CLI profile is a local program, a unix socket is a path, and only http or
+    /// https on a loopback host stays. An address with no scheme does not, and neither does
+    /// one that carries a credential in front of its host.
+    func testWhichAddressesStayOnThisMachine() {
+        func profile(_ url: String, _ kind: EndpointProtocol = .openaiCompat) -> EndpointProfile {
+            EndpointProfile(id: "p", protocolKind: kind, url: url)
+        }
+        XCTAssertFalse(profile("/usr/bin/say", .cli).leavesTheMachine)
+        XCTAssertFalse(profile("http://127.0.0.1:8791").leavesTheMachine)
+        XCTAssertFalse(profile("http://127.2.3.4:8791").leavesTheMachine)
+        XCTAssertFalse(profile("http://localhost:8791/v1").leavesTheMachine)
+        XCTAssertFalse(profile("http://[::1]:8791").leavesTheMachine)
+        XCTAssertFalse(profile("/run/companion/speech.sock").leavesTheMachine)
+        XCTAssertFalse(profile("unix:/run/companion/speech.sock").leavesTheMachine)
+        XCTAssertTrue(profile("https://api.openai.com/v1").leavesTheMachine)
+        XCTAssertTrue(profile("http://100.64.0.7:8791").leavesTheMachine, "the other machine")
+        XCTAssertTrue(profile("peer.local:8791").leavesTheMachine)
+        XCTAssertTrue(
+            profile("localhost:8791").leavesTheMachine,
+            "no scheme, no answer: the daemon reads it that way and this must not be milder")
+        XCTAssertTrue(
+            profile("http://sk-key@127.0.0.1:8791").leavesTheMachine,
+            "a host behind a credential is not this machine")
+        XCTAssertTrue(profile("").leavesTheMachine, "an address nobody can read is not local")
+    }
+
+    /// Only the host reaches the warning. The path and the query of an endpoint url are where
+    /// a credential ends up when somebody puts one there, and this sentence is displayed,
+    /// logged and read out loud.
+    func testTheWarningNamesTheHostAndNothingElseOfTheAddress() {
+        XCTAssertEqual(hostOfURL("https://api.openai.com/v1?key=sk-secret"), "api.openai.com")
+        XCTAssertEqual(hostOfURL("https://sk-secret@api.example.com/v1"), "api.example.com")
+        XCTAssertEqual(hostOfURL("peer.local:8080/x"), "peer.local:8080")
+        XCTAssertEqual(hostOfURL("https:///v1"), "(unreadable address)")
+
+        let leaking = speechDocument(sttProfile: EndpointProfile(
+            id: "wolke", protocolKind: .openaiCompat,
+            url: "https://sk-secret@api.example.com/v1?token=sk-2"))
+        let raise = leaking.highRiskRaises(comparedTo: DaemonSettings())[0]
+        XCTAssertTrue(raise.contains("at api.example.com,"))
+        XCTAssertFalse(raise.contains("sk-secret"))
+        XCTAssertFalse(raise.contains("sk-2"))
+    }
+
     /// A raise that is already in force is not one, and the person who lowers something needs
     /// no ceremony for it.
+    func testWideningTheNetworkPortNeedsAPersonAndNarrowingItDoesNot() {
+        // Dieselbe Regel wie auf der Rust-Seite: Einschalten ist der eine Schritt, weiter
+        // aufmachen der andere. Der Warntext hier, die Ablehnung im Daemon.
+        let loopback = DaemonSettings(network: NetworkSettings(enabled: true))
+        let everywhere = DaemonSettings(
+            network: NetworkSettings(enabled: true, bindAddress: "0.0.0.0"))
+        let movedPort = DaemonSettings(
+            network: NetworkSettings(enabled: true, bindAddress: "0.0.0.0", port: 47900))
+
+        XCTAssertEqual(everywhere.highRiskRaises(comparedTo: loopback).count, 1)
+        XCTAssertTrue(
+            everywhere.highRiskRaises(comparedTo: loopback)[0].contains("erreichbar"))
+        XCTAssertEqual(movedPort.highRiskRaises(comparedTo: everywhere).count, 1)
+        XCTAssertTrue(loopback.highRiskRaises(comparedTo: everywhere).isEmpty)
+        XCTAssertTrue(everywhere.highRiskRaises(comparedTo: everywhere).isEmpty)
+
+        XCTAssertEqual(NetworkSettings(bindAddress: "127.0.0.1").reach, .loopback)
+        XCTAssertEqual(NetworkSettings(bindAddress: "::1").reach, .loopback)
+        XCTAssertEqual(NetworkSettings(bindAddress: "100.64.0.1").reach, .oneInterface)
+        XCTAssertEqual(NetworkSettings(bindAddress: "0.0.0.0").reach, .everything)
+        XCTAssertEqual(NetworkSettings(bindAddress: "companion.local").reach, .everything)
+    }
+
     func testWhatIsAlreadyOnStaysOnAndLoweringItIsFree() {
         let daemon = StubDaemon(settings: DaemonSettings(agentBoundary: .full, autonomy: .act))
         let store = self.store(daemon)

@@ -7,6 +7,14 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# On by default: the daemon then speaks Opus with the phone, which is what `DESIGN.md`
+# section Mobil, Voice am Handy asks for. It is a feature and not a plain dependency because
+# libopus is built from source with cmake, and a machine without cmake should still be able
+# to build the daemon — it then reports no Opus in `capabilities` instead of pretending.
+default = ["opus"]
+opus = ["dep:opus"]
+
 [dependencies]
 companion-core.workspace = true
 companion-protocol.workspace = true
@@ -25,12 +33,22 @@ reqwest = { workspace = true, default-features = false, features = [
     "multipart",
     "stream",
 ] }
+# libopus itself is BSD-3-Clause, the binding MIT/Apache-2.0, and both go into PolyForm-Noncommercial-1.0.0
+# without a licence conflict. The reasoning behind picking the reference implementation over
+# a young pure-Rust codec is in the module doc of `src/codec.rs`.
+opus = { version = "0.4", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "process", "sync", "time", "rt", "io-util"] }
 tokio-stream = { workspace = true, features = ["io-util"] }
 tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# The same binding and the same version the Hermes adapter uses: a SIGTERM before the
+# SIGKILL needs one system call this workspace cannot make itself, because `unsafe_code` is
+# forbidden here.
+nix = { version = "0.28", features = ["signal"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

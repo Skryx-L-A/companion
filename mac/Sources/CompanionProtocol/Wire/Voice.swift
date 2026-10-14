@@ -21,6 +21,11 @@ public enum AudioFormat: Sendable, Equatable, Hashable {
     /// Apple AIFF, which is what `say -o` writes when it is not asked for WAVE.
     case aiff
     case mp3
+    /// Little-endian PCM16 samples with no container at all. What a microphone hands the app,
+    /// and what the first version of `voice_chunk` carried without naming it.
+    case pcm16
+    /// Opus packets in the framing `opusFraming` describes. Not Ogg.
+    case opus
     case unrecognised(String)
 }
 
@@ -30,6 +35,8 @@ extension AudioFormat: RawRepresentable, Codable {
         case "wav": self = .wav
         case "aiff": self = .aiff
         case "mp3": self = .mp3
+        case "pcm16": self = .pcm16
+        case "opus": self = .opus
         default: self = .unrecognised(rawValue)
         }
     }
@@ -39,6 +46,8 @@ extension AudioFormat: RawRepresentable, Codable {
         case .wav: return "wav"
         case .aiff: return "aiff"
         case .mp3: return "mp3"
+        case .pcm16: return "pcm16"
+        case .opus: return "opus"
         case .unrecognised(let raw): return raw
         }
     }
@@ -50,6 +59,111 @@ extension AudioFormat: RawRepresentable, Codable {
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(rawValue)
+    }
+}
+
+/// How several Opus packets travel inside one piece of audio.
+///
+/// Written down in both languages of this project, because both sides implement it: every
+/// packet preceded by its length as a 16-bit big-endian unsigned integer.
+public let opusFraming = "each packet preceded by its length as a 16-bit big-endian unsigned integer"
+
+/// Longest single Opus packet either side writes or accepts. The value libopus itself
+/// recommends as the output buffer for one packet.
+public let maxOpusPacketBytes = 4000
+
+/// The Opus streams a daemon speaks.
+public struct OpusParams: Codable, Sendable, Equatable {
+    /// Sample rates a dictation may ask to be decoded to.
+    public var sampleRatesHz: [UInt32]
+    /// Length of one frame in milliseconds.
+    public var frameMs: UInt32
+    /// Bit rate the daemon encodes spoken answers at.
+    public var bitrateBps: UInt32
+    public var maxPacketBytes: UInt32
+    /// How several packets are laid out inside one chunk.
+    public var framing: String
+
+    public init(
+        sampleRatesHz: [UInt32] = [8000, 12000, 16000, 24000, 48000],
+        frameMs: UInt32 = 20,
+        bitrateBps: UInt32 = 32000,
+        maxPacketBytes: UInt32 = UInt32(maxOpusPacketBytes),
+        framing: String = opusFraming
+    ) {
+        self.sampleRatesHz = sampleRatesHz
+        self.frameMs = frameMs
+        self.bitrateBps = bitrateBps
+        self.maxPacketBytes = maxPacketBytes
+        self.framing = framing
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sampleRatesHz = "sample_rates_hz"
+        case frameMs = "frame_ms"
+        case bitrateBps = "bitrate_bps"
+        case maxPacketBytes = "max_packet_bytes"
+        case framing
+    }
+}
+
+/// What a daemon can do with audio, as the `capabilities` answer reports it.
+public struct VoiceCapabilities: Codable, Sendable, Equatable {
+    public var captureFormats: [AudioFormat]
+    public var speechFormats: [AudioFormat]
+    public var opus: OpusParams?
+    /// Largest decoded payload one `voice_chunk` may carry, once base64 and the rest of the
+    /// line have taken their share of the daemon's line limit.
+    public var maxChunkBytes: UInt64
+
+    public init(
+        captureFormats: [AudioFormat] = [.pcm16],
+        speechFormats: [AudioFormat] = [.wav],
+        opus: OpusParams? = nil,
+        maxChunkBytes: UInt64 = 0
+    ) {
+        self.captureFormats = captureFormats
+        self.speechFormats = speechFormats
+        self.opus = opus
+        self.maxChunkBytes = maxChunkBytes
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case captureFormats = "capture_formats"
+        case speechFormats = "speech_formats"
+        case opus
+        case maxChunkBytes = "max_chunk_bytes"
+    }
+}
+
+/// What the handshake settled on for one connection.
+///
+/// A client lists in its `hello` what it can play, the daemon answers here with the one format
+/// it will send and with what it will take in. A daemon too old to answer at all leaves this
+/// out, and `.default` is what the first version of the protocol did: WAV out, PCM16 in.
+public struct AudioNegotiation: Codable, Sendable, Equatable {
+    public var speechFormat: AudioFormat
+    public var captureFormats: [AudioFormat]
+    public var opus: OpusParams?
+
+    public static let `default` = AudioNegotiation(
+        speechFormat: .wav, captureFormats: [.pcm16], opus: nil)
+
+    public init(speechFormat: AudioFormat, captureFormats: [AudioFormat], opus: OpusParams? = nil) {
+        self.speechFormat = speechFormat
+        self.captureFormats = captureFormats
+        self.opus = opus
+    }
+
+    /// Whether a dictation may be streamed in this format on this connection.
+    public func allowsCapture(_ format: AudioFormat) -> Bool {
+        captureFormats.contains(format)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case speechFormat = "speech_format"
+        case captureFormats = "capture_formats"
+        case opus
     }
 }
 
@@ -80,10 +194,18 @@ public struct VoiceCaptureFormat: Sendable, Equatable, Hashable {
 public struct VoiceBegin: Sendable, Equatable {
     public var format: VoiceCaptureFormat
     public var language: String?
+    /// What the chunks of this dictation carry. `nil` means PCM16, which is what the first
+    /// version sent without saying so.
+    public var encoding: AudioFormat?
 
-    public init(format: VoiceCaptureFormat = .default, language: String? = nil) {
+    public init(
+        format: VoiceCaptureFormat = .default,
+        language: String? = nil,
+        encoding: AudioFormat? = nil
+    ) {
         self.format = format
         self.language = language
+        self.encoding = encoding
     }
 }
 
@@ -93,6 +215,42 @@ public enum VoiceEventKind: String, Sendable, Codable, Hashable, CaseIterable {
     case sttFinal = "stt_final"
     case ttsChunk = "tts_chunk"
     case ttsDone = "tts_done"
+}
+
+/// Why a spoken answer ended.
+///
+/// Absent on the wire means `completed`, which is what the first version of `tts_done` meant
+/// without saying so. An unknown name is kept as it arrived rather than being read as one of
+/// the three: a shell that guesses here would tell the person an answer finished when a later
+/// daemon said something else.
+public enum SpeechEnd: Sendable, Equatable, Hashable {
+    /// The endpoint spoke the whole text and every chunk of it arrived.
+    case completed
+    /// Somebody asked for it to stop with `tts_stop`. What was not sent is not coming.
+    case cancelled
+    /// No endpoint could speak it. An `error` event says which and why.
+    case failed
+    case unrecognised(String)
+}
+
+extension SpeechEnd: RawRepresentable, Codable {
+    public init(rawValue: String) {
+        switch rawValue {
+        case "completed": self = .completed
+        case "cancelled": self = .cancelled
+        case "failed": self = .failed
+        default: self = .unrecognised(rawValue)
+        }
+    }
+
+    public var rawValue: String {
+        switch self {
+        case .completed: return "completed"
+        case .cancelled: return "cancelled"
+        case .failed: return "failed"
+        case .unrecognised(let name): return name
+        }
+    }
 }
 
 /// What the daemon reports about speech in either direction.
@@ -105,8 +263,11 @@ public enum VoiceEvent: Sendable, Equatable {
     /// One piece of spoken audio, in the order it has to be played. Only the first piece of a
     /// `wav` or `aiff` stream carries the container header; the rest continue it.
     case ttsChunk(voiceId: VoiceId, sequence: UInt32, format: AudioFormat, audio: Data)
-    /// The spoken answer is complete. No further chunk of this id follows.
-    case ttsDone(voiceId: VoiceId, endpoint: String?)
+    /// The spoken answer is over. No further chunk of this id follows.
+    ///
+    /// Over, not necessarily complete: `reason` says whether the whole text was spoken,
+    /// whether somebody stopped it, or whether no endpoint could speak it.
+    case ttsDone(voiceId: VoiceId, endpoint: String?, reason: SpeechEnd)
 
     public var kind: VoiceEventKind {
         switch self {
@@ -121,7 +282,7 @@ public enum VoiceEvent: Sendable, Equatable {
     public var voiceId: VoiceId {
         switch self {
         case .sttPartial(let id, _), .sttFinal(let id, _, _),
-             .ttsChunk(let id, _, _, _), .ttsDone(let id, _):
+             .ttsChunk(let id, _, _, _), .ttsDone(let id, _, _):
             return id
         }
     }
@@ -136,6 +297,7 @@ extension VoiceEvent: Codable {
         case text
         case audioBase64 = "audio_base64"
         case endpoint
+        case reason
     }
 
     /// Fails for anything that is not one of the four names, so `Event` can fall through to
@@ -173,7 +335,10 @@ extension VoiceEvent: Codable {
         case .ttsDone:
             self = .ttsDone(
                 voiceId: voiceId,
-                endpoint: try container.decodeIfPresent(String.self, forKey: .endpoint))
+                endpoint: try container.decodeIfPresent(String.self, forKey: .endpoint),
+                // A daemon that predates `tts_stop` writes no reason, and every answer it
+                // ends is one it spoke to the end.
+                reason: try container.decodeIfPresent(SpeechEnd.self, forKey: .reason) ?? .completed)
         }
     }
 
@@ -192,8 +357,9 @@ extension VoiceEvent: Codable {
             try container.encode(sequence, forKey: .sequence)
             try container.encode(format, forKey: .format)
             try container.encode(audio.base64EncodedString(), forKey: .audioBase64)
-        case .ttsDone(_, let endpoint):
+        case .ttsDone(_, let endpoint, let reason):
             try container.encodeIfPresent(endpoint, forKey: .endpoint)
+            try container.encode(reason, forKey: .reason)
         }
     }
 }
@@ -208,8 +374,8 @@ extension VoiceEvent: CustomStringConvertible {
             return "stt_final(\(id), \(text.count) Zeichen, \(endpoint ?? "-"))"
         case .ttsChunk(let id, let sequence, let format, let audio):
             return "tts_chunk(\(id), \(sequence), \(format.rawValue), \(audio.count) Bytes)"
-        case .ttsDone(let id, let endpoint):
-            return "tts_done(\(id), \(endpoint ?? "-"))"
+        case .ttsDone(let id, let endpoint, let reason):
+            return "tts_done(\(id), \(endpoint ?? "-"), \(reason.rawValue))"
         }
     }
 }

@@ -57,9 +57,9 @@ struct WakewordEnrollmentView: View {
             Text("Weckwort anlernen")
                 .font(.title3.weight(.semibold))
             Text("""
-                Sprich das Wort vier Mal, so wie du es spaeter sagen wuerdest. Aus den vier \
+                Sprich das Wort vier Mal, so wie du es später sagen würdest. Aus den vier \
                 Aufnahmen lernt der Companion, wie weit dein Wort schwanken darf. Die \
-                Aufnahmen bleiben auf diesem Rechner und werden nach dem Anlernen geloescht.
+                Aufnahmen bleiben auf diesem Rechner und werden nach dem Anlernen gelöscht.
                 """)
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -108,7 +108,7 @@ struct WakewordEnrollmentView: View {
         .frame(minWidth: 44)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Aufnahme \(index + 1)")
-        .accessibilityValue(isRecorded ? "aufgenommen" : (isCurrent ? "laeuft" : "leer"))
+        .accessibilityValue(isRecorded ? "aufgenommen" : (isCurrent ? "läuft" : "leer"))
     }
 
     private var meter: some View {
@@ -127,7 +127,7 @@ struct WakewordEnrollmentView: View {
             .accessibilityValue("\(Int(enrollment.level * 100)) Prozent")
             Text(enrollment.isRecording
                 ? "Sprich jetzt. Die Aufnahme endet von selbst, wenn du fertig bist."
-                : "Der Pegel zeigt, wie laut das Mikrofon dich hoert.")
+                : "Der Pegel zeigt, wie laut das Mikrofon dich hört.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -136,7 +136,7 @@ struct WakewordEnrollmentView: View {
 
     private var buttons: some View {
         HStack {
-            Button("Schliessen", action: onClose)
+            Button("Schließen", action: onClose)
                 .keyboardShortcut(.cancelAction)
             Spacer(minLength: 8)
             if enrollment.isRecording {
@@ -160,9 +160,9 @@ struct WakewordEnrollmentView: View {
 
     private var wordHint: String {
         if !enrollment.takes.isEmpty {
-            return "Das Wort steht fest, solange Aufnahmen da sind. Verwirf sie, um es zu aendern."
+            return "Das Wort steht fest, solange Aufnahmen da sind. Verwirf sie, um es zu ändern."
         }
-        return "Zwei bis drei Silben tragen am besten. Ein sehr kurzes Wort geht im Alltag unter, ein sehr haeufiges weckt ihn beim Reden."
+        return "Zwei bis drei Silben tragen am besten. Ein sehr kurzes Wort geht im Alltag unter, ein sehr häufiges weckt ihn beim Reden."
     }
 
     private var noticeSymbol: String {
@@ -180,13 +180,21 @@ struct WakewordEnrollmentView: View {
 final class WakewordWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private(set) var enrollment: WakewordEnrollment?
+    /// Run when the window is gone, however it went: trained, cancelled, or the red button.
+    ///
+    /// The enrollment takes the microphone away from the wakeword listener, and this is where
+    /// the listener gets it back. Without it, closing the window without training left the
+    /// always-on listener paused for good (review, 2026-09-03). Internal rather than private
+    /// so the closing can be exercised without putting a real window on somebody's screen.
+    var onClosed: (() -> Void)?
 
     func show(
         store: WakewordStore,
         word: String,
         capture: @escaping () -> AudioCapturing,
         authorization: MicrophoneAuthorizing,
-        onTrained: @escaping (String) -> Void
+        onTrained: @escaping (String) -> Void,
+        onClosed: @escaping () -> Void = {}
     ) {
         if let window {
             window.makeKeyAndOrderFront(nil)
@@ -197,6 +205,7 @@ final class WakewordWindowController: NSObject, NSWindowDelegate {
             store: store, word: word, capture: capture, authorization: authorization)
         enrollment.onTrained = onTrained
         self.enrollment = enrollment
+        self.onClosed = onClosed
 
         let hosting = NSHostingController(
             rootView: WakewordEnrollmentView(
@@ -219,10 +228,18 @@ final class WakewordWindowController: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        windowIsGone()
+    }
+
+    /// Everything the closing does, apart from AppKit's own part of it.
+    func windowIsGone() {
         // A window that goes away mid-take must not leave the microphone open.
         enrollment?.cancel()
         window?.delegate = nil
         window = nil
         enrollment = nil
+        let closed = onClosed
+        onClosed = nil
+        closed?()
     }
 }

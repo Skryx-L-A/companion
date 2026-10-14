@@ -11,11 +11,18 @@
       "$ref": "#/$defs/AdapterId"
     },
     "machine": {
-      "description": "Machine the session runs on. `local` for this machine.",
-      "type": "string"
+      "description": "Machine the session runs on, as the adapter reports it. `local` for this one.\n\nCarries its origin since 2026-09-03. It used to be a bare `String` that defaulted to\n`\"local\"`, and the workbench adapter filled that same `\"local\"` in whenever it could\nnot find out — a guess in the shape of a measurement, in the one field that decides\nwhether a session runs on this Mac or on the other machine. An adapter that does not\nknow now says so, and only one that does writes a value.",
+      "$ref": "#/$defs/Provenance"
     },
     "project": {
       "description": "Absolute path of the project directory the session works in.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "transcript_path": {
+      "description": "Where the session writes its conversation, when whoever reports it knows.\n\nAdded 2026-09-03. Claude Code hands its hooks the `transcript_path` it writes itself,\nwhich is the one authoritative answer to a question every reader of such a session\notherwise has to derive from a directory-naming rule that belongs to another program.\nA reporter that does not know leaves it out, and the field is absent from the wire —\nso a peer that predates it sends and reads exactly the bytes it always did.",
       "type": [
         "string",
         "null"
@@ -26,6 +33,15 @@
     },
     "state": {
       "$ref": "#/$defs/SessionState"
+    },
+    "last_activity_ms": {
+      "description": "Unix time in milliseconds of the last sign of life the adapter saw from this session:\nthe last line of its stream, the last write to its state file, the last change to its\ntranscript.\n\nAdded 2026-09-03 for `done_limit`. A listing carries at most that many finished\nsessions, and until now the daemon cut the tail off in the order the adapters happened\nto hand it over — so a machine with weeks of history could answer with twenty sessions\nthat all ended in June while the one that ended a minute ago fell off the end. With\nthis field the daemon keeps the newest ones. An adapter that cannot say leaves it out,\nand the field is absent from the wire, so a peer that predates it sends and reads\nexactly the bytes it always did.\n\nNot a [`Provenance`]: it is either a timestamp somebody read off the machine or it is\nnothing. There is no estimate of it worth ordering a list by.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
     },
     "runtime_ms": {
       "description": "Milliseconds since the session started.",
@@ -54,6 +70,13 @@
         "null"
       ]
     },
+    "permission_refused": {
+      "description": "A tool call this session asked permission for and was refused automatically, by\npolicy — not a question `open_question` would have a person still answer, since the\nagent was already told no before this was ever recorded.\n\nWritten out only when an adapter has one to report. A status that leaves it out is\nread back as `None`, which is what keeps a daemon and a shell of different ages\nspeaking the same wire bytes: nothing an older peer sends changes meaning, and nothing\nthis build sends about a session it knows nothing more about grows a field.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "auftrag_id": {
       "anyOf": [
         {
@@ -63,12 +86,62 @@
           "type": "null"
         }
       ]
+    },
+    "kind": {
+      "description": "Orchestrator or worker, for the list that shows only the first kind.\n\nWritten out only when an adapter knows it. A status that leaves it out is read back\nas [`Provenance::Unknown`], which is what keeps a daemon and a shell of different\nages speaking the same wire bytes: nothing an older peer sends changes meaning, and\nnothing this build sends about a session it knows nothing more about grows a field.",
+      "$ref": "#/$defs/Provenance6"
+    },
+    "display_name": {
+      "description": "What to call this session in a list, when the adapter has a name for it. The\nworkbench names its sessions and its workers; a bare terminal has nothing but an id.",
+      "$ref": "#/$defs/Provenance"
+    },
+    "machine_identity": {
+      "description": "The machine this session runs on, stable across renames. See [`MachineIdentity`]\nfor the collision rule that makes this field load-bearing.\n\n[`Self::machine`] stays what it was: the free-text name of the machine as the\nadapter reports it, `local` for this one. The two are kept apart because the old\nfield is what a person reads and the new one is what a client keys on.",
+      "$ref": "#/$defs/Provenance7"
+    },
+    "task_state": {
+      "description": "Where the workbench task this session carries stands. Set only by the workbench's\ncarrier, which reports one session per task with `auftrag_id` set; every other reporter\nleaves the five `task_*` fields out, and a status without them is written and read\nexactly as before (added 2026-09-10, `AGENTS-PLAN.md` § 9 step 3).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TaskState"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "task_reason": {
+      "description": "Why the task stands where it does, in the carrier's own words: what it waits for, why\nit is stuck, why an open task was not started.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "task_title": {
+      "description": "The goal of the task, its first sentence. What the person calls the task.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "task_wake_at": {
+      "description": "When a paused task goes on, as an RFC 3339 timestamp.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "task_machine": {
+      "description": "The machine the task's lead agent runs on right now. Apart from [`Self::machine`]\nbecause the carrier that reports may run on another machine than the agent it carries.",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [
     "id",
     "adapter",
-    "machine",
     "model",
     "state",
     "runtime_ms",
@@ -78,7 +151,7 @@
   ],
   "$defs": {
     "SessionId": {
-      "description": "Identifies one session. Unique per machine, assigned by the adapter that owns the session.",
+      "description": "Identifies one session. Unique per machine only, assigned by the adapter that owns the session. See the collision rule on [`crate::MachineIdentity`].",
       "type": "string"
     },
     "AdapterId": {
@@ -433,8 +506,216 @@
       ]
     },
     "AuftragId": {
-      "description": "Identifies a job file under `.companion/auftraege/<id>.json`.",
+      "description": "Identifies a job file under `.companion/auftraege/<id>.json`. One path segment: see [`AuftragId::checked`] for what that rules out.",
       "type": "string"
+    },
+    "Provenance6": {
+      "description": "A value together with where it came from.\n\n`DESIGN.md` § Session-Adapter requires every status field to carry its origin, and the\nsession list to show an unknown field as unknown rather than as empty or zero. Making\n`Unknown` a variant without a payload is what enforces that: there is no value to\nmistake for a measurement.",
+      "oneOf": [
+        {
+          "description": "Read from a structured channel: a hook, a status file, an adapter report.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "measured"
+            },
+            "value": {
+              "$ref": "#/$defs/SessionKind"
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "Derived or guessed, for example a token count extrapolated from elapsed time.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "estimated"
+            },
+            "value": {
+              "$ref": "#/$defs/SessionKind"
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "The adapter cannot supply this field at all.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "origin"
+          ]
+        }
+      ]
+    },
+    "SessionKind": {
+      "description": "What kind of agent a session is.\n\n`DESIGN.md` § Mobil, Sessionansicht: the session list of the phone shows orchestrators\nand hides workers, because supervising workers is the orchestrator's job and not the\ncompanion's. An adapter that cannot tell the two apart says so by leaving the field\n[`Provenance::Unknown`] — there is no third variant here, because \"unknown\" is what the\norigin of every status field already means, and two ways of saying it would let a\nfilter answer differently depending on which one an adapter picked. A list that hides\nworkers therefore hides exactly `Measured(Worker)` and `Estimated(Worker)`, and shows\neverything else.",
+      "oneOf": [
+        {
+          "description": "Drives other sessions and answers to the person.",
+          "type": "string",
+          "const": "orchestrator"
+        },
+        {
+          "description": "Was started by an orchestrator and reports back to it.",
+          "type": "string",
+          "const": "worker"
+        }
+      ]
+    },
+    "Provenance7": {
+      "description": "A value together with where it came from.\n\n`DESIGN.md` § Session-Adapter requires every status field to carry its origin, and the\nsession list to show an unknown field as unknown rather than as empty or zero. Making\n`Unknown` a variant without a payload is what enforces that: there is no value to\nmistake for a measurement.",
+      "oneOf": [
+        {
+          "description": "Read from a structured channel: a hook, a status file, an adapter report.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "measured"
+            },
+            "value": {
+              "$ref": "#/$defs/MachineIdentity"
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "Derived or guessed, for example a token count extrapolated from elapsed time.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "estimated"
+            },
+            "value": {
+              "$ref": "#/$defs/MachineIdentity"
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "The adapter cannot supply this field at all.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "origin"
+          ]
+        }
+      ]
+    },
+    "MachineIdentity": {
+      "description": "Which machine a session runs on, in a form that survives a rename.\n\n**The collision rule for session ids.** A [`SessionId`] is unique on the machine that\nissued it and nowhere else: two machines both running the workbench in\n`~/AI/companion` produce the very same id for two different sessions. A client that\nspeaks to more than one daemon — the phone in the aggregation mode of `DESIGN.md`\n§ Mobil — therefore keys every session by the pair (`machine.id`, `id`) and never by\nthe id alone. Where the machine identity is unknown, the pair cannot be formed, and the\nclient falls back to the connection it received the session on, which is unique within\none client run. The daemon never rewrites an id to make it globally unique: the id is\nwhat a person sees and what every command names, and a prefix that changed per client\nwould break both.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Stable and opaque. Generated once per machine and kept, so a renamed machine is\nstill recognised as the same one.",
+          "$ref": "#/$defs/MachineId"
+        },
+        "display_name": {
+          "description": "What to call the machine in a list. Free text a person may change at any time, and\nnever the thing two sessions are told apart by.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "MachineId": {
+      "description": "Identifies one machine, stable across restarts and independent of its name. Generated once, never derived from a hostname: a hostname changes with a network and collides between two machines set up the same way.",
+      "type": "string"
+    },
+    "TaskState": {
+      "description": "Where a task of the workbench stands, as its carrier reports it.\n\nThe states of `claude-workbench/docs/AGENTS-PLAN.md` § 2, \"gleichlautend in Ansicht, Datei\nund Companion\", spelled as the wire names the carrier (`wb-traeger`) sends. A task is not a\nsession: the carrier reports one session per task with `auftrag_id` set, and this is what\nthat task is doing, which [`SessionState`] cannot say — \"paused until the quota resets\" is\nneither waiting for the person nor idle, and \"ready for acceptance\" is not done.\n\nReading accepts every `wartet_auf_*` spelling as [`TaskState::WartetAufNutzer`]: carriers\nfrom before the rename name the person they wait for in the wire value.",
+      "oneOf": [
+        {
+          "description": "In the backlog, not started yet.",
+          "type": "string",
+          "const": "offen"
+        },
+        {
+          "description": "The lead agent is alive and was seen at the last tick.",
+          "type": "string",
+          "const": "laeuft"
+        },
+        {
+          "description": "A display without an automatic consequence: a deadline passed without progress, or the\nlead agent is gone and could not be revived.",
+          "type": "string",
+          "const": "steckt"
+        },
+        {
+          "description": "Paused until the subscription quota resets.",
+          "type": "string",
+          "const": "pausiert_kontingent"
+        },
+        {
+          "description": "Paused for the night window.",
+          "type": "string",
+          "const": "pausiert_nacht"
+        },
+        {
+          "description": "Paused until a wake time the lead agent left behind.",
+          "type": "string",
+          "const": "pausiert_weckzeit"
+        },
+        {
+          "description": "A question, an approval or a conflict only the person can settle.",
+          "type": "string",
+          "const": "wartet_auf_nutzer"
+        },
+        {
+          "description": "Result checked, reviewer run, report written.",
+          "type": "string",
+          "const": "zur_abnahme"
+        },
+        {
+          "description": "The lead agent holds the task for unsolvable as it stands.",
+          "type": "string",
+          "const": "aufgegeben"
+        },
+        {
+          "description": "A local lead agent handed the task back because it is beyond the model.",
+          "type": "string",
+          "const": "aufgegeben_modell"
+        },
+        {
+          "description": "Accepted by the person.",
+          "type": "string",
+          "const": "abgenommen"
+        },
+        {
+          "description": "Discarded by the person.",
+          "type": "string",
+          "const": "verworfen"
+        }
+      ]
     }
   }
 }

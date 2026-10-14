@@ -47,7 +47,13 @@ public final class SpeechPlayback: SpeechPlaying {
         // mark is cleared rather than the piece being dropped.
         isEndOfSpeech = false
 
-        let pcm = try reader.push(audio)
+        // The reader speaks in its own error type; the panel needs this shell's sentence.
+        let pcm: Data
+        do {
+            pcm = try reader.push(audio)
+        } catch let error as WavStreamError {
+            throw AudioFailure.brokenAudio(error.reason)
+        }
         guard !pcm.isEmpty, let format = reader.format else { return }
         try wire(for: format)
         guard let buffer = Self.buffer(from: pcm, format: format) else {
@@ -111,7 +117,7 @@ public final class SpeechPlayback: SpeechPlaying {
             standardFormatWithSampleRate: Double(format.sampleRateHz),
             channels: AVAudioChannelCount(format.channels))
         else {
-            throw AudioFailure.engine("\(format.sampleRateHz) Hz, \(format.channels) Kanaele")
+            throw AudioFailure.engine("\(format.sampleRateHz) Hz, \(format.channels) Kanäle")
         }
 
         if engine.isRunning { engine.stop() }

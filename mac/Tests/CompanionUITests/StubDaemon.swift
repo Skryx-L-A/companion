@@ -17,10 +17,17 @@ final class StubDaemon {
     var settings: DaemonSettings
     /// What the next probes answer, one entry per call.
     var health: [[EndpointHealth]] = []
+    /// The devices this daemon has paired, revoked ones included.
+    var devices: [Device] = []
+    /// What `create_pairing` answers next, in place of building a real offer. Set by a test
+    /// that wants to see a specific pairing come back.
+    var nextPairing: PairingOffer?
     /// Every request it saw, in order.
     private(set) var requests: [Request] = []
     /// Answer this instead of doing the work, for the request of that name.
     var failures: [String: EndpointStoreFailure] = [:]
+    /// Answer this instead of doing the work, for the devices/pairing request of that name.
+    var deviceFailures: [String: ActionFailure] = [:]
 
     init(settings: DaemonSettings = DaemonSettings()) {
         self.settings = settings
@@ -40,6 +47,11 @@ final class StubDaemon {
     /// What this daemon looks like from the shell: one closure that answers.
     var sending: DaemonRequesting {
         { [self] request, completion in answer(request, completion) }
+    }
+
+    /// What this daemon looks like from the devices page: one closure that answers.
+    var sendingDevices: DeviceRequesting {
+        { [self] request, completion in answerDevice(request, completion) }
     }
 
     private func answer(
@@ -63,6 +75,39 @@ final class StubDaemon {
             completion(.success(.ack))
         case .probeEndpoints:
             completion(.success(.endpoints(health.isEmpty ? [] : health.removeFirst())))
+        default:
+            completion(.success(.ack))
+        }
+    }
+
+    private func answerDevice(
+        _ request: Request,
+        _ completion: (Result<ResponseBody, ActionFailure>) -> Void
+    ) {
+        requests.append(request)
+        if let failure = deviceFailures[request.name] {
+            return completion(.failure(failure))
+        }
+        switch request {
+        case .createPairing(let deviceName, let level):
+            guard settings.network.enabled else {
+                return completion(.failure(ActionFailure(
+                    "the network port is off, so a paired device could not reach this daemon")))
+            }
+            let offer = nextPairing ?? PairingOffer(
+                uri: "companion://pair?a=100.64.0.7:47801&c=CODE&f=FINGERPRINT",
+                code: "CODE", shortCode: "SHORTCOD", address: "100.64.0.7:47801",
+                fingerprint: "fingerprint", machine: MachineIdentity(id: "m-1"),
+                deviceName: deviceName, level: level, expiresAtMs: 1_770_000_180_000)
+            completion(.success(.pairing(offer)))
+        case .listDevices:
+            completion(.success(.devices(devices)))
+        case .revokeDevice(let deviceId):
+            guard let index = devices.firstIndex(where: { $0.id == deviceId }) else {
+                return completion(.failure(ActionFailure("Der Daemon kennt dieses Gerät nicht (mehr).")))
+            }
+            devices[index].revokedAtMs = 1
+            completion(.success(.ack))
         default:
             completion(.success(.ack))
         }

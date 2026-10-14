@@ -151,11 +151,11 @@ public final class AuftragDraft {
         } else if !project.hasPrefix("/") {
             found.append(AuftragProblem(
                 field: .project,
-                message: "Der Projektpfad muss absolut sein, also mit einem Schraegstrich beginnen."))
+                message: "Der Projektpfad muss absolut sein, also mit einem Schrägstrich beginnen."))
         } else if !directoryExists(project) {
             found.append(AuftragProblem(
                 field: .project,
-                message: "Unter \(project) liegt kein Verzeichnis. Der Auftrag wuerde eines anlegen."))
+                message: "Unter \(project) liegt kein Verzeichnis. Der Auftrag würde eines anlegen."))
         }
 
         if goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -164,12 +164,12 @@ public final class AuftragDraft {
         if doneCriterion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             found.append(AuftragProblem(
                 field: .doneCriterion,
-                message: "Ohne Fertig-Kriterium kann niemand pruefen, ob der Auftrag erledigt ist."))
+                message: "Ohne Fertig-Kriterium kann niemand prüfen, ob der Auftrag erledigt ist."))
         }
         if referenceKind != .none,
            referenceValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             found.append(AuftragProblem(
-                field: .reference, message: "Die Referenz ist leer. Sonst waehle \"keine\"."))
+                field: .reference, message: "Die Referenz ist leer. Sonst wähle \"keine\"."))
         }
         // A critic without something to judge against is what the gauntlet loop is made of,
         // so the missing reference is refused here rather than discovered in the run.
@@ -188,7 +188,7 @@ public final class AuftragDraft {
             } else if program.rangeOfCharacter(from: .newlines) != nil {
                 found.append(AuftragProblem(
                     field: .gate(index),
-                    message: "Gate \(index + 1): Ein Programmname enthaelt keinen Zeilenumbruch."))
+                    message: "Gate \(index + 1): Ein Programmname enthält keinen Zeilenumbruch."))
             }
         }
 
@@ -210,11 +210,11 @@ public final class AuftragDraft {
             if value == 0 {
                 found.append(AuftragProblem(
                     field: .limits,
-                    message: "\(name) auf null wuerde den Lauf sofort beenden. Leer heisst kein Limit."))
+                    message: "\(name) auf null würde den Lauf sofort beenden. Leer heißt kein Limit."))
             }
             if value > upperBound {
                 found.append(AuftragProblem(
-                    field: .limits, message: "\(name) ist groesser als \(upperBound)."))
+                    field: .limits, message: "\(name) ist größer als \(upperBound)."))
             }
         }
         check(iterationsText, "Iterationen", upperBound: UInt64(UInt32.max))

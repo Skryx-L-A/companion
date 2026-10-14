@@ -14,7 +14,7 @@ public enum HotkeyFailure: Error, Equatable, Sendable {
     public var message: String {
         switch self {
         case .handlerRefused(let status):
-            return "Die Tastenueberwachung liess sich nicht einrichten (Fehler \(status))."
+            return "Die Tastenüberwachung ließ sich nicht einrichten (Fehler \(status))."
         case .registrationRefused(let status):
             return "Die Tastenkombination ist schon belegt oder wurde abgelehnt (Fehler \(status))."
         }

@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>companion</string>
+	<key>CFBundleDisplayName</key>
+	<string>companion</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright Skryx-L-A. PolyForm-Noncommercial-1.0.0</string>
+	<!-- Shown in the system prompt the first time the camera is asked for. The app explains
+	     the same thing on its own screen before that prompt appears; this is the one line
+	     the system shows, so it says what the camera does and for how long. -->
+	<key>NSCameraUsageDescription</key>
+	<string>Die Kamera liest beim Koppeln einmal den QR-Code deines Rechners. Sie läuft nur in diesem Schritt, und es wird nichts aufgenommen.</string>
+	<!-- Shown in the system prompt the first time the microphone is asked for. The app
+	     explains the same thing at more length on its own screen before that prompt appears;
+	     this is the one line the system shows, so it says when the microphone runs, where the
+	     recording goes and what does not happen. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Das Mikrofon nimmt auf, solange du die Sprechtaste hältst. Die Aufnahme geht verschlüsselt an deinen eigenen Rechner und wird dort erkannt; auf dem Handy bleibt nichts liegen. Kein Wakeword, kein Mithören im Hintergrund.</string>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+</dict>
+</plist>

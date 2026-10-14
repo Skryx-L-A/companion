@@ -53,6 +53,30 @@ pub struct Turn {
     pub text: String,
     /// The tools it wants run before it answers.
     pub tool_calls: Vec<ToolCall>,
+    /// What the endpoint said this call cost in tokens, where it said so at all.
+    ///
+    /// `DESIGN.md` § Verhalten, "Kosten": "API-Preise bei Schluessel-Endpoints." The price
+    /// comes from the table in the configuration directory, the token counts from here, and
+    /// a driver whose endpoint reports none leaves this empty — the cost is then unknown,
+    /// which is what the register and the day counter show.
+    pub usage: Option<TokenUsage>,
+    /// The model that answered, for the price lookup. Absent where the driver has no model
+    /// id to name — a CLI harness runs on somebody's subscription, and there is no per-token
+    /// price to apply to it at all.
+    pub model: Option<String>,
+}
+
+/// What one call to an endpoint consumed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+impl TokenUsage {
+    pub fn is_empty(&self) -> bool {
+        self.input_tokens == 0 && self.output_tokens == 0
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -66,9 +90,22 @@ pub enum DriverError {
     MissingKey { profile: String, key_ref: String },
     #[error("cannot read the key store: {0}")]
     Secrets(#[from] companion_core::SecretError),
-    #[error("profile {profile} is not reachable: {source}")]
+    /// A request that never produced an answer: no connection, a timeout, a body that broke
+    /// off.
+    ///
+    /// The `Display` deliberately does **not** print `source`, for the same reason
+    /// `companion_voice::VoiceError::Transport` does not: `reqwest::Error` appends
+    /// ` for url (…)` to its own text with the query string intact, and this error reaches
+    /// the client as the text of a `chat_error` event, so a provider that takes its key as
+    /// `?key=…` put that key on the wire on every failed request (audit 2026-09-03).
+    /// `reason` carries the same address shortened by
+    /// [`companion_protocol::without_credentials`]. The `#[source]` stays for whoever debugs
+    /// the daemon; it is only no longer part of the sentence that travels.
+    #[error("profile {profile} is not reachable at {reason}: {}", transport_detail(.source))]
     Transport {
         profile: String,
+        /// The endpoint address without userinfo, query or fragment.
+        reason: String,
         #[source]
         source: reqwest::Error,
     },
@@ -80,6 +117,13 @@ pub enum DriverError {
     },
     #[error("profile {profile} answered something this driver cannot read: {detail}")]
     Malformed { profile: String, detail: String },
+    /// The profile names a program this driver refuses to start at all: one with no
+    /// documented hardening recipe, or one whose own `args` would undo the recipe it has.
+    /// F1 of the review at `notizen/audit-2026-09-03/brain-voice.md` — a chat model that
+    /// cannot be started safely is a named failure of that endpoint, so the chain moves on
+    /// to the next profile, rather than a process started without the hardening.
+    #[error("profile {profile} is not started: {reason}")]
+    Refused { profile: String, reason: String },
     #[error("cannot run {program}: {source}")]
     Process {
         program: String,
@@ -88,6 +132,43 @@ pub enum DriverError {
     },
     #[error("{program} failed: {detail}")]
     ProgramFailed { program: String, detail: String },
+}
+
+impl DriverError {
+    /// A failed request, with the address shortened to the part that is safe to show.
+    ///
+    /// The one way to build [`Self::Transport`]: a call site that filled the fields itself
+    /// would be one `?` away from putting the raw url back into the message.
+    pub fn transport(profile: &str, url: &str, source: reqwest::Error) -> Self {
+        Self::Transport {
+            profile: profile.to_owned(),
+            reason: companion_protocol::without_credentials(url),
+            source,
+        }
+    }
+}
+
+/// What kind of failure a `reqwest::Error` is, in words that carry no url.
+///
+/// Every branch is a fixed string of this program, never the library's own text: a message
+/// that is assembled rather than quoted cannot grow a url in the next release of a
+/// dependency.
+fn transport_detail(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "the request timed out"
+    } else if error.is_connect() {
+        "no connection could be made"
+    } else if error.is_decode() {
+        "the answer could not be read"
+    } else if error.is_body() {
+        "the body broke off"
+    } else if error.is_redirect() {
+        "it redirected too often"
+    } else if error.is_request() {
+        "the request could not be sent"
+    } else {
+        "the request failed"
+    }
 }
 
 /// How much of a failed response body is quoted back. Enough to see what a server
@@ -150,13 +231,36 @@ pub(crate) async fn status_error(profile: &str, response: reqwest::Response) -> 
     DriverError::Status {
         profile: profile.to_owned(),
         status,
-        body,
+        body: companion_core::redact::secretish(&body),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_http_body_is_redacted_in_driver_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let body = "password=http-error-secret";
+            stream.write_all(format!("HTTP/1.1 500 Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap();
+        let error = status_error("test", response).await.to_string();
+        server.await.unwrap();
+        assert!(error.contains("[REDACTED]"));
+        assert!(!error.contains("http-error-secret"));
+    }
 
     #[test]
     fn a_protocol_that_cannot_chat_is_refused_instead_of_tried() {

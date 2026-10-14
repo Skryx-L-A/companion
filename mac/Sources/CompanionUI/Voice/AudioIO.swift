@@ -14,8 +14,10 @@ import Foundation
 public enum AudioFailure: Error, Equatable, Sendable {
     /// The person has not been asked yet.
     case permissionUndetermined
-    /// The person said no, or a profile forbids it. Only System Settings can undo that.
+    /// The person said no. Only System Settings can undo that.
     case permissionDenied
+    /// A configuration profile forbids the microphone. System Settings will not undo it.
+    case permissionRestricted
     /// The engine refused to start, with what it said.
     case engine(String)
     /// No input device at all.
@@ -28,35 +30,74 @@ public enum AudioFailure: Error, Equatable, Sendable {
     /// The audio did not match its own header.
     case brokenAudio(String)
 
+    /// True for the daemon's own way of saying that a role has no endpoint, in any of the
+    /// wordings its crates use for it.
+    static func isMissingRole(_ reason: String) -> Bool {
+        let lowered = reason.lowercased()
+        return lowered.contains("no endpoint") && lowered.contains("role")
+    }
+
     /// A sentence for the panel. Says what happened and what the person can do about it.
     public var message: String {
         switch self {
         case .permissionUndetermined:
-            return "Das Mikrofon ist noch nicht freigegeben. Beim naechsten Versuch fragt macOS danach."
+            return "Das Mikrofon ist noch nicht freigegeben. Beim nächsten Versuch fragt macOS danach."
         case .permissionDenied:
-            return "macOS laesst den Companion nicht ans Mikrofon. Das laesst sich nur in den Systemeinstellungen unter Datenschutz und Sicherheit, Mikrofon aendern."
+            return "Das Mikrofon ist nicht freigegeben – in den Systemeinstellungen unter Datenschutz freigeben."
+        case .permissionRestricted:
+            return "Das Mikrofon ist gesperrt: ein Systemprofil verbietet den Zugriff. Das lässt sich nur dort ändern, wo das Profil herkommt."
         case .engine(let reason):
-            return "Die Aufnahme liess sich nicht starten: \(reason)"
+            return "Die Aufnahme ließ sich nicht starten: \(reason)"
         case .noInputDevice:
             return "Es ist kein Mikrofon angeschlossen."
         case .daemonWithoutVoice(let reason):
-            // The daemon's own sentence, because it is the one that names the missing piece:
-            // usually a speech recognition endpoint that nobody has connected yet.
-            return "Sprache steht nicht zur Verfuegung: \(reason)"
+            // The daemon says this in English, in the words of its wire protocol — "no
+            // endpoint is configured for role stt". Appended verbatim it turned a German
+            // sentence into a line of developer English that names nothing a person can act
+            // on. Its one foreseeable case is said in German; anything else is still quoted,
+            // because a message nobody foresaw is worth more on screen than a guess.
+            return AudioFailure.isMissingRole(reason)
+                ? "Sprache steht nicht zur Verfügung: für Spracherkennung oder Sprachausgabe"
+                    + " ist kein Dienst eingetragen. Das geht in den Einstellungen unter"
+                    + " »Verbindung«."
+                : "Sprache steht nicht zur Verfügung: \(reason)"
         case .unplayableFormat(let name):
-            return "Die Antwort kam als \(name). Diese Shell spielt bisher nur WAV ab; ein anderer Endpoint laesst sich in den Einstellungen waehlen."
+            return "Die Antwort kam als \(name). Diese Oberfläche spielt bisher nur WAV ab; ein anderer Dienst für die Sprachausgabe lässt sich in den Einstellungen wählen."
         case .brokenAudio(let detail):
-            return "Der Ton liess sich nicht abspielen: \(detail)"
+            return "Der Ton ließ sich nicht abspielen: \(detail)"
         }
     }
 }
 
 /// What macOS says about the microphone.
+///
+/// The four cases are the four `AVAuthorizationStatus` values, kept apart rather than folded
+/// into three. `restricted` used to be read as `denied`, on the grounds that neither lets a
+/// recording through — but the two differ in what the person can do next, and the settings
+/// page was saying "nicht freigegeben" where the truthful answer is that a profile forbids it
+/// and System Settings will not help.
 public enum MicrophoneAuthorization: Sendable, Equatable {
     case granted
     case denied
+    /// A configuration profile forbids the microphone, for everything on this machine.
+    case restricted
     /// Nobody has been asked yet. Asking is what opens the system prompt.
     case undetermined
+}
+
+extension MicrophoneAuthorization {
+    /// Whether a recording started right now would be refused by macOS, with no dialog in
+    /// between that could still turn it around.
+    public var blocksRecording: Bool { self == .denied || self == .restricted }
+
+    /// The sentence for a refusal in this state. Nil while nothing is refused.
+    public var refusal: AudioFailure? {
+        switch self {
+        case .denied: return .permissionDenied
+        case .restricted: return .permissionRestricted
+        case .granted, .undetermined: return nil
+        }
+    }
 }
 
 /// Reads and asks for the microphone permission.
@@ -77,6 +118,15 @@ public protocol AudioCapturing: AnyObject {
     var onBuffer: ((Data) -> Void)? { get set }
     /// True when the echo canceller of the system is active, so barge-in is possible at all.
     var hasEchoCancellation: Bool { get }
+    /// The human-readable name of the device actually being heard, or nil while unknown.
+    ///
+    /// Named so a recording that comes back empty can say WHICH microphone heard nothing:
+    /// the system default is whatever connected last — a Bluetooth headset in a bag took
+    /// three real dictations before anybody knew where the words went (2026-08-27).
+    var inputName: String? { get }
+    /// Told when a recording moved to another microphone because the first one delivered
+    /// nothing: the dead name, then the new one. Nil listeners simply hear nothing.
+    var onDeviceFailover: ((String, String) -> Void)? { get set }
     func start() throws
     func stop()
 }

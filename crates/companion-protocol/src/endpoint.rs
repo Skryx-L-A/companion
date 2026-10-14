@@ -8,8 +8,8 @@ use crate::provenance::Provenance;
 /// What an endpoint is used for.
 ///
 /// The list is the one from `DESIGN.md` § Endpoints. A role points at a provider profile,
-/// and several roles may point at the same one: local, Peer and cloud are only different
-/// URLs.
+/// and several roles may point at the same one: local, a second machine on the network and
+/// cloud are only different URLs.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
@@ -17,7 +17,9 @@ use crate::provenance::Provenance;
 pub enum EndpointRole {
     /// The model the companion itself talks with.
     ChatLlm,
-    /// The model a spawned session runs on.
+    /// The companion's own helper model: the web research of `web_research` and the
+    /// shortening of long tool results. Not the model a spawned session runs on — that
+    /// stands in the order the session is started with.
     SubagentLlm,
     /// Speech to text.
     Stt,
@@ -90,27 +92,6 @@ impl EndpointProtocol {
     /// no key: it uses the subscription of whoever is logged in.
     pub fn is_cli(self) -> bool {
         matches!(self, Self::Cli)
-    }
-}
-
-/// Container format of one piece of audio on the wire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum AudioFormat {
-    /// RIFF/WAVE with little-endian PCM16 samples.
-    Wav,
-    /// Apple AIFF, which is what `say -o` writes.
-    Aiff,
-    Mp3,
-}
-
-impl AudioFormat {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Wav => "wav",
-            Self::Aiff => "aiff",
-            Self::Mp3 => "mp3",
-        }
     }
 }
 

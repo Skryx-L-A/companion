@@ -34,8 +34,8 @@ use companion_core::adapter::{
     AdapterError, AdapterEvent, AdapterResult, ReadChunk, ReadWindow, SessionAdapter, SpawnOptions,
 };
 use companion_protocol::{
-    AdapterCapabilities, AdapterId, CommandKind, EndReason, Event, EventKind, SendOutcome,
-    SessionId, SessionState, SessionStatus, StatusField,
+    AdapterCapabilities, AdapterId, CommandKind, EndReason, Event, EventKind, Provenance,
+    SendOutcome, SessionId, SessionState, SessionStatus, StatusField,
 };
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::broadcast;
@@ -161,6 +161,28 @@ impl PtyAdapter {
 
     pub fn config(&self) -> &PtyConfig {
         &self.inner.config
+    }
+
+    /// Ends every session this adapter started and waits for each of them.
+    ///
+    /// What a run starts, the run ends. Until this existed, an adapter that was switched off
+    /// in the settings — or rebuilt because its command changed — simply dropped its session
+    /// table, and the programs in it had nobody left who could address them. What reached
+    /// them was at best the SIGHUP that goes out when the terminal is closed, unverified and
+    /// useless against a program that ignores it.
+    ///
+    /// Each session takes the ordinary way out: SIGTERM, the grace period of this adapter,
+    /// then the hard kill. Failures are collected rather than thrown, because a session that
+    /// was already over must not stop the next one from being ended.
+    pub async fn shutdown(&self) -> Vec<String> {
+        let sessions: Vec<SessionId> = lock(&self.inner.sessions).keys().cloned().collect();
+        let mut trouble = Vec::new();
+        for session in sessions {
+            if let Err(error) = self.stop(&session).await {
+                trouble.push(format!("{session}: {error}"));
+            }
+        }
+        trouble
     }
 }
 
@@ -404,6 +426,9 @@ impl SessionAdapter for PtyAdapter {
         );
         status.project = Some(project.display().to_string());
         status.auftrag_id = options.auftrag_id;
+        // The terminal runs under this daemon, so the machine is one thing this adapter
+        // does know.
+        status.machine = Provenance::Measured("local".to_owned());
 
         let writer = Arc::new(Mutex::new(writer));
         lock(&self.inner.sessions).insert(

@@ -221,7 +221,7 @@ final class TestSocketServer: @unchecked Sendable {
                     lock.unlock()
                 }
                 let welcome = """
-                {"type":"welcome","protocol_version":1,"role":"human","daemon_version":"0.1.0",\
+                {"type":"welcome","protocol_version":2,"role":"human","daemon_version":"0.1.0",\
                 "run_id":"r","session_namespace":"c"}
 
                 """

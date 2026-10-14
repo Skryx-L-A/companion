@@ -18,9 +18,12 @@
 //! readable history, the context share, the model and the subscription budget come from
 //! the rollout file the CLI writes for the same thread ([`rollout`]). The budget is
 //! measured when the rollout carries a quota block with a number in it and unknown when it
-//! does not — which is the normal case on this machine, where `rate_limits.primary` was
-//! null in every August rollout. Iterations the adapter cannot report at all: the CLI has
-//! no such counter.
+//! does not, and which of the two happens is not a property of this adapter: read across
+//! the rollouts on this machine (2026-08-25, seven files), the three written while the
+//! account was on the `codex` plan carry `rate_limits.primary` with `used_percent` and
+//! `resets_at`, and the ones written after it moved to `premium` carry `primary: null`.
+//! So the unknown is what a `premium` account reports, not what the format cannot say.
+//! Iterations the adapter cannot report at all: the CLI has no such counter.
 
 pub mod rollout;
 mod stream;
@@ -31,12 +34,13 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use companion_core::adapter::{
     AdapterError, AdapterEvent, AdapterResult, ReadChunk, ReadWindow, SessionAdapter, SpawnOptions,
 };
+use companion_core::jsonl_history::JsonlHistory;
 use companion_protocol::{
     AdapterCapabilities, AdapterId, BudgetUsage, CommandKind, ContextUsage, EndReason, Event,
     EventKind, Provenance, SendOutcome, SessionId, SessionState, SessionStatus, StatusField,
@@ -54,6 +58,20 @@ pub const ADAPTER_ID: &str = "codex";
 /// Context window used where no rollout names one. Only ever the denominator of an
 /// `estimated` context share; a rollout that names the window makes it `measured`.
 pub const DEFAULT_CONTEXT_WINDOW: u64 = 258_400;
+
+/// How long a failed search for a session's rollout stands before it is tried again.
+///
+/// `rollout::find` walks the whole sessions tree, which is cheap once but not something to
+/// repeat on every `read` and every turn end for a run that never gets one — an `--ephemeral`
+/// run, or a build that names its file differently. The miss is cached for this long instead.
+const ROLLOUT_PROBE_RETRY: Duration = Duration::from_secs(5);
+
+/// How far back a rollout can be and still come back as a session after a daemon restart.
+///
+/// Generous enough for a work session that outlives a restart, without listing every thread
+/// codex has ever run on this machine: `DESIGN.md` § Daemon-Lebenslauf asks for known threads
+/// to reattach, not for the whole archive to resurface as sessions.
+const REATTACH_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Where the CLI lives and where it keeps its threads.
 #[derive(Debug, Clone)]
@@ -107,6 +125,10 @@ struct Running {
     status: SessionStatus,
     project: PathBuf,
     rollout: Option<PathBuf>,
+    /// When the rollout was last searched for and not found, so the search is not repeated
+    /// on every call before [`ROLLOUT_PROBE_RETRY`] has passed. `None` means either the
+    /// rollout is already known, or it has never been looked for yet.
+    rollout_probe: Option<Instant>,
     /// The process of the turn that is running right now, if one is.
     turn: Option<Child>,
     /// Whether a turn is under way at all — which is a moment longer than `turn` is set.
@@ -123,6 +145,10 @@ struct Inner {
     config: CodexConfig,
     events: broadcast::Sender<AdapterEvent>,
     sessions: Mutex<HashMap<SessionId, Running>>,
+    /// Reads a rollout in bounded windows and remembers the last one, so a `read` of an
+    /// unbounded, ever-growing file costs the same regardless of how long the session has
+    /// been running. See `companion_core::jsonl_history`.
+    history: JsonlHistory,
 }
 
 impl Inner {
@@ -159,25 +185,63 @@ impl Inner {
             .env("CODEX_HOME", &self.config.codex_home)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // Captured rather than discarded: a run that fails before printing a single
+            // JSON line — a login error, a missing sandbox binary — otherwise leaves
+            // nothing behind but "the run ended before it said anything".
+            .stderr(Stdio::piped())
             // No orphaned CLI outlives the adapter that started it.
             .kill_on_drop(true);
         command
     }
 
-    /// Re-reads the rollout of a session and returns what it says.
-    async fn refresh_rollout(&self, session: &SessionId) -> rollout::RolloutSummary {
-        let path = {
-            let mut sessions = self.sessions.lock().await;
-            let Some(running) = sessions.get_mut(session) else {
-                return rollout::RolloutSummary::default();
-            };
-            if running.rollout.is_none() {
-                running.rollout = rollout::find(&self.config.sessions_dir(), session.as_str());
+    /// Finds the rollout of a session, without walking the sessions tree while the sessions
+    /// lock is held: the search runs in [`tokio::task::spawn_blocking`], on its own thread,
+    /// with the lock only taken briefly before and after it.
+    ///
+    /// A miss is cached: a run that has not written its rollout yet, or never will, would
+    /// otherwise repeat the whole walk on every `read` and every turn end.
+    async fn resolve_rollout(&self, session: &SessionId) -> Option<PathBuf> {
+        let retry_due = {
+            let sessions = self.sessions.lock().await;
+            let running = sessions.get(session)?;
+            if let Some(path) = &running.rollout {
+                return Some(path.clone());
             }
-            running.rollout.clone()
+            match running.rollout_probe {
+                Some(last) => last.elapsed() >= ROLLOUT_PROBE_RETRY,
+                None => true,
+            }
         };
-        path.as_deref().map(rollout::summarise).unwrap_or_default()
+        if !retry_due {
+            return None;
+        }
+
+        let sessions_dir = self.config.sessions_dir();
+        let id = session.as_str().to_owned();
+        let found = tokio::task::spawn_blocking(move || rollout::find(&sessions_dir, &id))
+            .await
+            .unwrap_or_default();
+
+        let mut sessions = self.sessions.lock().await;
+        if let Some(running) = sessions.get_mut(session) {
+            match &found {
+                Some(path) => running.rollout = Some(path.clone()),
+                None => running.rollout_probe = Some(Instant::now()),
+            }
+        }
+        found
+    }
+
+    /// Re-reads the rollout of a session and returns what it says.
+    ///
+    /// Called directly rather than through `spawn_blocking`: `rollout::summarise` only ever
+    /// reads [`companion_core::jsonl_history::DEFAULT_MAX_BYTES`] of the file now, the same
+    /// bound `companion-adapter-claude` accepts inline for its own transcript.
+    async fn refresh_rollout(&self, session: &SessionId) -> rollout::RolloutSummary {
+        let Some(path) = self.resolve_rollout(session).await else {
+            return rollout::RolloutSummary::default();
+        };
+        rollout::summarise(&path)
     }
 }
 
@@ -197,20 +261,169 @@ impl std::fmt::Debug for CodexAdapter {
 }
 
 impl CodexAdapter {
+    /// Builds the adapter and starts reattaching known threads from disk in the background.
+    ///
+    /// `DESIGN.md` § Daemon-Lebenslauf asks a restarted daemon to heft itself back onto its
+    /// running sessions rather than let them go silently. A codex thread already carries
+    /// everything needed for that on disk — its own rollout, self-identifying by session id —
+    /// so this adapter needs no extra bookkeeping file the way one without a rollout would:
+    /// [`Self::config`]'s `sessions_dir()` is searched once, here, and every rollout recent
+    /// enough to plausibly still matter is reported as a session, read-only, in whatever state
+    /// its rollout last named. Sending to one of them resumes it exactly the way sending to
+    /// any other session of this adapter does: `codex exec resume <id>`.
+    ///
+    /// This is deliberately best-effort and asynchronous rather than a blocking part of
+    /// construction: the scan walks a directory tree and reads a handful of files, `new` has
+    /// no async form to do that in, and a session list a few milliseconds out of date at
+    /// startup is a smaller cost than blocking whoever constructs this adapter on disk I/O.
     pub fn new(config: CodexConfig) -> Self {
         let (events, _) = broadcast::channel(256);
-        Self {
-            inner: Arc::new(Inner {
-                id: AdapterId::new(ADAPTER_ID),
-                config,
-                events,
-                sessions: Mutex::new(HashMap::new()),
-            }),
-        }
+        let inner = Arc::new(Inner {
+            id: AdapterId::new(ADAPTER_ID),
+            config,
+            events,
+            sessions: Mutex::new(HashMap::new()),
+            history: JsonlHistory::new(rollout::render_line),
+        });
+        tokio::spawn(reattach(Arc::clone(&inner)));
+        Self { inner }
     }
 
     pub fn config(&self) -> &CodexConfig {
         &self.inner.config
+    }
+}
+
+/// Scans `sessions_dir()` for rollouts a restart left behind and reports the recent ones as
+/// sessions. See [`CodexAdapter::new`] for the reasoning; [`REATTACH_WINDOW`] for the cutoff.
+///
+/// Every rollout found this way reports [`SessionState::Idle`]: there is no process handle to
+/// say a turn is still running, and a daemon restart — the only reason this runs at all — is
+/// exactly the case where whatever CLI process the rollout belonged to is gone with it, killed
+/// by `kill_on_drop` when the old daemon's `Child` handles were dropped. A daemon that instead
+/// crashed outright (a `SIGKILL`, no `Drop` ever runs) could in principle leave an orphaned
+/// `codex exec` still writing the same rollout an adopted session would then also resume into
+/// — narrower than the common restart path, and only a live run under a real crash settles it.
+async fn reattach(inner: Arc<Inner>) {
+    let sessions_dir = inner.config.sessions_dir();
+    let discovered = tokio::task::spawn_blocking(move || {
+        rollout::recent(&sessions_dir, REATTACH_WINDOW)
+            .into_iter()
+            .map(|(path, meta)| {
+                let summary = rollout::summarise(&path);
+                (meta.session_id, meta.cwd, path, summary)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+
+    if discovered.is_empty() {
+        return;
+    }
+
+    let default_window = inner.config.context_window;
+    let mut sessions = inner.sessions.lock().await;
+    for (session_id, cwd, path, summary) in discovered {
+        let session_id = SessionId::new(session_id);
+        if sessions.contains_key(&session_id) {
+            // Already reattached, or already spawned again in the meantime — either way
+            // this scan has nothing to add.
+            continue;
+        }
+        let Some(cwd) = cwd else {
+            // No working directory to resume it in and no session to reattach it to
+            // either: `session_meta` without a `cwd` is not a shape a real CLI writes.
+            debug!(session = %session_id, "a rollout without a cwd cannot be reattached");
+            continue;
+        };
+
+        let mut status =
+            SessionStatus::new(session_id.clone(), inner.id.clone(), SessionState::Idle);
+        status.project = Some(cwd.clone());
+        status.context =
+            context_from_rollout(summary.used_tokens, summary.context_window, default_window);
+        status.budget = budget_from_rollout(&summary.budget);
+        if let Some(model) = summary.model {
+            status.model = Provenance::Measured(model);
+        }
+        status.last_output = summary.last_output;
+
+        sessions.insert(
+            session_id,
+            Running {
+                status,
+                project: PathBuf::from(cwd),
+                rollout: Some(path),
+                rollout_probe: None,
+                turn: None,
+                turn_active: false,
+                queued: VecDeque::new(),
+            },
+        );
+    }
+    debug!(
+        count = sessions.len(),
+        "reattached codex sessions from disk"
+    );
+}
+
+/// Captures a turn's stderr as it arrives, so a run that ends badly can say what the CLI
+/// itself printed instead of only "the run ended before it said anything". `Stdio::null()`
+/// used to throw this text away.
+#[derive(Clone, Default)]
+struct StderrCapture(Arc<Mutex<String>>);
+
+impl StderrCapture {
+    /// Starts reading a child's stderr in the background. A child with no stderr pipe — not
+    /// something [`Inner::turn_command`] ever builds, but a caller in tests might — captures
+    /// nothing rather than panicking.
+    fn spawn(stderr: Option<tokio::process::ChildStderr>) -> Self {
+        let capture = Self::default();
+        let Some(stderr) = stderr else {
+            return capture;
+        };
+        let handle = capture.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let mut text = handle.0.lock().await;
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&line);
+            }
+        });
+        capture
+    }
+
+    /// What was captured so far, or `None` while the CLI has said nothing on stderr.
+    async fn snapshot(&self) -> Option<String> {
+        let text = self.0.lock().await;
+        (!text.is_empty()).then(|| text.clone())
+    }
+}
+
+/// A trailing detail for an error message: what stderr held, an I/O error on stdout, or
+/// nothing when the run simply closed its output cleanly.
+async fn failure_detail(stderr: &StderrCapture, io_error: Option<&std::io::Error>) -> String {
+    let mut parts = Vec::new();
+    if let Some(error) = io_error {
+        parts.push(format!("reading its output failed: {error}"));
+    }
+    if let Some(text) = stderr.snapshot().await {
+        parts.push(format!("stderr: {text}"));
+    }
+    parts.join("; ")
+}
+
+/// Appends a [`failure_detail`] to a message, when there is one to append.
+fn with_detail(message: impl Into<String>, detail: &str) -> String {
+    let message = message.into();
+    if detail.is_empty() {
+        message
+    } else {
+        format!("{message} ({detail})")
     }
 }
 
@@ -250,12 +463,13 @@ fn run_turn(
             let stdout = child.stdout.take().ok_or_else(|| {
                 AdapterError::Backend("the turn has no output channel".to_owned())
             })?;
-            Ok::<_, AdapterError>((child, stdout))
+            let stderr = StderrCapture::spawn(child.stderr.take());
+            Ok::<_, AdapterError>((child, stdout, stderr))
         }
         .await;
 
-        let (mut child, stdout) = match started {
-            Ok(pair) => pair,
+        let (mut child, stdout, stderr) = match started {
+            Ok(triple) => triple,
             Err(error) => {
                 // Nothing is running, so the next message must not wait for it. Whatever
                 // was queued behind this turn goes with it: it was meant for a turn that
@@ -288,7 +502,7 @@ fn run_turn(
             running.status.state = SessionState::Busy;
         }
         inner.emit(&session, Event::Busy);
-        tokio::spawn(pump(inner, Some(session), stdout, None, None));
+        tokio::spawn(pump(inner, Some(session), stdout, stderr, None, None));
         Ok(())
     })
 }
@@ -305,6 +519,7 @@ async fn pump(
     inner: Arc<Inner>,
     known: Option<SessionId>,
     stdout: tokio::process::ChildStdout,
+    stderr: StderrCapture,
     started: Option<oneshot::Sender<Result<SessionId, String>>>,
     registered: Option<oneshot::Receiver<()>>,
 ) {
@@ -314,8 +529,19 @@ async fn pump(
     let mut session = known;
     let mut completed = false;
     let mut failed = false;
+    let mut io_error = None;
 
-    while let Ok(Some(line)) = lines.next_line().await {
+    loop {
+        let line = match lines.next_line().await {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            // Treated apart from a clean end: an I/O error on stdout is not the CLI saying
+            // it is done, and swallowing it silently was indistinguishable from one.
+            Err(error) => {
+                io_error = Some(error);
+                break;
+            }
+        };
         match stream::parse(&line) {
             StreamItem::Started { thread_id } => {
                 // A resume run names the same thread again; only the first run learns
@@ -342,6 +568,11 @@ async fn pump(
                     let mut sessions = inner.sessions.lock().await;
                     if let Some(running) = sessions.get_mut(&id) {
                         running.status.state = SessionState::Busy;
+                        // Cleared here rather than only ever set: a turn that says
+                        // nothing out loud — a tool-only one — must not leave a
+                        // previous turn's answer sitting there to be reported as this
+                        // one's in `finish_turn`.
+                        running.status.last_output = None;
                     }
                 }
                 inner.emit(&id, Event::Busy);
@@ -386,7 +617,11 @@ async fn pump(
     // on disk and the next `send` resumes it.
     let Some(id) = session else {
         if let Some(sender) = started.take() {
-            let _ = sender.send(Err("the run ended before it named a thread".to_owned()));
+            let detail = failure_detail(&stderr, io_error.as_ref()).await;
+            let _ = sender.send(Err(with_detail(
+                "the run ended before it named a thread",
+                &detail,
+            )));
         }
         return;
     };
@@ -421,10 +656,11 @@ async fn pump(
                 running.status.state = SessionState::Error;
             }
         }
+        let detail = failure_detail(&stderr, io_error.as_ref()).await;
         inner.emit(
             &id,
             Event::Error {
-                message: "the run ended before the turn finished".to_owned(),
+                message: with_detail("the run ended before the turn finished", &detail),
             },
         );
         return;
@@ -434,36 +670,71 @@ async fn pump(
     }
 }
 
-/// Everything a finished turn is worth: the status it leaves behind and the three events
-/// that carry it.
-async fn finish_turn(inner: &Arc<Inner>, session: &SessionId, usage: Option<Usage>) {
-    let summary = inner.refresh_rollout(session).await;
-
-    // Both numbers out of the rollout is a measurement; the stream's own token count
-    // divided by an assumed window is an estimate. Neither there means unknown.
-    let context = match (summary.used_tokens, summary.context_window) {
+/// The context share out of what the rollout measured, before anything a live stream might
+/// still know is considered.
+///
+/// A rollout that counted the tokens but never named a window — a plan or a build that
+/// reports no context window, see the module doc — still divides by the configured default
+/// rather than reporting `unknown`: a real count against an assumed window is more honest
+/// than discarding a real measurement. Clamped either way, because the count in a rollout can
+/// exceed its own named window (caching accounting on this CLI does not always net to the
+/// window it reports), and a share over 100% is a rendering artefact, not a fact worth
+/// carrying into a progress bar.
+fn context_from_rollout(
+    used_tokens: Option<u64>,
+    context_window: Option<u64>,
+    default_window: u64,
+) -> Provenance<ContextUsage> {
+    match (used_tokens, context_window) {
         (Some(used), Some(window)) if window > 0 => Provenance::Measured(ContextUsage {
-            used_fraction: used as f64 / window as f64,
+            used_fraction: (used as f64 / window as f64).clamp(0.0, 1.0),
             used_tokens: Some(used),
         }),
-        _ => match usage
-            .map(|usage| usage.window_tokens())
-            .filter(|used| *used > 0)
-        {
-            Some(used) => Provenance::Estimated(ContextUsage {
-                used_fraction: used as f64 / inner.config.context_window.max(1) as f64,
-                used_tokens: Some(used),
-            }),
-            None => Provenance::Unknown,
-        },
-    };
-    let budget = match summary.budget {
+        (Some(used), _) => Provenance::Estimated(ContextUsage {
+            used_fraction: (used as f64 / default_window.max(1) as f64).clamp(0.0, 1.0),
+            used_tokens: Some(used),
+        }),
+        (None, _) => Provenance::Unknown,
+    }
+}
+
+/// The subscription budget out of what the rollout's quota block measured.
+fn budget_from_rollout(budget: &Option<rollout::Budget>) -> Provenance<BudgetUsage> {
+    match budget {
         Some(budget) => Provenance::Measured(BudgetUsage {
             used_fraction: budget.used_fraction,
             resets_at_ms: budget.resets_at_seconds.map(|seconds| seconds * 1000),
         }),
         None => Provenance::Unknown,
+    }
+}
+
+/// Everything a finished turn is worth: the status it leaves behind and the three events
+/// that carry it.
+async fn finish_turn(inner: &Arc<Inner>, session: &SessionId, usage: Option<Usage>) {
+    let summary = inner.refresh_rollout(session).await;
+
+    // The rollout is tried first; the stream's own token count divided by an assumed window
+    // is the fallback for the one case the rollout cannot cover — no rollout numbers at all.
+    let context = match context_from_rollout(
+        summary.used_tokens,
+        summary.context_window,
+        inner.config.context_window,
+    ) {
+        Provenance::Unknown => match usage
+            .map(|usage| usage.window_tokens())
+            .filter(|used| *used > 0)
+        {
+            Some(used) => Provenance::Estimated(ContextUsage {
+                used_fraction: (used as f64 / inner.config.context_window.max(1) as f64)
+                    .clamp(0.0, 1.0),
+                used_tokens: Some(used),
+            }),
+            None => Provenance::Unknown,
+        },
+        known => known,
     };
+    let budget = budget_from_rollout(&summary.budget);
 
     let last_output = {
         let mut sessions = inner.sessions.lock().await;
@@ -478,11 +749,11 @@ async fn finish_turn(inner: &Arc<Inner>, session: &SessionId, usage: Option<Usag
                 if let Some(model) = summary.model {
                     running.status.model = Provenance::Measured(model);
                 }
-                // The stream said it first; the rollout is the fallback for a build whose
-                // item field this parser did not recognise.
-                if running.status.last_output.is_none() {
-                    running.status.last_output = summary.last_output.clone();
-                }
+                // `TurnStarted` clears this and every `agent_message` on the stream sets
+                // it again, so what is here now is this turn's own answer or nothing at
+                // all — never a fallback to the rollout's `last_output`, which is the
+                // *last* agent_message anywhere in the whole file and would silently
+                // repeat a previous turn's answer for a tool-only one.
                 running.status.last_output.clone()
             }
         }
@@ -561,7 +832,20 @@ impl SessionAdapter for CodexAdapter {
             .lock()
             .await
             .values()
-            .map(|running| running.status.clone())
+            .map(|running| {
+                let mut status = running.status.clone();
+                // The rollout is this adapter's transcript: the file the CLI writes the whole
+                // thread into, and the only place a reader of this session can go. It is set
+                // here rather than where the session is built because it is found lazily —
+                // a run that has not written its rollout yet gets one on a later `list`.
+                if let Some(rollout) = &running.rollout {
+                    status.transcript_path = Some(rollout.display().to_string());
+                    // And its mtime is the last moment the session demonstrably did
+                    // something: the CLI appends a line per step.
+                    status.last_activity_ms = companion_core::adapter::last_activity_of(rollout);
+                }
+                status
+            })
             .collect())
     }
 
@@ -603,6 +887,7 @@ impl SessionAdapter for CodexAdapter {
             .stdout
             .take()
             .ok_or_else(|| AdapterError::Backend("the run has no output channel".to_owned()))?;
+        let stderr = StderrCapture::spawn(child.stderr.take());
 
         let (started_tx, started_rx) = oneshot::channel();
         let (registered_tx, registered_rx) = oneshot::channel();
@@ -610,6 +895,7 @@ impl SessionAdapter for CodexAdapter {
             Arc::clone(&self.inner),
             None,
             stdout,
+            stderr,
             Some(started_tx),
             Some(registered_rx),
         ));
@@ -642,13 +928,21 @@ impl SessionAdapter for CodexAdapter {
         );
         status.project = Some(project.display().to_string());
         status.auftrag_id = options.auftrag_id;
+        // This adapter starts the process itself, so where it runs is a fact.
+        status.machine = Provenance::Measured("local".to_owned());
         if let Some(model) = options.model {
             // What was asked for, not yet what is running: the rollout confirms it a
             // moment later and lifts this to measured.
             status.model = Provenance::Estimated(model);
         }
 
-        let rollout = rollout::find(&self.inner.config.sessions_dir(), session_id.as_str());
+        let sessions_dir = self.inner.config.sessions_dir();
+        let id_for_search = session_id.as_str().to_owned();
+        let rollout =
+            tokio::task::spawn_blocking(move || rollout::find(&sessions_dir, &id_for_search))
+                .await
+                .unwrap_or_default();
+        let rollout_probe = rollout.is_none().then(Instant::now);
 
         self.inner.sessions.lock().await.insert(
             session_id.clone(),
@@ -656,6 +950,7 @@ impl SessionAdapter for CodexAdapter {
                 status: status.clone(),
                 project,
                 rollout,
+                rollout_probe,
                 turn: Some(child),
                 turn_active: true,
                 queued: VecDeque::new(),
@@ -700,43 +995,20 @@ impl SessionAdapter for CodexAdapter {
     }
 
     async fn read(&self, session: &SessionId, window: ReadWindow) -> AdapterResult<ReadChunk> {
-        let path = {
-            let mut sessions = self.inner.sessions.lock().await;
-            let running = sessions
-                .get_mut(session)
-                .ok_or_else(|| AdapterError::UnknownSession(session.clone()))?;
-            if running.rollout.is_none() {
-                running.rollout =
-                    rollout::find(&self.inner.config.sessions_dir(), session.as_str());
-            }
-            running.rollout.clone()
-        };
+        if !self.inner.sessions.lock().await.contains_key(session) {
+            return Err(AdapterError::UnknownSession(session.clone()));
+        }
 
-        let Some(path) = path else {
+        let Some(path) = self.inner.resolve_rollout(session).await else {
             return Err(AdapterError::Backend(
                 "the session has not written a rollout yet".to_owned(),
             ));
         };
 
-        // The rollout only grows, so an offset into the rendered text stays valid.
-        let text = rollout::render(&path);
-        let slice = match window {
-            ReadWindow::Tail { lines } => {
-                let all: Vec<&str> = text.lines().collect();
-                let start = all.len().saturating_sub(lines as usize);
-                let mut slice = all[start..].join("\n");
-                if !slice.is_empty() {
-                    slice.push('\n');
-                }
-                slice
-            }
-            ReadWindow::FromOffset { offset } => slice_from(&text, offset),
-        };
-
-        Ok(ReadChunk {
-            next_offset: text.len() as u64,
-            text: slice,
-        })
+        // The offset is a position in the rollout file, not in the rendering of it, so the
+        // reader hands back what it got and this seeks there instead of rendering
+        // everything again. Bounded by construction — see `companion_core::jsonl_history`.
+        Ok(self.inner.history.read(&path, window)?)
     }
 
     async fn interrupt(&self, session: &SessionId) -> AdapterResult<()> {
@@ -779,31 +1051,9 @@ impl SessionAdapter for CodexAdapter {
     }
 }
 
-/// Everything from a byte offset, rounded down to the nearest character boundary.
-///
-/// An offset that lands inside a multi-byte character would otherwise yield an empty
-/// string while `next_offset` still pointed at the end, so the reader would believe it was
-/// up to date and the text in between would be gone. Rounding down repeats a few bytes at
-/// worst.
-pub(crate) fn slice_from(text: &str, offset: u64) -> String {
-    let mut start = (offset as usize).min(text.len());
-    while start > 0 && !text.is_char_boundary(start) {
-        start -= 1;
-    }
-    text[start..].to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn an_offset_inside_a_character_rounds_down_instead_of_losing_the_text() {
-        let text = "abc\u{e4}\u{f6}\u{fc}def";
-        assert_eq!(slice_from(text, 4), "\u{e4}\u{f6}\u{fc}def");
-        assert_eq!(slice_from(text, 0), text);
-        assert_eq!(slice_from(text, 9_999), "");
-    }
 
     #[test]
     fn the_sessions_directory_hangs_under_the_codex_home() {
@@ -837,5 +1087,63 @@ mod tests {
             .await
             .expect_err("nothing to say means nothing to start");
         assert!(matches!(error, AdapterError::Backend(message) if message.contains("prompt")));
+    }
+    /// The rollout is this adapter's transcript and its clock: `list` has to name the file a
+    /// reader of the session can go to, and date the session by the last line the CLI wrote
+    /// into it. Both were missing — a Codex session arrived without a transcript path at all,
+    /// and undated it would fall out of a listing's finished tail in favour of older ones.
+    #[tokio::test]
+    async fn a_listed_session_names_its_rollout_and_is_dated_by_it() {
+        let home = std::env::temp_dir().join(format!("codex-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("the temp directory is writable");
+        let rollout = home.join("rollout-2026-09-03.jsonl");
+        std::fs::write(&rollout, "{}\n").expect("the rollout is written");
+
+        let adapter = CodexAdapter::new(CodexConfig::for_home(&home));
+        let id = SessionId::new("thread-1");
+        adapter.inner.sessions.lock().await.insert(
+            id.clone(),
+            Running {
+                status: SessionStatus::new(
+                    id.clone(),
+                    adapter.inner.id.clone(),
+                    SessionState::Idle,
+                ),
+                project: PathBuf::from("/tmp"),
+                rollout: Some(rollout.clone()),
+                rollout_probe: None,
+                turn: None,
+                turn_active: false,
+                queued: VecDeque::new(),
+            },
+        );
+
+        let listed = adapter.list().await.expect("the adapter lists");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].transcript_path.as_deref(),
+            Some(rollout.display().to_string().as_str())
+        );
+        let dated = listed[0]
+            .last_activity_ms
+            .expect("a rollout that exists has an mtime");
+        assert!(dated > 1_700_000_000_000, "{dated} is not a unix ms stamp");
+
+        // A session whose rollout has not been found yet says nothing rather than something
+        // plausible: there is no file to read either answer off.
+        adapter
+            .inner
+            .sessions
+            .lock()
+            .await
+            .get_mut(&id)
+            .expect("still there")
+            .rollout = None;
+        let listed = adapter.list().await.expect("the adapter lists");
+        assert_eq!(listed[0].transcript_path, None);
+        assert_eq!(listed[0].last_activity_ms, None);
+
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

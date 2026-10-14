@@ -6,9 +6,16 @@
 //! `~/.claude/projects/<slug of the working directory>/<session id>.jsonl`. The adapter
 //! uses it for two things: the text a person wants to read back, and an estimate of how
 //! full the context window is. Both are read-only; nothing here writes to the transcript.
+//!
+//! Neither read pulls in the whole file. The address comes from
+//! [`companion_core::claude_projects`], which both Claude-reading adapters share, and the
+//! reading itself from [`companion_core::jsonl_history`], which seeks to the end of the file
+//! instead of starting at its beginning: the largest transcript on this machine is 78 MB and
+//! a window of forty turns has no business touching all of it.
 
 use std::path::{Path, PathBuf};
 
+use companion_core::jsonl_history;
 use serde::Deserialize;
 
 /// Default size of the context window, used where the transcript does not name one.
@@ -19,12 +26,11 @@ pub const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
 
 /// The directory name Claude Code derives from a working directory: every character that
 /// is not a letter or a digit becomes a dash.
+///
+/// The rule lives in `companion-core` because the workbench adapter needs the same one; this
+/// is the name it has always had here.
 pub fn slug_for(project: &Path) -> String {
-    project
-        .to_string_lossy()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
+    companion_core::claude_projects::slug_for(&project.to_string_lossy())
 }
 
 /// Finds the transcript of a session.
@@ -32,19 +38,11 @@ pub fn slug_for(project: &Path) -> String {
 /// The derived directory is tried first, then a scan, because the slug rule is Claude
 /// Code's business and a scan cannot go stale.
 pub fn find(projects_dir: &Path, project: &Path, session_id: &str) -> Option<PathBuf> {
-    let file = format!("{session_id}.jsonl");
-    let derived = projects_dir.join(slug_for(project)).join(&file);
-    if derived.is_file() {
-        return Some(derived);
-    }
-
-    for entry in std::fs::read_dir(projects_dir).ok()?.flatten() {
-        let candidate = entry.path().join(&file);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    companion_core::claude_projects::find_transcript(
+        projects_dir,
+        &project.to_string_lossy(),
+        session_id,
+    )
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -90,15 +88,24 @@ pub struct TranscriptSummary {
     pub last_output: Option<String>,
 }
 
-/// Reads the transcript and reports what it can. A line that does not parse is skipped:
-/// the file is written while it is read, so the last line is regularly half there.
+/// Reads the end of the transcript and reports what it can. A line that does not parse is
+/// skipped: the file is written while it is read, so the last line is regularly half there.
+///
+/// Only the end is read, and that is enough for every field here: each of them takes the
+/// newest value it finds. Where a session's last half megabyte holds no assistant turn at
+/// all — one enormous tool result, say — the summary is empty rather than stale, which is
+/// the honest of the two answers.
 pub fn summarise(path: &Path) -> TranscriptSummary {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Ok(chunk) = jsonl_history::read_chunk(
+        path,
+        companion_core::adapter::ReadWindow::Tail { lines: u32::MAX },
+        jsonl_history::DEFAULT_MAX_BYTES,
+    ) else {
         return TranscriptSummary::default();
     };
 
     let mut summary = TranscriptSummary::default();
-    for line in text.lines() {
+    for line in chunk.text.lines() {
         let Ok(parsed) = serde_json::from_str::<Line>(line) else {
             continue;
         };
@@ -123,33 +130,19 @@ pub fn summarise(path: &Path) -> TranscriptSummary {
     summary
 }
 
-/// The transcript rendered as readable text: who said what, without tool payloads.
-pub fn render(path: &Path) -> String {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return String::new();
-    };
-
-    let mut out = String::new();
-    for line in text.lines() {
-        let Ok(parsed) = serde_json::from_str::<Line>(line) else {
-            continue;
-        };
-        let Some(message) = parsed.message else {
-            continue;
-        };
-        let Some(text) = message.content.as_ref().and_then(content_text) else {
-            continue;
-        };
-        if text.trim().is_empty() {
-            continue;
-        }
-        let role = message.role.as_deref().unwrap_or("unknown");
-        out.push_str(role);
-        out.push_str(": ");
-        out.push_str(text.trim());
-        out.push('\n');
+/// One line of the transcript as readable text: who said what, without tool payloads.
+///
+/// This is the renderer the adapter hands to [`jsonl_history::JsonlHistory`]; a line that
+/// carries no conversation answers `None` and never reaches the reader.
+pub fn render_line(line: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<Line>(line).ok()?;
+    let message = parsed.message?;
+    let text = message.content.as_ref().and_then(content_text)?;
+    if text.trim().is_empty() {
+        return None;
     }
-    out
+    let role = message.role.as_deref().unwrap_or("unknown");
+    Some(format!("{role}: {}", text.trim()))
 }
 
 /// Pulls the plain text out of a message content field, which is either a string or a list
@@ -186,8 +179,8 @@ mod tests {
     #[test]
     fn the_slug_matches_what_claude_code_writes() {
         assert_eq!(
-            slug_for(Path::new("/Users/me/.claude/skills/agent-reach")),
-            "-Users-me--claude-skills-agent-reach"
+            slug_for(Path::new("/Users/example/.claude/skills/agent-reach")),
+            "-Users-example--claude-skills-agent-reach"
         );
         assert_eq!(
             slug_for(Path::new("/private/tmp/companion-cli-probe")),
@@ -214,18 +207,51 @@ mod tests {
     fn a_missing_transcript_says_nothing_instead_of_zero() {
         let summary = summarise(Path::new("/nowhere/session.jsonl"));
         assert_eq!(summary.used_tokens, None);
-        assert!(render(Path::new("/nowhere/session.jsonl")).is_empty());
     }
 
     #[test]
     fn rendering_keeps_the_conversation_and_drops_the_tool_noise() {
-        let path = temp_file(
-            "render",
-            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"say ok\"}}\n\
-             {\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"hmm\"},{\"type\":\"text\",\"text\":\"ok\"}]}}\n\
-             {\"type\":\"attachment\",\"content\":\"irrelevant\"}\n",
+        assert_eq!(
+            render_line(
+                "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"say ok\"}}"
+            )
+            .as_deref(),
+            Some("user: say ok")
+        );
+        assert_eq!(
+            render_line(
+                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"hmm\"},{\"type\":\"text\",\"text\":\"ok\"}]}}"
+            )
+            .as_deref(),
+            Some("assistant: ok")
+        );
+        assert_eq!(
+            render_line("{\"type\":\"attachment\",\"content\":\"irrelevant\"}"),
+            None
+        );
+        assert_eq!(render_line("not even JSON"), None);
+    }
+
+    #[test]
+    fn a_transcript_far_past_the_budget_is_still_read_from_its_end() {
+        let mut contents = String::new();
+        for index in 0..40_000 {
+            contents.push_str(&format!(
+                "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"usage\":{{\"input_tokens\":{index}}},\"content\":[{{\"type\":\"text\",\"text\":\"turn {index}\"}}]}}}}\n"
+            ));
+        }
+        let path = temp_file("bounded", &contents);
+        assert!(
+            std::fs::metadata(&path).unwrap().len() > jsonl_history::DEFAULT_MAX_BYTES,
+            "the fixture has to be larger than the budget for this to prove anything"
         );
 
-        assert_eq!(render(&path), "user: say ok\nassistant: ok\n");
+        let summary = summarise(&path);
+        assert_eq!(
+            summary.used_tokens,
+            Some(39_999),
+            "the newest turn decides, and it sits at the end of the file"
+        );
+        assert_eq!(summary.last_output.as_deref(), Some("turn 39999"));
     }
 }

@@ -17,12 +17,40 @@ use companion_protocol::{
 use thiserror::Error;
 use tokio::sync::broadcast;
 
+/// The last sign of life a file gives about a session, for `SessionStatus::last_activity_ms`.
+///
+/// Three adapters keep a file per session — the workbench its state file, Codex its rollout,
+/// Claude Code its transcript — and for each of them the modification time of that file is
+/// the last moment the session demonstrably did something. A file that is not there, or a
+/// clock set before 1970, is no measurement and answers `None` rather than a plausible zero.
+pub fn last_activity_of(path: &std::path::Path) -> Option<u64> {
+    let modified = std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()?;
+    modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|since| since.as_millis() as u64)
+}
+
 /// What an adapter reports about one of its sessions. The bus adds sequence number,
 /// timestamp and adapter id on the way out.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AdapterEvent {
     pub session_id: Option<SessionId>,
     pub event: Event,
+    /// The one connection this event is for, or `None` for everyone who may see it.
+    /// Explained at [`EventEnvelope::audience`], which is where it ends up.
+    pub audience: Option<String>,
+    /// Whether the session said this about itself over the socket rather than an adapter
+    /// measuring it.
+    ///
+    /// The adapter id an event is published under does not answer that question: a reported
+    /// session an adapter recognises as its own is published under *that* adapter, so the
+    /// two are the same value only for sessions nobody adopted. Whoever has to tell a
+    /// measurement from a sentence — `done` handling does, before it reads a file path a
+    /// session named — reads this flag.
+    pub self_reported: bool,
 }
 
 impl AdapterEvent {
@@ -30,6 +58,8 @@ impl AdapterEvent {
         Self {
             session_id: Some(session_id.into()),
             event,
+            audience: None,
+            self_reported: false,
         }
     }
 
@@ -39,7 +69,26 @@ impl AdapterEvent {
         Self {
             session_id: None,
             event,
+            audience: None,
+            self_reported: false,
         }
+    }
+
+    /// The same, addressed to exactly one connection.
+    pub fn for_listener(event: Event, listener: impl Into<String>) -> Self {
+        Self {
+            session_id: None,
+            event,
+            audience: Some(listener.into()),
+            self_reported: false,
+        }
+    }
+
+    /// Marks the event as something a session said about itself, not something an adapter
+    /// measured.
+    pub fn self_reported(mut self) -> Self {
+        self.self_reported = true;
+        self
     }
 }
 
@@ -70,6 +119,15 @@ pub enum AdapterError {
     UnknownSession(SessionId),
     #[error("adapter does not support {0:?}")]
     NotSupported(CommandKind),
+    /// The program this adapter drives is not on this machine at all.
+    ///
+    /// Kept apart from [`Self::Backend`] since 2026-09-05: an optional harness that was
+    /// never installed is not a failure of the daemon, and a session list that calls itself
+    /// incomplete over one turns its most prominent surface into a standing warning about
+    /// software nobody asked for (Befund 9 of the user test of Bundle v6). A backend that is
+    /// installed and then fails stays a warning.
+    #[error("not installed: {0}")]
+    NotInstalled(String),
     #[error("backend failed: {0}")]
     Backend(String),
     #[error("timed out after {0} ms")]
@@ -84,6 +142,9 @@ impl AdapterError {
         match self {
             Self::UnknownSession(_) => ErrorCode::UnknownSession,
             Self::NotSupported(_) => ErrorCode::NotSupported,
+            // The code that already means "could not be asked at all — it is not installed,
+            // its backend is down, or it ran past the deadline".
+            Self::NotInstalled(_) => ErrorCode::AdapterUnavailable,
             Self::Backend(_) | Self::Timeout(_) | Self::Io(_) => ErrorCode::AdapterFailure,
         }
     }
@@ -124,6 +185,44 @@ pub trait SessionAdapter: Send + Sync {
     }
 
     async fn stop(&self, session: &SessionId) -> AdapterResult<()>;
+
+    /// Tells the adapter where a session writes its conversation, from a source that knows
+    /// it for certain.
+    ///
+    /// The one caller today is the hook path: Claude Code hands its hooks the
+    /// `transcript_path` it writes itself, and passing that on is better than every reader
+    /// deriving the path from a directory-naming rule that belongs to another program.
+    ///
+    /// The default does nothing, because for most adapters there is nothing to do: an
+    /// adapter whose sessions keep no such file, or that already holds the path, may ignore
+    /// this. It is a hint and never an instruction — an adapter decides for itself whether
+    /// the path it is handed is better than the one it has, and nothing about a session
+    /// changes because somebody said this.
+    async fn note_transcript(
+        &self,
+        _session: &SessionId,
+        _project: Option<&str>,
+        _transcript: &std::path::Path,
+    ) {
+    }
+
+    /// Offers the adapter a status somebody else reported, and asks whether it is about one
+    /// of its own sessions.
+    ///
+    /// The caller is the daemon's `report_status`, and the reporter is normally
+    /// `companion-hook`: Claude Code hands it the id of the conversation, which is the one
+    /// thing a hook knows about the session it fires for. A session of the workbench is that
+    /// conversation *and* a session in a list somebody watches, and only the adapter that
+    /// keeps the workbench's files can tie the two together. An adapter that recognises the
+    /// report takes what it says and answers with the id it knows the session under; the
+    /// daemon then files the report there instead of opening a second session next to it.
+    ///
+    /// The default answers `None`, which is what every adapter that cannot recognise a
+    /// foreign id says. Answering `Some` is a claim: the adapter is stating that this report
+    /// is about a session it lists itself.
+    async fn adopt_report(&self, _reported: &SessionStatus) -> Option<SessionId> {
+        None
+    }
 
     /// A stream of everything the adapter observes. Every subscriber gets every event
     /// from the moment it subscribes.

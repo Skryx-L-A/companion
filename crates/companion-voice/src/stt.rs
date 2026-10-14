@@ -95,10 +95,7 @@ async fn openai_compat(
         .multipart(form)
         .send()
         .await
-        .map_err(|source| VoiceError::Transport {
-            profile: profile.id.clone(),
-            source,
-        })?;
+        .map_err(|source| VoiceError::transport(&profile.id, &url, source))?;
 
     if !response.status().is_success() {
         return Err(status_error(&profile.id, response).await);
@@ -107,16 +104,13 @@ async fn openai_compat(
     let body = response
         .text()
         .await
-        .map_err(|source| VoiceError::Transport {
-            profile: profile.id.clone(),
-            source,
-        })?;
+        .map_err(|source| VoiceError::transport(&profile.id, &url, source))?;
     let parsed: TranscriptionBody =
         serde_json::from_str(&body).map_err(|error| VoiceError::Malformed {
             profile: profile.id.clone(),
             detail: format!("no text field in the answer: {error}"),
         })?;
-    Ok(parsed.text.trim().to_owned())
+    Ok(one_line(&parsed.text))
 }
 
 async fn whisper_server(
@@ -143,10 +137,7 @@ async fn whisper_server(
         .multipart(form)
         .send()
         .await
-        .map_err(|source| VoiceError::Transport {
-            profile: profile.id.clone(),
-            source,
-        })?;
+        .map_err(|source| VoiceError::transport(&profile.id, &url, source))?;
 
     if !response.status().is_success() {
         return Err(status_error(&profile.id, response).await);
@@ -155,16 +146,151 @@ async fn whisper_server(
     let text = response
         .text()
         .await
-        .map_err(|source| VoiceError::Transport {
-            profile: profile.id.clone(),
-            source,
-        })?;
-    Ok(text.trim().to_owned())
+        .map_err(|source| VoiceError::transport(&profile.id, &url, source))?;
+    Ok(one_line(&text))
+}
+
+/// One transcript on one line.
+///
+/// A whisper.cpp server answers `response_format=text` with one line per segment, so a
+/// single spoken sentence comes back broken across several lines. Nothing downstream wants
+/// that: the panel shows a sentence and the brain is handed a sentence, and a hard newline
+/// in the middle of one is the server's segmentation leaking into the text.
+///
+/// Both routes go through this, not only the one where it was noticed. An
+/// OpenAI-compatible server is just as free to join its segments with newlines inside the
+/// `text` field, and a transcript is a sentence no matter which shape it arrived in.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_transcript_split_over_segment_lines_comes_back_as_one_sentence() {
+        assert_eq!(
+            one_line(" Could you tell me which session\nis waiting,\nand what it reported?\n"),
+            "Could you tell me which session is waiting, and what it reported?"
+        );
+        assert_eq!(one_line("   "), "");
+    }
+
+    /// Both drivers hand their answer to the same place, so a server that joins its
+    /// segments with newlines is flattened whichever shape it answered in.
+    #[tokio::test]
+    async fn an_openai_compatible_answer_is_flattened_the_same_way() {
+        let served = "  first part\n  second part \n";
+        let (address, done) = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+            &serde_json::json!({ "text": served }).to_string(),
+        )
+        .await;
+
+        let profile = EndpointProfile::local(
+            "openai-stt",
+            EndpointProtocol::OpenaiCompat,
+            format!("http://{address}"),
+        );
+        let text = transcribe(
+            &VoiceHttp::default(),
+            &profile,
+            None,
+            &SttRequest {
+                wav: &[],
+                ..SttRequest::default()
+            },
+        )
+        .await
+        .expect("the stub answers");
+        assert_eq!(text, "first part second part");
+        done.await.expect("the stub finished");
+    }
+
+    /// The finding this closes (audit 2026-09-03): some providers take their key as a query
+    /// parameter, `reqwest::Error` appends ` for url (…)` to its own text with the query
+    /// intact, and that text went to every authenticated client over the socket and into the
+    /// log. A failed request must name the endpoint and never the credential.
+    #[tokio::test]
+    async fn a_failed_request_names_the_endpoint_and_not_the_credential_in_its_url() {
+        // A real address with nothing behind it: bound to learn a free port, then dropped.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the loopback interface has a free port");
+        let address = listener
+            .local_addr()
+            .expect("a bound socket has an address");
+        drop(listener);
+
+        let profile = EndpointProfile::local(
+            "cloud",
+            EndpointProtocol::OpenaiCompat,
+            format!("http://{address}/v1?key=AIzaXYZ"),
+        );
+        let error = transcribe(
+            &VoiceHttp::default(),
+            &profile,
+            None,
+            &SttRequest {
+                wav: &[],
+                ..SttRequest::default()
+            },
+        )
+        .await
+        .expect_err("nothing is listening on that port");
+
+        let shown = error.to_string();
+        assert!(!shown.contains("key="), "{shown}");
+        assert!(!shown.contains("AIza"), "{shown}");
+        assert!(
+            shown.contains("cloud") && shown.contains(&format!("http://{address}/v1")),
+            "the message still has to say which endpoint failed: {shown}"
+        );
+
+        // The `#[source]` still holds the reqwest error, and that one names the url with its
+        // query — deliberately, because whoever debugs the daemon wants the whole chain. It
+        // is only no longer part of the sentence that travels: nothing in the daemon renders
+        // an error any other way than through `Display`, and `ProtocolError::new(code,
+        // error.to_string())` is the one place a voice failure becomes text for a client.
+        assert!(
+            std::error::Error::source(&error).is_some(),
+            "the cause stays reachable for a debugger"
+        );
+    }
+
+    /// A one-shot HTTP stub on a port the operating system picks, so no test claims a
+    /// fixed port on this machine.
+    async fn serve_once(
+        head: &'static str,
+        body: &str,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the loopback interface has a free port");
+        let address = listener
+            .local_addr()
+            .expect("a bound socket has an address");
+        let answer = format!("{head}{body}");
+        let handle = tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            // Read until the client stops sending, so the answer is not written into a
+            // half-sent request.
+            let mut scratch = [0u8; 8192];
+            while let Ok(read) = stream.read(&mut scratch).await {
+                if read < scratch.len() {
+                    break;
+                }
+            }
+            let _ = stream.write_all(answer.as_bytes()).await;
+            let _ = stream.flush().await;
+        });
+        (address, handle)
+    }
 
     #[tokio::test]
     async fn a_protocol_that_cannot_hear_says_so_instead_of_trying() {

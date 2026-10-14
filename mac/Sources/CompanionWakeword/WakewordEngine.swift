@@ -38,11 +38,11 @@ public enum WakewordFailure: Error, Equatable, Sendable {
         case .abiMismatch(let library, let expected):
             return "Die Weckwort-Bibliothek passt nicht zu dieser App (Schnittstelle \(library), erwartet \(expected)). Das ist ein Baufehler; ein neuer Build behebt es."
         case .tooFewRecordings(let have, let need):
-            return "Fuer das Training braucht es \(need) Aufnahmen, es sind \(have)."
+            return "Für das Training braucht es \(need) Aufnahmen, es sind \(have)."
         case .engine(let reason):
-            return "Das Weckwort liess sich nicht anlernen: \(reason)"
+            return "Das Weckwort ließ sich nicht anlernen: \(reason)"
         case .file(let reason):
-            return "Eine Datei liess sich nicht schreiben oder lesen: \(reason)"
+            return "Eine Datei ließ sich nicht schreiben oder lesen: \(reason)"
         }
     }
 }
@@ -79,7 +79,7 @@ public final class WakewordEngine {
             throw WakewordFailure.abiMismatch(library: library, expected: expected)
         }
         guard let handle = companion_wakeword_create() else {
-            throw WakewordFailure.engine("Der Detektor liess sich nicht anlegen.")
+            throw WakewordFailure.engine("Der Detektor ließ sich nicht anlegen.")
         }
         self.handle = handle
     }

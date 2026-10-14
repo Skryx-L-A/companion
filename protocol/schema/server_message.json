@@ -81,6 +81,20 @@
       "required": [
         "type"
       ]
+    },
+    {
+      "description": "The pairing code was good. Everything the device needs, said once.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "paired"
+        }
+      },
+      "$ref": "#/$defs/PairResult",
+      "required": [
+        "type"
+      ]
     }
   ],
   "$defs": {
@@ -99,11 +113,118 @@
         }
       ]
     },
+    "AudioNegotiation": {
+      "description": "What the handshake settled on for this connection.",
+      "type": "object",
+      "properties": {
+        "speech_format": {
+          "description": "The format every `tts_chunk` on this connection will carry.",
+          "$ref": "#/$defs/AudioFormat"
+        },
+        "capture_formats": {
+          "description": "The formats a dictation of this connection may arrive in.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AudioFormat"
+          }
+        },
+        "opus": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OpusParams"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "speech_format",
+        "capture_formats"
+      ]
+    },
+    "AudioFormat": {
+      "description": "Container format of one piece of audio on the wire.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "mp3"
+          ]
+        },
+        {
+          "description": "RIFF/WAVE with little-endian PCM16 samples.",
+          "type": "string",
+          "const": "wav"
+        },
+        {
+          "description": "Apple AIFF, which is what `say -o` writes.",
+          "type": "string",
+          "const": "aiff"
+        },
+        {
+          "description": "Little-endian PCM16 samples with no container at all.\n\nWhat a microphone hands a shell and what every recogniser wants. It is the shape the\nfirst version of `voice_chunk` carried without naming it, which is why a dictation\nthat says nothing about its format is this one.",
+          "type": "string",
+          "const": "pcm16"
+        },
+        {
+          "description": "Opus packets in the length-prefixed framing described by [`OPUS_FRAMING`].\n\nNot Ogg: an Ogg page carries granule positions and a checksum that a live stream over\nan already-ordered, already-checked connection has no use for, and pulling one apart\non the phone would mean a second parser next to the codec.",
+          "type": "string",
+          "const": "opus"
+        }
+      ]
+    },
+    "OpusParams": {
+      "description": "The Opus streams this daemon speaks.\n\n`DESIGN.md` § Mobil, Voice am Handy names roughly 32 kbit/s for the microphone stream;\nthe frame length is what a phone can pace its sends to without either flooding the\nconnection or adding audible delay before the first packet leaves.",
+      "type": "object",
+      "properties": {
+        "sample_rates_hz": {
+          "description": "Sample rates a dictation may ask to be decoded to.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "frame_ms": {
+          "description": "Length of one frame in milliseconds.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "bitrate_bps": {
+          "description": "Bit rate the daemon encodes spoken answers at.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_packet_bytes": {
+          "description": "Longest packet accepted, so a client can size its own buffers.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "framing": {
+          "description": "How several packets are laid out inside one chunk.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sample_rates_hz",
+        "frame_ms",
+        "bitrate_bps",
+        "max_packet_bytes",
+        "framing"
+      ]
+    },
     "Welcome": {
       "description": "The daemon's answer to a valid [`Hello`].",
       "type": "object",
       "properties": {
         "protocol_version": {
+          "description": "The version [`negotiate_protocol_version`] settled on, not necessarily\n[`crate::PROTOCOL_VERSION`]: the highest version both this daemon and the client\nspeak. Everything sent on this connection from here on is in this version, not the\ndaemon's own.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0
@@ -122,6 +243,17 @@
         "session_namespace": {
           "description": "The prefix the daemon puts in front of every session id this connection reports\nabout. A client may report, ask and report progress only inside it; the daemon\nassigns it, so no connection can write the status of another one's session.",
           "type": "string"
+        },
+        "audio": {
+          "description": "What the audio formats of this connection settled on.\n\nAbsent from a daemon built before the negotiation existed, which a client reads as\n[`AudioNegotiation::default`]: WAV out, PCM16 in.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AudioNegotiation"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -142,6 +274,24 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/SessionStatus"
+              }
+            },
+            "partial": {
+              "description": "True when at least one adapter could not answer this `list`, so the list above is\na part of what runs on this machine and not all of it.\n\nThe same fact `adapter_errors` carries, as the one bit a client has to branch on:\na shell says \"incomplete\" from this, and looks in the map only to say which\nadapter and why. Written out only when it is true, so the bytes of a complete\nlisting are what they always were and a peer that predates the field reads a\nmissing key as false, which is what it means.",
+              "type": "boolean"
+            },
+            "adapter_errors": {
+              "description": "Adapter id to failure message, for every adapter that could not answer this\n`list` — that adapter's sessions are missing from the list above rather than\nfailing the whole request.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "adapters_not_installed": {
+              "description": "Adapter id to reason, for every adapter whose program is not on this machine.\n\nApart from `adapter_errors` and outside `partial` on purpose: an optional harness\nthat was never installed is a state of this machine, not an incomplete answer, and\na list that warns about one warns every minute of every day about software nobody\nasked for (Befund 9 of the user test of Bundle v6, 2026-09-05). A client shows\nthis where it says what it can talk to — the adapter page — and nowhere else.\nWritten out only when there is one, so a listing where every adapter is installed\ncarries the bytes it always did.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
               }
             },
             "body": {
@@ -202,6 +352,17 @@
               "items": {
                 "$ref": "#/$defs/AdapterCapabilities"
               }
+            },
+            "voice": {
+              "description": "What the daemon can do with audio. Absent from a daemon built before the format\nnegotiation existed; a client reads that as PCM16 in and WAV out.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/VoiceCapabilities"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "body": {
               "type": "string",
@@ -282,6 +443,24 @@
           ]
         },
         {
+          "description": "The speech server is up, after a `voice_warm`.",
+          "type": "object",
+          "properties": {
+            "already_running": {
+              "description": "True when a server this daemon started was already running, so the warm-up did\nnothing. False when it had to be started — and false as well when the settings\nname no server of ours at all, because there is then nothing this daemon runs\nand nothing it could have found running.",
+              "type": "boolean"
+            },
+            "body": {
+              "type": "string",
+              "const": "voice_warm"
+            }
+          },
+          "required": [
+            "body",
+            "already_running"
+          ]
+        },
+        {
           "description": "What the latency probe found, one entry per profile it measured.",
           "type": "object",
           "properties": {
@@ -320,6 +499,126 @@
           ]
         },
         {
+          "description": "A pairing waiting to be redeemed, with everything the QR and the short code need.",
+          "type": "object",
+          "properties": {
+            "pairing": {
+              "description": "Boxed to keep the size of every other response down.",
+              "$ref": "#/$defs/PairingOffer"
+            },
+            "body": {
+              "type": "string",
+              "const": "pairing"
+            }
+          },
+          "required": [
+            "body",
+            "pairing"
+          ]
+        },
+        {
+          "description": "The paired devices.",
+          "type": "object",
+          "properties": {
+            "devices": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Device"
+              }
+            },
+            "body": {
+              "type": "string",
+              "const": "devices"
+            }
+          },
+          "required": [
+            "body",
+            "devices"
+          ]
+        },
+        {
+          "description": "Every session the person put on \"always ask me\", and nothing else: a session that is\nnot named has the switch off, which is what an unset preference means.",
+          "type": "object",
+          "properties": {
+            "always_ask": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "body": {
+              "type": "string",
+              "const": "session_preferences"
+            }
+          },
+          "required": [
+            "body",
+            "always_ask"
+          ]
+        },
+        {
+          "description": "A `chat_message` is under way. Every `chat_delta`, `chat_tool` and `chat_done` of\nits confirmation carries this id, so a client that just asked something can tell\nits own turn apart from a background report of an earlier one arriving at the same\ntime.",
+          "type": "object",
+          "properties": {
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "body": {
+              "type": "string",
+              "const": "chat_started"
+            }
+          },
+          "required": [
+            "body",
+            "turn_id"
+          ]
+        },
+        {
+          "description": "What a `chat_cancel` found: true when a background report was running under that turn\nid and has been told to stop, false when there was nothing to stop.\n\nNot an `ack`, because the two cases are worth telling apart: a person who cancels a\nreport that has already finished should not be shown that anything was interrupted.",
+          "type": "object",
+          "properties": {
+            "cancelled": {
+              "type": "boolean"
+            },
+            "body": {
+              "type": "string",
+              "const": "chat_cancelled"
+            }
+          },
+          "required": [
+            "body",
+            "cancelled"
+          ]
+        },
+        {
+          "description": "The register, newest first, together with what each day of it cost.",
+          "type": "object",
+          "properties": {
+            "entries": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RegistryEntry"
+              }
+            },
+            "days": {
+              "description": "One entry per calendar day the rows above fall into, newest day first.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/DayCost"
+              }
+            },
+            "body": {
+              "type": "string",
+              "const": "registry"
+            }
+          },
+          "required": [
+            "body",
+            "entries",
+            "days"
+          ]
+        },
+        {
           "description": "The request was carried out and has nothing to return.",
           "type": "object",
           "properties": {
@@ -345,11 +644,18 @@
           "$ref": "#/$defs/AdapterId"
         },
         "machine": {
-          "description": "Machine the session runs on. `local` for this machine.",
-          "type": "string"
+          "description": "Machine the session runs on, as the adapter reports it. `local` for this one.\n\nCarries its origin since 2026-09-03. It used to be a bare `String` that defaulted to\n`\"local\"`, and the workbench adapter filled that same `\"local\"` in whenever it could\nnot find out — a guess in the shape of a measurement, in the one field that decides\nwhether a session runs on this Mac or on the other machine. An adapter that does not\nknow now says so, and only one that does writes a value.",
+          "$ref": "#/$defs/Provenance"
         },
         "project": {
           "description": "Absolute path of the project directory the session works in.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transcript_path": {
+          "description": "Where the session writes its conversation, when whoever reports it knows.\n\nAdded 2026-09-03. Claude Code hands its hooks the `transcript_path` it writes itself,\nwhich is the one authoritative answer to a question every reader of such a session\notherwise has to derive from a directory-naming rule that belongs to another program.\nA reporter that does not know leaves it out, and the field is absent from the wire —\nso a peer that predates it sends and reads exactly the bytes it always did.",
           "type": [
             "string",
             "null"
@@ -360,6 +666,15 @@
         },
         "state": {
           "$ref": "#/$defs/SessionState"
+        },
+        "last_activity_ms": {
+          "description": "Unix time in milliseconds of the last sign of life the adapter saw from this session:\nthe last line of its stream, the last write to its state file, the last change to its\ntranscript.\n\nAdded 2026-09-03 for `done_limit`. A listing carries at most that many finished\nsessions, and until now the daemon cut the tail off in the order the adapters happened\nto hand it over — so a machine with weeks of history could answer with twenty sessions\nthat all ended in June while the one that ended a minute ago fell off the end. With\nthis field the daemon keeps the newest ones. An adapter that cannot say leaves it out,\nand the field is absent from the wire, so a peer that predates it sends and reads\nexactly the bytes it always did.\n\nNot a [`Provenance`]: it is either a timestamp somebody read off the machine or it is\nnothing. There is no estimate of it worth ordering a list by.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         },
         "runtime_ms": {
           "description": "Milliseconds since the session started.",
@@ -388,6 +703,13 @@
             "null"
           ]
         },
+        "permission_refused": {
+          "description": "A tool call this session asked permission for and was refused automatically, by\npolicy — not a question `open_question` would have a person still answer, since the\nagent was already told no before this was ever recorded.\n\nWritten out only when an adapter has one to report. A status that leaves it out is\nread back as `None`, which is what keeps a daemon and a shell of different ages\nspeaking the same wire bytes: nothing an older peer sends changes meaning, and nothing\nthis build sends about a session it knows nothing more about grows a field.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "auftrag_id": {
           "anyOf": [
             {
@@ -397,12 +719,62 @@
               "type": "null"
             }
           ]
+        },
+        "kind": {
+          "description": "Orchestrator or worker, for the list that shows only the first kind.\n\nWritten out only when an adapter knows it. A status that leaves it out is read back\nas [`Provenance::Unknown`], which is what keeps a daemon and a shell of different\nages speaking the same wire bytes: nothing an older peer sends changes meaning, and\nnothing this build sends about a session it knows nothing more about grows a field.",
+          "$ref": "#/$defs/Provenance6"
+        },
+        "display_name": {
+          "description": "What to call this session in a list, when the adapter has a name for it. The\nworkbench names its sessions and its workers; a bare terminal has nothing but an id.",
+          "$ref": "#/$defs/Provenance"
+        },
+        "machine_identity": {
+          "description": "The machine this session runs on, stable across renames. See [`MachineIdentity`]\nfor the collision rule that makes this field load-bearing.\n\n[`Self::machine`] stays what it was: the free-text name of the machine as the\nadapter reports it, `local` for this one. The two are kept apart because the old\nfield is what a person reads and the new one is what a client keys on.",
+          "$ref": "#/$defs/Provenance7"
+        },
+        "task_state": {
+          "description": "Where the workbench task this session carries stands. Set only by the workbench's\ncarrier, which reports one session per task with `auftrag_id` set; every other reporter\nleaves the five `task_*` fields out, and a status without them is written and read\nexactly as before (added 2026-09-10, `AGENTS-PLAN.md` § 9 step 3).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "task_reason": {
+          "description": "Why the task stands where it does, in the carrier's own words: what it waits for, why\nit is stuck, why an open task was not started.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_title": {
+          "description": "The goal of the task, its first sentence. What the person calls the task.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_wake_at": {
+          "description": "When a paused task goes on, as an RFC 3339 timestamp.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_machine": {
+          "description": "The machine the task's lead agent runs on right now. Apart from [`Self::machine`]\nbecause the carrier that reports may run on another machine than the agent it carries.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
         "id",
         "adapter",
-        "machine",
         "model",
         "state",
         "runtime_ms",
@@ -412,7 +784,7 @@
       ]
     },
     "SessionId": {
-      "description": "Identifies one session. Unique per machine, assigned by the adapter that owns the session.",
+      "description": "Identifies one session. Unique per machine only, assigned by the adapter that owns the session. See the collision rule on [`crate::MachineIdentity`].",
       "type": "string"
     },
     "AdapterId": {
@@ -767,8 +1139,216 @@
       ]
     },
     "AuftragId": {
-      "description": "Identifies a job file under `.companion/auftraege/<id>.json`.",
+      "description": "Identifies a job file under `.companion/auftraege/<id>.json`. One path segment: see [`AuftragId::checked`] for what that rules out.",
       "type": "string"
+    },
+    "Provenance6": {
+      "description": "A value together with where it came from.\n\n`DESIGN.md` § Session-Adapter requires every status field to carry its origin, and the\nsession list to show an unknown field as unknown rather than as empty or zero. Making\n`Unknown` a variant without a payload is what enforces that: there is no value to\nmistake for a measurement.",
+      "oneOf": [
+        {
+          "description": "Read from a structured channel: a hook, a status file, an adapter report.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "measured"
+            },
+            "value": {
+              "$ref": "#/$defs/SessionKind"
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "Derived or guessed, for example a token count extrapolated from elapsed time.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "estimated"
+            },
+            "value": {
+              "$ref": "#/$defs/SessionKind"
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "The adapter cannot supply this field at all.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "origin"
+          ]
+        }
+      ]
+    },
+    "SessionKind": {
+      "description": "What kind of agent a session is.\n\n`DESIGN.md` § Mobil, Sessionansicht: the session list of the phone shows orchestrators\nand hides workers, because supervising workers is the orchestrator's job and not the\ncompanion's. An adapter that cannot tell the two apart says so by leaving the field\n[`Provenance::Unknown`] — there is no third variant here, because \"unknown\" is what the\norigin of every status field already means, and two ways of saying it would let a\nfilter answer differently depending on which one an adapter picked. A list that hides\nworkers therefore hides exactly `Measured(Worker)` and `Estimated(Worker)`, and shows\neverything else.",
+      "oneOf": [
+        {
+          "description": "Drives other sessions and answers to the person.",
+          "type": "string",
+          "const": "orchestrator"
+        },
+        {
+          "description": "Was started by an orchestrator and reports back to it.",
+          "type": "string",
+          "const": "worker"
+        }
+      ]
+    },
+    "Provenance7": {
+      "description": "A value together with where it came from.\n\n`DESIGN.md` § Session-Adapter requires every status field to carry its origin, and the\nsession list to show an unknown field as unknown rather than as empty or zero. Making\n`Unknown` a variant without a payload is what enforces that: there is no value to\nmistake for a measurement.",
+      "oneOf": [
+        {
+          "description": "Read from a structured channel: a hook, a status file, an adapter report.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "measured"
+            },
+            "value": {
+              "$ref": "#/$defs/MachineIdentity"
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "Derived or guessed, for example a token count extrapolated from elapsed time.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "estimated"
+            },
+            "value": {
+              "$ref": "#/$defs/MachineIdentity"
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "The adapter cannot supply this field at all.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "origin"
+          ]
+        }
+      ]
+    },
+    "MachineIdentity": {
+      "description": "Which machine a session runs on, in a form that survives a rename.\n\n**The collision rule for session ids.** A [`SessionId`] is unique on the machine that\nissued it and nowhere else: two machines both running the workbench in\n`~/AI/companion` produce the very same id for two different sessions. A client that\nspeaks to more than one daemon — the phone in the aggregation mode of `DESIGN.md`\n§ Mobil — therefore keys every session by the pair (`machine.id`, `id`) and never by\nthe id alone. Where the machine identity is unknown, the pair cannot be formed, and the\nclient falls back to the connection it received the session on, which is unique within\none client run. The daemon never rewrites an id to make it globally unique: the id is\nwhat a person sees and what every command names, and a prefix that changed per client\nwould break both.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Stable and opaque. Generated once per machine and kept, so a renamed machine is\nstill recognised as the same one.",
+          "$ref": "#/$defs/MachineId"
+        },
+        "display_name": {
+          "description": "What to call the machine in a list. Free text a person may change at any time, and\nnever the thing two sessions are told apart by.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "MachineId": {
+      "description": "Identifies one machine, stable across restarts and independent of its name. Generated once, never derived from a hostname: a hostname changes with a network and collides between two machines set up the same way.",
+      "type": "string"
+    },
+    "TaskState": {
+      "description": "Where a task of the workbench stands, as its carrier reports it.\n\nThe states of `claude-workbench/docs/AGENTS-PLAN.md` § 2, \"gleichlautend in Ansicht, Datei\nund Companion\", spelled as the wire names the carrier (`wb-traeger`) sends. A task is not a\nsession: the carrier reports one session per task with `auftrag_id` set, and this is what\nthat task is doing, which [`SessionState`] cannot say — \"paused until the quota resets\" is\nneither waiting for the person nor idle, and \"ready for acceptance\" is not done.\n\nReading accepts every `wartet_auf_*` spelling as [`TaskState::WartetAufNutzer`]: carriers\nfrom before the rename name the person they wait for in the wire value.",
+      "oneOf": [
+        {
+          "description": "In the backlog, not started yet.",
+          "type": "string",
+          "const": "offen"
+        },
+        {
+          "description": "The lead agent is alive and was seen at the last tick.",
+          "type": "string",
+          "const": "laeuft"
+        },
+        {
+          "description": "A display without an automatic consequence: a deadline passed without progress, or the\nlead agent is gone and could not be revived.",
+          "type": "string",
+          "const": "steckt"
+        },
+        {
+          "description": "Paused until the subscription quota resets.",
+          "type": "string",
+          "const": "pausiert_kontingent"
+        },
+        {
+          "description": "Paused for the night window.",
+          "type": "string",
+          "const": "pausiert_nacht"
+        },
+        {
+          "description": "Paused until a wake time the lead agent left behind.",
+          "type": "string",
+          "const": "pausiert_weckzeit"
+        },
+        {
+          "description": "A question, an approval or a conflict only the person can settle.",
+          "type": "string",
+          "const": "wartet_auf_nutzer"
+        },
+        {
+          "description": "Result checked, reviewer run, report written.",
+          "type": "string",
+          "const": "zur_abnahme"
+        },
+        {
+          "description": "The lead agent holds the task for unsolvable as it stands.",
+          "type": "string",
+          "const": "aufgegeben"
+        },
+        {
+          "description": "A local lead agent handed the task back because it is beyond the model.",
+          "type": "string",
+          "const": "aufgegeben_modell"
+        },
+        {
+          "description": "Accepted by the person.",
+          "type": "string",
+          "const": "abgenommen"
+        },
+        {
+          "description": "Discarded by the person.",
+          "type": "string",
+          "const": "verworfen"
+        }
+      ]
     },
     "AdapterCapabilities": {
       "description": "What one adapter can do. `DESIGN.md` § Sicherheit requires this to be honest about\nenforcement as well: a generic PTY adapter cannot restrict a foreign CLI, and the\nsettings page shows what a limit really means for that session.",
@@ -846,6 +1426,7 @@
         "session_ended",
         "question_open",
         "waiting_for_input",
+        "permission_refused",
         "busy",
         "idle",
         "done",
@@ -862,7 +1443,8 @@
         "chat_delta",
         "chat_tool",
         "chat_done",
-        "settings_changed"
+        "settings_changed",
+        "proactive_notice"
       ]
     },
     "StatusField": {
@@ -879,14 +1461,67 @@
             "iteration",
             "last_output",
             "open_question",
-            "auftrag_id"
+            "auftrag_id",
+            "display_name"
           ]
         },
         {
           "description": "Whether the adapter can say what a session is doing at all. An adapter that leaves\nthis out reports `unknown` and `lost` instead of guessing between busy and idle.",
           "type": "string",
           "const": "state"
+        },
+        {
+          "description": "Whether the adapter can say that a session is an orchestrator or a worker. An\nadapter that leaves this out reports neither, and the session list keeps showing\nits sessions rather than filtering on a guess.",
+          "type": "string",
+          "const": "kind"
+        },
+        {
+          "description": "Whether the adapter can name the machine a session runs on in a stable way. Most\ncannot: the daemon fills its own machine in for anything that runs here.",
+          "type": "string",
+          "const": "machine_identity"
         }
+      ]
+    },
+    "VoiceCapabilities": {
+      "description": "What the daemon can do with audio, as the `capabilities` answer reports it.\n\nRead before a client opens a dictation: a daemon built without the Opus codec lists only\n`pcm16` here, and a client that then asked for Opus would be refused after it had already\nrecorded a sentence.",
+      "type": "object",
+      "properties": {
+        "capture_formats": {
+          "description": "Formats a dictation may arrive in, best first.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AudioFormat"
+          }
+        },
+        "speech_formats": {
+          "description": "Formats a spoken answer can be sent in, best first.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AudioFormat"
+          }
+        },
+        "opus": {
+          "description": "The Opus parameters, when Opus is in either list at all.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OpusParams"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_chunk_bytes": {
+          "description": "Largest decoded payload one `voice_chunk` may carry.\n\n`DESIGN.md` § Mobil, Voice am Handy asks for the one-MiB line limit of the protocol to\nbe held against the chunk sizes. This is the answer to that, computed from the limit\nthe daemon actually runs with rather than from the default: base64 costs a third on\ntop, and the rest of the line costs what it costs.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "capture_formats",
+        "speech_formats",
+        "max_chunk_bytes"
       ]
     },
     "SendOutcome": {
@@ -1115,11 +1750,61 @@
         "text_sha256": {
           "description": "Hex-encoded SHA-256 of the approved job text, so a later edit invalidates it.",
           "type": "string"
+        },
+        "device": {
+          "description": "The device it came from, or absent for the shell at the machine.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeviceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "confirmation": {
+          "description": "How the person proved it was them. Absent means [`ApprovalConfirmation::Shell`],\nwhich is what every approval written before this field existed was.",
+          "$ref": "#/$defs/ApprovalConfirmation",
+          "default": "shell"
         }
       },
       "required": [
         "approved_at_ms",
         "text_sha256"
+      ]
+    },
+    "DeviceId": {
+      "description": "Identifies one paired device. Handed out when a pairing code is redeemed, and what a revocation names.",
+      "type": "string"
+    },
+    "ApprovalConfirmation": {
+      "description": "How the person proved it was them when they approved something.\n\n`DESIGN.md` § Mobil, Freigaben vom Handy: \"der Freigabe-Record vermerkt stets Gerät und\nBestätigungsart\". At the machine the shell of the person is itself the proof — whoever\nsits in front of an unlocked Mac is the person — which is what [`Self::Shell`] means and\nwhy it is the default for a record written before this field existed. From a phone the\napp says which of the three steps of that chapter it actually took, and [`Self::None`] is\na real answer rather than a missing one: the person chose that level and was warned.",
+      "oneOf": [
+        {
+          "description": "The desktop shell at the machine. There is no device and no second step.",
+          "type": "string",
+          "const": "shell"
+        },
+        {
+          "description": "Face ID or Touch ID immediately before sending.",
+          "type": "string",
+          "const": "biometric"
+        },
+        {
+          "description": "The device passcode, which is what a device without biometrics falls back to and what\na high-risk setting demands whatever the level.",
+          "type": "string",
+          "const": "passcode"
+        },
+        {
+          "description": "The app asked for nothing: whoever holds the unlocked phone approves.\n\nNot accepted for an approval from a device (closed 2026-09-03, security review).\n`DESIGN.md` § Mobil, Freigaben vom Handy asks for \"immer mindestens die\nGerätecode-Bestätigung des Systems\", and a device that could send this would be\ndeciding for itself that the sentence does not apply to it — the flag and the wish\ncome from the same client. It stays in the enum because a record written before that\nday may carry it, and an audit trail does not get to rewrite what happened.",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "A kind this build does not know, out of a record a newer one wrote.\n\nNever read as one of the four above, and [`Self::Shell`] least of all: an audit trail\nthat turned a confirmation it cannot name into \"the person at the Mac\" would be making\na claim about somebody. A request that carries this is refused rather than stored — a\nclient names a kind this daemon knows or gets no approval.",
+          "type": "string",
+          "const": "unknown"
+        }
       ]
     },
     "VoiceId": {
@@ -1198,7 +1883,7 @@
       ]
     },
     "Settings": {
-      "description": "Everything the daemon reads out of its settings file.",
+      "description": "Everything the daemon reads out of its settings file.\n\n`PartialEq` only, not `Eq`: [`LocationSettings`] carries an `f64` coordinate, and `f64`\nhas no total order to found an `Eq` on.",
       "type": "object",
       "properties": {
         "schema_version": {
@@ -1240,6 +1925,14 @@
             "type": "string"
           },
           "default": []
+        },
+        "adapter_voice": {
+          "description": "The speech path per connected agent, keyed by adapter id.\n\nAn adapter that is not named here uses [`VoicePath::Companion`], so a newly\nconnected harness is never silently left mute — see [`Settings::voice_path`].\n`DESIGN.md` § Session-Adapter, addendum of 2026-08-24.\n\nAs of 2026-08-24 the value has no effect anywhere; see [`VoicePath`].",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/VoicePath"
+          },
+          "default": {}
         },
         "notification_channels": {
           "description": "Where the person is told about something. The figure alone by default: every other\nchannel either makes noise or leaves the machine.\n`DESIGN.md` § Ersteinrichtung, point 12.",
@@ -1283,6 +1976,17 @@
           "$ref": "#/$defs/SkillLevel",
           "default": "recommended"
         },
+        "selected_skill_level": {
+          "description": "The tier last applied successfully after a human choice. An older document has no\nmarker, so the default `recommended` never installs merely because the daemon started.\nManaged by the daemon after installation, not trusted from the wire.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SkillLevel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "conversation_style": {
           "description": "`DESIGN.md` § Ersteinrichtung, point 8: how much he says.",
           "$ref": "#/$defs/ConversationStyle",
@@ -1298,22 +2002,103 @@
           "type": "string",
           "default": "Companion"
         },
+        "introduced": {
+          "description": "Whether the figure has already introduced itself by name.\n\n`DESIGN.md` § Ausbau, \"Name und Persona\": the figure introduces itself with the name\nsomebody gave it — once, at its first appearance after the setup, and never again\nunasked. The mark belongs here rather than in the preferences of a shell, for the\nreason `TASKS.md` \"Erststart\" already wrote down about the setup itself: a mark that\nonly the shell holds survives a wiped configuration directory, and a freshly set up\nfigure would then never say hello. A shell sets this the moment it has said it.",
+          "type": "boolean",
+          "default": false
+        },
         "endpoints": {
           "description": "The provider profiles and which role uses which of them. Keys live in the keychain;\na profile here holds only the name of one.\n`DESIGN.md` § Ersteinrichtung, point 9.",
           "$ref": "#/$defs/EndpointConfig",
           "default": {
-            "profiles": [
+            "profiles": [],
+            "roles": {}
+          }
+        },
+        "network": {
+          "description": "The network listener a phone connects through. Off at the factory.\n`DESIGN.md` § Mobil, Ferntransport.",
+          "$ref": "#/$defs/NetworkSettings",
+          "default": {
+            "enabled": false,
+            "bind_address": "127.0.0.1",
+            "port": 47801,
+            "advertise_address": ""
+          }
+        },
+        "voice_server": {
+          "description": "The local speech server the daemon starts on demand. Off at the factory.",
+          "$ref": "#/$defs/VoiceServerSettings",
+          "default": {
+            "enabled": false,
+            "command": [],
+            "env": {},
+            "ready_url": "",
+            "startup_timeout_seconds": 120,
+            "idle_timeout_seconds": 300
+          }
+        },
+        "location": {
+          "description": "Where the `weather` and `places` tools take \"here\" from, when a call does not name a\nplace of its own. `DESIGN.md` § Ausbau, \"Werkzeugkatalog\".",
+          "$ref": "#/$defs/LocationSettings",
+          "default": {
+            "allow_system_location": false,
+            "place_name": "",
+            "latitude": null,
+            "longitude": null
+          }
+        },
+        "weather_enabled": {
+          "description": "Whether the `weather` tool may run at all. `DESIGN.md` § Werkzeugkatalog: every\nnetwork tool is \"einzeln abschaltbar\". On by default — Open-Meteo needs no key and\nthe tool answers only what the person's own location setting already names.",
+          "type": "boolean",
+          "default": true
+        },
+        "places_enabled": {
+          "description": "Whether the `places` tool (geocoding and routes) may run at all. Same reasoning as\n[`Self::weather_enabled`].",
+          "type": "boolean",
+          "default": true
+        },
+        "web_research_enabled": {
+          "description": "Whether the `web_research` tool may run at all — the one tool that asks the open\ninternet a question in the person's own words rather than sending a coordinate.\nSame reasoning as [`Self::weather_enabled`], and on by default for the same one:\nit needs no key of its own, it runs through whichever subagent the person has\nalready configured, and `tool_boundary = read_only` switches it off along with the\nother two outward tools regardless of what stands here.",
+          "type": "boolean",
+          "default": true
+        },
+        "proactive": {
+          "description": "What the companion watches for on its own, and where each threshold sits.\n`DESIGN.md` § Ausbau, \"Volle Proaktivität\". All four classes on at the factory —\nsee [`ProactiveSettings`] for why this one defaults to on where the rest default off.",
+          "$ref": "#/$defs/ProactiveSettings",
+          "default": {
+            "session_stalled": true,
+            "budget_tight": true,
+            "appointment_soon": true,
+            "morning_briefing": true,
+            "stalled_after_minutes": 20,
+            "budget_percent": 85,
+            "appointment_lead_minutes": 15,
+            "report_sessions_needing_me": false,
+            "task_events": false,
+            "world_events": false
+          }
+        },
+        "subagent_condensation_enabled": {
+          "description": "Whether a tool step classified `slow` has its already-gated local result condensed\nthrough a subagent. `DESIGN.md` § Wechselspiel und Ansprechbarkeit names this class\nof tool by an expectation, not a measured duration — there is no clock behind this\nswitch either, which is why it reads as on/off rather than as a number of seconds:\na duration here would promise a precision this program does not have. Off means\nevery tool step runs in the daemon itself, whatever its class, which stays a\nbackground task either way and never blocks the chat.",
+          "type": "boolean",
+          "default": true
+        },
+        "worlds": {
+          "description": "Where the workbench's agent worlds are read from. See [`WorldsSettings`].",
+          "$ref": "#/$defs/WorldsSettings",
+          "default": {
+            "enabled": true,
+            "poll_seconds": 60,
+            "sources": [
               {
-                "id": "macos-say",
-                "protocol": "cli",
-                "url": "/usr/bin/say"
+                "machine": "lokal",
+                "cli_dir": "",
+                "roots": [],
+                "projects": [],
+                "global": "",
+                "without_global": false
               }
-            ],
-            "roles": {
-              "tts": {
-                "primary": "macos-say"
-              }
-            }
+            ]
           }
         }
       }
@@ -1339,16 +2124,19 @@
       ]
     },
     "HighRiskSettings": {
-      "description": "The three tool classes that reach outside the machine. `DESIGN.md` § Sicherheit puts\nthem on `ask` and lets only the person raise them, with a warning.",
+      "description": "The three tool classes that reach outside the machine. `DESIGN.md` § Sicherheit puts\nthem on `ask` and lets only the person raise them, with a warning.\n\nNo tool of `companion-brain` sends mail, pushes to a phone or publishes anything yet\n(2026-09-03) — these three fields travel with the settings document and the shell can\nshow and raise them, but nothing reads them: they take effect only once the matching\ntool exists. The guard against a future tool of one of these classes shipping without\nalso reading its field is a test over\n`companion_brain::tools::ToolBox::ungated_high_risk_specs`.",
       "type": "object",
       "properties": {
         "mail": {
+          "description": "No effect until a mail tool exists — see the struct doc above.",
           "$ref": "#/$defs/ToolBoundary"
         },
         "push": {
+          "description": "No effect until a push tool exists — see the struct doc above.",
           "$ref": "#/$defs/ToolBoundary"
         },
         "publish": {
+          "description": "No effect until a publish tool exists — see the struct doc above.",
           "$ref": "#/$defs/ToolBoundary"
         }
       },
@@ -1356,6 +2144,21 @@
         "mail",
         "push",
         "publish"
+      ]
+    },
+    "VoicePath": {
+      "description": "Which speech path one connected agent uses.\n\n`DESIGN.md` § Session-Adapter, addendum of 2026-08-24: an agent that brings its own\nspeech may keep it, and the companion then passes text and control through without\nlistening or speaking for that agent. An agent without speech of its own gets the\ncompanion's pipeline in front of it, which is why that is the default here.\n\nThis is an ordinary setting, deliberately not a high-risk one: both paths speak on the\nsame machine to the same person, and neither widens what runs unasked. It therefore\nstays out of [`Settings::high_risk_changes`].\n\n**Nothing acts on this yet (2026-08-24).** The value is stored, checked, carried over\nthe socket and read back by the shell, but no part of the voice pipeline asks for it:\n`passthrough` today leaves the companion's microphone and voice exactly where\n`companion` leaves them. The wiring belongs to the voice integration. Until it lands,\nsomebody who sets `passthrough` and still hears the companion is not looking at a bug\nin this field.",
+      "oneOf": [
+        {
+          "description": "The companion's own speech pipeline runs in front of the agent: it listens for the\nperson, hands the agent text, and says the agent's answers itself. The default,\nbecause an agent that cannot speak is left mute by any other choice.",
+          "type": "string",
+          "const": "companion"
+        },
+        {
+          "description": "The agent keeps its own speech. The companion passes text and control through and\nkeeps its own microphone and voice out of this agent's way, so the two never talk\nover each other.",
+          "type": "string",
+          "const": "passthrough"
+        }
       ]
     },
     "NotificationChannel": {
@@ -1484,7 +2287,7 @@
       ]
     },
     "EndpointConfig": {
-      "description": "The endpoint part of the settings: the profiles, and which role uses which of them.",
+      "description": "The endpoint part of the settings: the profiles, and which role uses which of them.\n\nThe schema deliberately advertises the empty configuration as the default, not the one\n`Default::default` builds: that one depends on the operating system the daemon runs on\n(see below), and a generated schema that changes with its build host is not a contract.\nWhat a given daemon actually starts with is a runtime matter and reaches the client in\n`settings_get`, never through a schema annotation.",
       "type": "object",
       "properties": {
         "profiles": {
@@ -1492,24 +2295,14 @@
           "items": {
             "$ref": "#/$defs/EndpointProfile"
           },
-          "default": [
-            {
-              "id": "macos-say",
-              "protocol": "cli",
-              "url": "/usr/bin/say"
-            }
-          ]
+          "default": []
         },
         "roles": {
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/RoleBinding"
           },
-          "default": {
-            "tts": {
-              "primary": "macos-say"
-            }
-          }
+          "default": {}
         }
       }
     },
@@ -1529,7 +2322,7 @@
           "type": "string"
         },
         "key_ref": {
-          "description": "Name under which the key lives in the the secret store of the daemon, never the\nkey itself. Absent for a local endpoint that needs none.",
+          "description": "Name under which the key lives in the the secret store of the daemon, never the\nkey itself. Absent for a local endpoint that needs none.\n\nSince 2026-09-03 this name is the profile's own [`Self::id`] and nothing else — see\n[`Self::key_name`] for why, and [`EndpointConfig::borrowed_keys`] for what refuses a\ndocument that says otherwise. The field stays because it is what says *whether* a\nprofile needs a key at all, and because a configuration written before that date is\nmigrated by reading it.",
           "type": [
             "string",
             "null"
@@ -1542,12 +2335,33 @@
             "null"
           ]
         },
+        "voice": {
+          "description": "Voice this profile speaks with, when the caller names none.\n\nA speech endpoint has its own set of voice names, and the OpenAI ones are not\namong them: Kokoro, the local default here, knows `af_heart` and refuses `alloy`\nmid-answer. That belongs next to the model, for the same reason the model does —\nwhich voices exist is a property of the profile, not of the sentence being spoken.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "args": {
           "description": "Fixed arguments for a CLI profile, in front of whatever the driver adds.",
           "type": "array",
           "items": {
             "type": "string"
           }
+        },
+        "language": {
+          "description": "The spoken language this profile is good at, as a lowercase ISO code (`\"de\"`).\n\n`DESIGN.md` § Voice ties language to the model, not to the app, so this is the one\nplace that says which language a TTS profile actually speaks well. Absent for a\nprofile that was never told — Kokoro's `af_heart` reads any text handed to it, German\nincluded, just badly, and nothing here claims otherwise on its behalf. The TTS role\nchain uses it to move a matching profile to the front for a sentence detected as that\nlanguage; a profile nobody tagged keeps its configured place.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoning_effort": {
+          "description": "How much a reasoning model may think before it writes the answer, as the\nOpenAI-compatible `reasoning_effort` field. Absent for every profile that never asked\nfor it, and then nothing is sent at all.\n\nOpt-in for the same reason `stream_options.include_usage` is not sent: a server that\ndoes not know a field answers the whole request with 400, and a chat that fails over\na knob nobody set would be the worse trade. Measured 2026-09-05 on this machine, both\nlocal servers behind `wb-modell-proxy`: without it, `qwen3.8-27b` over\n`mlx_vlm.server` and `ornith:9b` over Ollama spend their whole answer in\n`reasoning_content`/`reasoning`, which this protocol does not carry — the person sees\na first token after 30 seconds, or none at all. With `\"none\"` the first visible token\narrives after half a second on the 9B. It is a string rather than an enum because the\nset of accepted values belongs to the server, not to this program.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -1573,6 +2387,586 @@
       },
       "required": [
         "primary"
+      ]
+    },
+    "NetworkSettings": {
+      "description": "The TCP/TLS listener a phone reaches the daemon through.\n\n`DESIGN.md` § Mobil, Ferntransport: off at the factory, and switching it on is a\nhigh-risk setting — at the network port the UID check of the Unix socket falls away, and\nwhat is left is the certificate and the token. The role `agent` does not exist there at\nall; a remote orchestrator keeps reporting to the daemon on its own machine.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Off unless a person turned it on, with the warning in front of them.",
+          "type": "boolean",
+          "default": false
+        },
+        "bind_address": {
+          "description": "The address to bind. See [`DEFAULT_NETWORK_BIND`].",
+          "type": "string",
+          "default": "127.0.0.1"
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535,
+          "default": 47801
+        },
+        "advertise_address": {
+          "description": "The address a pairing tells a device to connect to, when that is not the address\nthe daemon binds. Empty means they are the same.\n\nA wildcard bind says which interfaces the daemon accepts on, not where anybody can\nreach it, and a daemon behind a forwarded port or a dynamic name is reached under\nsomething it never sees. Both cases put the reachable address here.",
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "VoiceServerSettings": {
+      "description": "The local speech server the daemon starts when it needs one.\n\n`DESIGN.md` § Voice puts the speech models behind endpoint profiles, and the local ones\nlive in a server that has to be running before the first word. Expecting somebody to\nhave started it is what made the voice path fail with \"connection refused\" instead of\nspeaking; expecting the daemon to keep it running all day would hold a model in memory\nfor the twenty-three hours nobody talks.\n\nSo: started at the first voice request, waited for, and stopped again after a\nconfigurable idle. Off at the factory, because starting a program named in a file is\nsomething a person decides — the same reasoning as for the terminal adapter, and the\nsame warning when it is switched on.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Off unless a person turned it on, with the warning in front of them.",
+          "type": "boolean",
+          "default": false
+        },
+        "command": {
+          "description": "Program and arguments, program first. There is no default program: which server\nserves the local models is a choice, and guessing one would start something nobody\nasked for.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "env": {
+          "description": "Environment variables for it, on top of the daemon's own.\n\n`HF_HUB_OFFLINE=1` is set by the daemon whatever stands here: a speech server that\nreaches for a model download on the first request turns a spoken sentence into a\nnetwork call nobody asked for. Naming it here anyway is allowed and changes nothing.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "ready_url": {
+          "description": "The URL the daemon asks until the server answers, for example\n`http://127.0.0.1:8765/v1/models`. Any answer counts as ready, including an error\nstatus: what is being established is that the server is listening and serving, not\nthat this particular route exists.",
+          "type": "string",
+          "default": ""
+        },
+        "startup_timeout_seconds": {
+          "description": "How long the daemon waits for it to answer before it gives up and says so. Loading a\nspeech model takes seconds to tens of seconds, so this is generous by default.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 120
+        },
+        "idle_timeout_seconds": {
+          "description": "How long without a voice request before the server is stopped again. Zero keeps it\nrunning for as long as the daemon does.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 300
+        }
+      }
+    },
+    "LocationSettings": {
+      "description": "Where a coordinate for the weather and places tools comes from, when a call does not name\na place of its own. `DESIGN.md` § Ausbau, \"Werkzeugkatalog\": \"Standort kommt aus der\nmacOS-Ortung … wenn freigegeben\", with manual coordinates as the alternative it names\nfirst — \"Ort/Koordinaten in Settings\".",
+      "type": "object",
+      "properties": {
+        "allow_system_location": {
+          "description": "Off unless a person turned it on. `DESIGN.md` § Ausbau: \"Ortung ist eine eigene,\nstandardmäßig AUS-Einstellung.\" Even switched on, this only allows the daemon to ask\nthe operating system for a position at all — the system's own dialog, not this flag,\ndecides whether it actually gets one.",
+          "type": "boolean",
+          "default": false
+        },
+        "place_name": {
+          "description": "A place name, shown back to the person; carries no meaning for the tools themselves,\nwhich read only the coordinates below.",
+          "type": "string",
+          "default": ""
+        },
+        "latitude": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "longitude": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        }
+      }
+    },
+    "ProactiveSettings": {
+      "description": "What the companion watches for on its own, and where each of the four thresholds sits.\n\n`DESIGN.md` § Ausbau, \"Volle Proaktivität\": \"Session hängt auffällig lange, Budget wird\neng, ein Termin rückt heran, der Morgen-Überblick beim ersten Erscheinen. Jede Meldeklasse\nist einzeln abschaltbar.\"\n\nAll four are on at the factory, unlike every other switch of this document that decides\nwhat the companion may do by itself. Watching and saying so is the *bottom* rung of\n§ Verhalten, \"Eigene Autonomie\" — the rung [`Autonomy::Observe`] is named after — so a\nperson who never touched a setting has a companion that reports, which is what they\ninstalled it for. Nothing here acts: the four notices are sentences, and the only thing\nthey cost is the person's attention, which is what the thresholds are for.",
+      "type": "object",
+      "properties": {
+        "session_stalled": {
+          "description": "A session busy without a sign of life for longer than\n[`Self::stalled_after_minutes`].",
+          "type": "boolean",
+          "default": true
+        },
+        "budget_tight": {
+          "description": "The subscription budget past [`Self::budget_percent`].",
+          "type": "boolean",
+          "default": true
+        },
+        "appointment_soon": {
+          "description": "An appointment starting within [`Self::appointment_lead_minutes`]. Silent without the\ncalendar permission, and it never asks for one of its own accord: a dialog nobody\nopened is exactly the unasked interruption this whole section is careful about.",
+          "type": "boolean",
+          "default": true
+        },
+        "morning_briefing": {
+          "description": "The overview at the first appearance of the day.",
+          "type": "boolean",
+          "default": true
+        },
+        "stalled_after_minutes": {
+          "description": "How long a session may be busy without any sign of life before it counts as stuck.\n\nTwenty minutes because a long tool step, a big test suite and a model that is thinking\nall look exactly like a hung session from the outside for several minutes at a time;\nunder that, the notice would be about the companion's impatience rather than about the\nsession. Zero switches the class off the same way [`Self::session_stalled`] does — a\nthreshold of nothing would make every busy session stuck.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 20
+        },
+        "budget_percent": {
+          "description": "Share of the budget, in per cent, past which the companion says so. Zero switches the\nclass off, for the same reason as above.\n\nNot [`Settings::budget_limit_percent`], which is the share at which the companion\nstops *starting* things: a person may well want to hear about it long before anything\nis refused, and hearing about it at the moment work stops is too late to plan around.",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255,
+          "default": 85
+        },
+        "appointment_lead_minutes": {
+          "description": "How many minutes before an appointment the notice comes. Zero switches the class off.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 15
+        },
+        "report_sessions_needing_me": {
+          "description": "Whether one line goes into the conversation when a session needs the person: it has\nasked something, it waits for input, or a permission was refused for it.\n\nOff at the factory, unlike the four classes above, and the only one of these values\nthat writes into the chat history at all. `DESIGN.md` § Chat-Hygiene, 2026-09-05: the\nhistory is the conversation, and what a session reports about itself belongs in the\nnotice log — \"es sei denn, der Mensch hat `report_sessions_needing_me` eingeschaltet,\ndann genau eine Zeile je Anlass\". He says when he wants it; until he does, the figure\nand the session list carry the news on their own.",
+          "type": "boolean",
+          "default": false
+        },
+        "task_events": {
+          "description": "Whether the companion addresses a workbench task that needs the person — it asks\nsomething, it waits for acceptance, or its lead agent gave it up — with a tone, a\nbanner and a spoken sentence (`ProactiveClass::TaskEvent`).\n\nOff at the factory, and only the person switches it: \"Ob der Companion eine Aufgabe,\ndie ihn braucht, von sich aus anspricht, hängt an seinem Schalter, der ab Werk aus ist\nund den nur Skryx-L-A stellt\" (`claude-workbench/docs/AGENTS-PLAN.md` § 6). Off does not\nhide a task: every event of one still goes into the notice log and to the figure, and\nthe session list and the morning overview carry where each task stands.",
+          "type": "boolean",
+          "default": false
+        },
+        "world_events": {
+          "description": "Whether the companion addresses what a workbench world needs from the person — an\nopen question of its lead agent, a message an agent marked as a question or a result\nfor the person — with a tone, a banner and a spoken sentence\n(`ProactiveClass::WorldEvent`).\n\nOff at the factory, for the reason [`Self::task_events`] is: the plan makes the\ncompanion the way these reach the person (`claude-workbench/docs/AGENTS-PLAN.md` § 7),\nand whether that way makes a sound is the person's switch. Off does not hide\nanything: every such item still goes into the notice log and to the figure, the\nmorning overview counts them, and the companion reads them out when asked.",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "WorldsSettings": {
+      "description": "Where the agent worlds of the workbench are read from (`claude-workbench/docs/AGENTS-PLAN.md`\n§ 7: the companion is the way \"braucht dich\" reaches the person, and a player in the\nworld's channel).\n\nRead only through the workbench's own programs — `wb-welt finden`, `wb-welt ansicht`,\n`wb-kanal`, `wb-ticket` — and never by opening a world's files: the world has one writer,\nits data library, and a reader that bypassed it would see half-written transactions the\nlibrary's own view hides.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Whether the daemon reads worlds at all. On at the factory: it only reads, a machine\nwithout the workbench's programs simply has no worlds, and the companion being the\nway a world's question reaches the person is the plan, not an extra.",
+          "type": "boolean",
+          "default": true
+        },
+        "poll_seconds": {
+          "description": "How often the worlds are read, in seconds. At least [`MIN_WORLD_POLL_SECONDS`].",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 60
+        },
+        "sources": {
+          "description": "The machines whose worlds are read. This machine alone at the factory.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorldSource"
+          },
+          "default": [
+            {
+              "machine": "lokal",
+              "cli_dir": "",
+              "roots": [],
+              "projects": [],
+              "global": "",
+              "without_global": false
+            }
+          ]
+        }
+      }
+    },
+    "WorldSource": {
+      "description": "One machine whose worlds the companion reads, and how to ask it.",
+      "type": "object",
+      "properties": {
+        "machine": {
+          "description": "[`LOCAL_WORLD_MACHINE`] for this machine, otherwise the ssh destination the\nworkbench's programs run on (`peer`, `ich@peer`). The companion uses the ssh this\naccount already has, with its keys and its configuration; it adds no transport of\nits own.",
+          "type": "string",
+          "default": "lokal"
+        },
+        "cli_dir": {
+          "description": "The directory holding `wb-welt`, `wb-kanal`, `wb-ticket` and `agents_traeger.py`, on\nthat machine. Empty looks them up on the `PATH`. A leading `~/` is that machine's\nhome directory.",
+          "type": "string",
+          "default": ""
+        },
+        "roots": {
+          "description": "Directories whose subfolders are searched for a project world (`wb-welt finden\n--wurzel`). Empty together with [`Self::projects`] leaves the workbench's own\ndefault, `~/AI`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "projects": {
+          "description": "Project directories checked directly (`--projekt`).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "global": {
+          "description": "The global world (`--global`). Empty leaves the workbench's own default.",
+          "type": "string",
+          "default": ""
+        },
+        "without_global": {
+          "description": "Skip the global world entirely (`--ohne-global`).",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "PairingOffer": {
+      "description": "A pairing that is waiting to be redeemed. The answer to `create_pairing`.\n\n`DESIGN.md` § Mobil, Identität und Vertrauen: the QR carries three things — the address,\nthe one-time code and the fingerprint of the daemon's certificate. The app pins the\nfingerprint from the QR, which is what makes the first connection something other than\ntrust on first sight.",
+      "type": "object",
+      "properties": {
+        "uri": {
+          "description": "The whole QR content, which is [`Self::address`], [`Self::code`] and\n[`Self::fingerprint`] in one line.",
+          "type": "string"
+        },
+        "code": {
+          "description": "The long code, at least 60 bits of entropy. What the QR carries.",
+          "type": "string"
+        },
+        "short_code": {
+          "description": "The short code for typing by hand, out of the same pairing. Shorter on purpose: it\nmeets the same attempt brake, and a code nobody can type is a code nobody uses.",
+          "type": "string"
+        },
+        "address": {
+          "description": "Where the app should connect, `host:port`.",
+          "type": "string"
+        },
+        "fingerprint": {
+          "description": "SHA-256 of the daemon's certificate in DER form, lower-case hex.",
+          "type": "string"
+        },
+        "machine": {
+          "description": "This machine, so the app can label the connection before it has ever listed a session.",
+          "$ref": "#/$defs/MachineIdentity"
+        },
+        "device_name": {
+          "description": "The name the device will carry in the list.",
+          "type": "string"
+        },
+        "level": {
+          "$ref": "#/$defs/DeviceLevel"
+        },
+        "expires_at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "uri",
+        "code",
+        "short_code",
+        "address",
+        "fingerprint",
+        "machine",
+        "device_name",
+        "level",
+        "expires_at_ms"
+      ]
+    },
+    "DeviceLevel": {
+      "description": "What a paired device may do.\n\nThe same two levels as the remote machines of `DESIGN.md` § Sicherheit. A phone does not\nget the full command set by being a phone; the person picks the level when they pair it.",
+      "oneOf": [
+        {
+          "description": "Read the session list, read output, read the settings. Nothing that changes anything.\nThe default, because the careful half of a choice is the one a missing field lands on.",
+          "type": "string",
+          "const": "observe"
+        },
+        {
+          "description": "Everything the person's own shell may do, approvals included.",
+          "type": "string",
+          "const": "control"
+        }
+      ]
+    },
+    "Device": {
+      "description": "One paired device, as a list shows it. Never carries the token.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/DeviceId"
+        },
+        "display_name": {
+          "description": "What the person called it when they paired it.",
+          "type": "string"
+        },
+        "level": {
+          "$ref": "#/$defs/DeviceLevel"
+        },
+        "created_at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "last_seen_ms": {
+          "description": "When this device last got through the handshake, if it ever did.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "revoked_at_ms": {
+          "description": "When the device was revoked. A revoked entry stays in the list, so somebody can see\nthat the phone they lost is off rather than wondering whether it was ever on.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "display_name",
+        "level",
+        "created_at_ms"
+      ]
+    },
+    "TurnId": {
+      "description": "Identifies one turn of the companion's own chat: one confirmation, or one background report. Assigned by the daemon, so two turns running at once never share an id and their events never mix on the wire.",
+      "type": "string"
+    },
+    "RegistryEntry": {
+      "description": "One line of the register: what ran, when, and what it left behind.\n\n`DESIGN.md` § Datenmodelle lists this as: session_id, auftrag_id, projekt, start, ende,\nergebnis, offene_punkte, selbstantworten, kosten.",
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "auftrag_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuftragId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "project": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started_at_ms": {
+          "description": "Unix time in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "ended_at_ms": {
+          "description": "Unix time in milliseconds, absent while the session still runs.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "result_path": {
+          "description": "Path of the result file the session wrote.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "open_points": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "self_answers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SelfAnswer"
+          },
+          "default": []
+        },
+        "cost": {
+          "description": "Unknown wherever the adapter cannot report spend, rather than a plausible zero.",
+          "$ref": "#/$defs/Provenance8"
+        }
+      },
+      "required": [
+        "schema_version",
+        "session_id",
+        "started_at_ms",
+        "cost"
+      ]
+    },
+    "SelfAnswer": {
+      "description": "A question the companion answered on its own instead of waking the person, kept so the\nanswer can be reviewed afterwards.",
+      "type": "object",
+      "properties": {
+        "question": {
+          "type": "string"
+        },
+        "answer": {
+          "type": "string"
+        },
+        "source": {
+          "description": "Where the answer came from: the job file, a guardrail, the project profile.",
+          "type": "string"
+        },
+        "answered_at_ms": {
+          "description": "Unix time in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "question",
+        "answer",
+        "source",
+        "answered_at_ms"
+      ]
+    },
+    "Provenance8": {
+      "description": "A value together with where it came from.\n\n`DESIGN.md` § Session-Adapter requires every status field to carry its origin, and the\nsession list to show an unknown field as unknown rather than as empty or zero. Making\n`Unknown` a variant without a payload is what enforces that: there is no value to\nmistake for a measurement.",
+      "oneOf": [
+        {
+          "description": "Read from a structured channel: a hook, a status file, an adapter report.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "measured"
+            },
+            "value": {
+              "$ref": "#/$defs/Cost"
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "Derived or guessed, for example a token count extrapolated from elapsed time.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "estimated"
+            },
+            "value": {
+              "$ref": "#/$defs/Cost"
+            }
+          },
+          "required": [
+            "origin",
+            "value"
+          ]
+        },
+        {
+          "description": "The adapter cannot supply this field at all.",
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string",
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "origin"
+          ]
+        }
+      ]
+    },
+    "Cost": {
+      "description": "What a run cost.\n\nThree fields, because the three sources `DESIGN.md` § Kosten names measure three\ndifferent things and none of them converts into the others: a Claude transcript counts\ntokens and sometimes carries a price, an API profile turns tokens into money through the\nprice table, and the workbench knows only how much of a subscription window a run ate.\nA field nothing measured stays `None` rather than becoming a plausible zero, the same\nway [`crate::Provenance::Unknown`] does one level up.",
+      "type": "object",
+      "properties": {
+        "tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "budget_fraction": {
+          "description": "Share of the subscription window this run used, between 0.0 and 1.0.\n\nThe workbench's own answer to \"what did that cost\": `wb-budget` reports how full the\nfive-hour and seven-day windows are, and the difference between the reading at the\nstart of a session and the one at its end is the share that session spent. Absent\nwherever no such pair of readings exists — a window that reset in between, a daemon\nthat was not running at the start — because a share computed across a reset would be\na negative number dressed up as a measurement.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      }
+    },
+    "DayCost": {
+      "description": "What one calendar day cost, summed over the register rows that started in it.\n\n`DESIGN.md` § Kosten: \"Zaehler pro Session und Tag, soweit eine Quelle existiert ... Ohne\nQuelle zeigt er unbekannt.\" [`Self::unknown_sessions`] is that second half made countable:\na day whose figure rests on three of eight sessions has to say so, or the number reads as\nthe whole day.",
+      "type": "object",
+      "properties": {
+        "day": {
+          "description": "The day as `YYYY-MM-DD`, in the local time zone of the machine that wrote the rows.",
+          "type": "string"
+        },
+        "cost": {
+          "description": "The sum over every session of that day that had a source. Unknown when none had one.",
+          "$ref": "#/$defs/Provenance8"
+        },
+        "known_sessions": {
+          "description": "How many sessions of that day contributed a measured cost.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "unknown_sessions": {
+          "description": "How many sessions of that day had no cost source at all.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "day",
+        "cost",
+        "known_sessions",
+        "unknown_sessions"
       ]
     },
     "ProtocolError": {
@@ -1603,9 +2997,14 @@
           ]
         },
         {
-          "description": "Client and daemon disagree about [`crate::PROTOCOL_VERSION`].",
+          "description": "The client's and the daemon's protocol version ranges do not overlap at all\n(`negotiate_protocol_version`).",
           "type": "string",
           "const": "unsupported_protocol_version"
+        },
+        {
+          "description": "Too many failed attempts from this source. The wait grows with every one.",
+          "type": "string",
+          "const": "too_many_attempts"
         },
         {
           "description": "The token was not recognised.",
@@ -1621,6 +3020,11 @@
           "description": "The adapter does not implement this command.",
           "type": "string",
           "const": "not_supported"
+        },
+        {
+          "description": "An adapter that would have to answer this could not be asked at all — it is not\ninstalled, its backend is down, or it ran past the daemon's deadline.\n\nAdded 2026-09-03. A `send`, `read`, `interrupt` or `stop` asks every adapter which\nsessions it sees and refuses when none names the one asked for. That refusal used to\nbe `unknown_session` even when the adapter that owns the session was simply\nunreachable, which says \"there is no such session\" about one that is very likely\nrunning — a person then looks for the session instead of for the adapter. The two\ncases are told apart now: `unknown_session` means every adapter answered and none knew\nit, this means at least one could not answer at all. The message names which.",
+          "type": "string",
+          "const": "adapter_unavailable"
         },
         {
           "description": "The adapter tried and failed.",
@@ -1683,7 +3087,7 @@
       ]
     },
     "Event": {
-      "description": "Everything an adapter can report about a session, plus what the voice pipeline reports\nabout a dictation or a spoken answer.\n\nThe first thirteen variants are the event list from `DESIGN.md` § Session-Adapter, in\nthat order. The four voice events after them were added in phase 1b and belong to no\nsession: they carry a [`VoiceId`] instead, and their envelope has no session id. The\nthree chat events after them are the answer of the companion itself and belong to no\nsession either. The last one says that the settings document changed and belongs to the\ndaemon rather than to anything it drives. All of them are additive, so they do not raise\n[`crate::PROTOCOL_VERSION`] — `DESIGN.md` § Architektur, Protokoll-Kompatibilität: a\nclient that does not know them ignores them and counts them.",
+      "description": "Everything an adapter can report about a session, plus what the voice pipeline reports\nabout a dictation or a spoken answer.\n\nThe first thirteen variants are the event list from `DESIGN.md` § Session-Adapter, in\nthat order. The four voice events after them were added in phase 1b and belong to no\nsession: they carry a [`VoiceId`] instead, and their envelope has no session id. The\nthree chat events after them are the answer of the companion itself and belong to no\nsession either. The last two belong to the daemon rather than to anything it drives: the\nsettings document changed, and the companion said something out of its own observation.\nAll of them are additive, so they do not raise\n[`crate::PROTOCOL_VERSION`] — `DESIGN.md` § Architektur, Protokoll-Kompatibilität: a\nclient that does not know them ignores them and counts them.",
       "oneOf": [
         {
           "type": "object",
@@ -1760,6 +3164,25 @@
             "event": {
               "type": "string",
               "const": "waiting_for_input"
+            }
+          },
+          "required": [
+            "event"
+          ]
+        },
+        {
+          "description": "A tool call was refused automatically, by policy, rather than left for a person to\ndecide.\n\nDistinct from [`Self::WaitingForInput`] on purpose: nothing here is still waiting on\nan answer, because the adapter already told the agent no before this event went out.\n`DESIGN.md` § Sicherheit expects exactly that refusal for an action with an effect\noutside the machine — the field this event fills is for saying so plainly, not for\npresenting an unanswerable question as an open one.",
+          "type": "object",
+          "properties": {
+            "hint": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "event": {
+              "type": "string",
+              "const": "permission_refused"
             }
           },
           "required": [
@@ -2031,7 +3454,7 @@
           ]
         },
         {
-          "description": "The spoken answer is complete. No further chunk of this id follows.",
+          "description": "The spoken answer is over. No further chunk of this id follows.\n\nOver, not necessarily complete: `reason` says whether the endpoint spoke the whole\ntext, whether somebody stopped it with `tts_stop`, or whether no endpoint could\nspeak it at all. Exactly one of these per spoken answer, and the daemon sends it in\nevery one of the three cases so a client can leave its speaking state without\nhaving to guess from a silence.",
           "type": "object",
           "properties": {
             "voice_id": {
@@ -2042,6 +3465,11 @@
                 "string",
                 "null"
               ]
+            },
+            "reason": {
+              "description": "Absent on the wire means [`SpeechEnd::Completed`], which is what the first\nversion of this event meant without saying so.",
+              "$ref": "#/$defs/SpeechEnd",
+              "default": "completed"
             },
             "event": {
               "type": "string",
@@ -2054,9 +3482,12 @@
           ]
         },
         {
-          "description": "A piece of the answer the companion is writing, in the order it was produced.\n\nAppended to whatever the earlier pieces of the same answer said; unlike\n[`Self::SttPartial`] it never replaces them. There is no id on the three chat\nevents because the daemon answers one message at a time: a second `chat_message`\nwhile an answer is still being written is refused rather than interleaved.",
+          "description": "A piece of the answer the companion is writing, in the order it was produced.\n\nAppended to whatever the earlier pieces of the same answer said; unlike\n[`Self::SttPartial`] it never replaces them. `turn_id` says which turn it belongs\nto (`DESIGN.md` § Wechselspiel und Ansprechbarkeit): the confirmation of a\n`chat_message` is one turn, and a report that follows once a deferred tool step\nends is another, with its own id — a second `chat_message` while the first is\nstill being worked on is answered rather than refused, so two turns can be under\nway at once and their events must never be told apart by arrival order alone.",
           "type": "object",
           "properties": {
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
             "text": {
               "type": "string"
             },
@@ -2067,13 +3498,17 @@
           },
           "required": [
             "event",
+            "turn_id",
             "text"
           ]
         },
         {
-          "description": "The companion used one of its tools.\n\n`summary` is a short line for the panel, never the whole tool result: the result\ngoes to the model, the person sees what was done.",
+          "description": "The companion used one of its tools.\n\n`summary` is a short line for the panel, never the whole tool result: the result\ngoes to the model, the person sees what was done. A tool step that takes a moment\ncarries at least two of these — one when it starts, one when it ends — so the\npanel can show the live line `DESIGN.md` asks for instead of a silent pause.",
           "type": "object",
           "properties": {
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
             "name": {
               "type": "string"
             },
@@ -2087,19 +3522,37 @@
           },
           "required": [
             "event",
+            "turn_id",
             "name",
             "summary"
           ]
         },
         {
-          "description": "The answer is complete.\n\n`text` is the whole answer, so a client that missed a delta does not have to piece\nit together, and `spoken` says whether it was also said out loud. An answer that\nfailed part way ends here as well, with what there was: the error arrives as\n[`Self::Error`] next to it, the same way a failed dictation does.",
+          "description": "One turn is complete.\n\n`text` is the whole of what this turn said, so a client that missed a delta does\nnot have to piece it together, and `spoken` says whether it was also said out\nloud. An answer that failed part way ends here as well, with what there was: the\nerror arrives as [`Self::Error`] next to it, the same way a failed dictation does.\n\n`continues` is what tells a client whether to keep listening: true means the\nconfirmation is done but a tool step is still running in the background, and its\nreport will arrive as a later `chat_done` under a different `turn_id`. False ends\nthe exchange this `chat_message` started — whether that took one turn or two.\n\n`report_turn_id` names that later turn id whenever `continues` is true, so a client\ncan tell the two turns of one exchange apart without guessing which of its other open\nturns is the report — a second question asked while the first is still deferred opens\na turn of its own the same way a report does, and nothing about either turn id says\nwhich is which on its own. `None` whenever `continues` is false: a report is the end\nof its exchange and never announces a further one of its own. Absent on the wire from\na daemon older than this field, which decodes as `None` the same way.",
           "type": "object",
           "properties": {
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
             "text": {
               "type": "string"
             },
             "spoken": {
               "type": "boolean"
+            },
+            "continues": {
+              "type": "boolean",
+              "default": false
+            },
+            "report_turn_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TurnId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "event": {
               "type": "string",
@@ -2108,6 +3561,7 @@
           },
           "required": [
             "event",
+            "turn_id",
             "text",
             "spoken"
           ]
@@ -2123,6 +3577,45 @@
           },
           "required": [
             "event"
+          ]
+        },
+        {
+          "description": "The companion says something out of its own observation, without having been asked.\n\n`DESIGN.md` § Ausbau, \"Volle Proaktivität\". Its own event rather than a `chat_done` of\nan invented turn: a turn is an answer to a question, a client may cancel one, and this\nis neither — nobody asked, and there is nothing to stop. Carrying the class next to the\ntext is what lets a shell reach the person over the channels of `notification_channels`\nwithout having to read the sentence to find out what kind of notice it is.\n\nIt belongs to no session even where it is about one: the sentence names the session,\nand an event with a session id would reach a docked orchestrator that happens to own\nthat session, which is the person's notice and not its.",
+          "type": "object",
+          "properties": {
+            "class": {
+              "$ref": "#/$defs/ProactiveClass"
+            },
+            "text": {
+              "type": "string"
+            },
+            "quiet": {
+              "description": "True for a notice that goes into the log and to the figure and nowhere else: no\ntone, no banner, no spoken sentence.\n\nAdded 2026-09-10 for [`ProactiveClass::TaskEvent`]. The plan keeps two things apart\nthat every earlier class had together: every event of a task is written down, but\nonly one that needs the person, with the switch on, is said to them — \"Pausieren\nlöst nie eine Ansprache durch den Companion aus\". Absent on the wire means false,\nwhich is what every notice before this field meant, so an older daemon's notices\nare announced exactly as they were and the bytes of an unquiet one do not change.",
+              "type": "boolean"
+            },
+            "ack": {
+              "description": "What to send back with `acknowledge_notice` once the person heard or read this\nnotice, for a notice whose source wants to know that.\n\nAdded 2026-09-14 for [`ProactiveClass::WorldEvent`]: a message an agent marked as a\nquestion or a result for the person counts as \"braucht dich\" in its world until it\nis acknowledged (`claude-workbench/docs/AGENTS-DATEN.md`, \"Nachrichten an den\nMenschen\"), and only the shell knows whether the sentence was heard or the banner\nwas opened. Opaque to the shell. Absent on every other notice, so their bytes do not\nchange.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "notice_id": {
+              "description": "What to send back with `notice_shown` once a shell put this notice in front of the\nperson, for a notice whose source says it only once.\n\nAdded 2026-09-14 for [`ProactiveClass::WorldEvent`]: the daemon marks an item of a\nworld as said when a shell that declared `world_events` confirms it showed it, not\nwhen it was published. Opaque to the shell. Absent on every other notice.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "event": {
+              "type": "string",
+              "const": "proactive_notice"
+            }
+          },
+          "required": [
+            "event",
+            "class",
+            "text"
           ]
         }
       ]
@@ -2152,24 +3645,63 @@
         }
       ]
     },
-    "AudioFormat": {
-      "description": "Container format of one piece of audio on the wire.",
+    "SpeechEnd": {
+      "description": "Why a spoken answer ended.\n\n`DESIGN.md` § Mobil, Voice am Handy: the phone can stop a spoken answer, and stopping it\nhas to be a fact on the stream rather than a silence the client has to interpret. Absent\non the wire means [`Self::Completed`], which is what the first version of `tts_done`\nmeant without saying it.",
       "oneOf": [
         {
+          "description": "The endpoint spoke the whole text and every chunk of it was sent.",
           "type": "string",
-          "enum": [
-            "mp3"
-          ]
+          "const": "completed"
         },
         {
-          "description": "RIFF/WAVE with little-endian PCM16 samples.",
+          "description": "Somebody asked for it to stop with `tts_stop`. What was not sent is not sent.",
           "type": "string",
-          "const": "wav"
+          "const": "cancelled"
         },
         {
-          "description": "Apple AIFF, which is what `say -o` writes.",
+          "description": "No endpoint of the chain could speak it. An `error` event says which and why.",
           "type": "string",
-          "const": "aiff"
+          "const": "failed"
+        }
+      ]
+    },
+    "ProactiveClass": {
+      "description": "Why the companion said something nobody asked it for.\n\n`DESIGN.md` § Ausbau, \"Volle Proaktivität\" names the first four: \"Session hängt\nauffällig lange, Budget wird eng, ein Termin rückt heran, der Morgen-Überblick beim ersten\nErscheinen. Jede Meldeklasse ist einzeln abschaltbar.\" The class travels with the text\nbecause the switch is per class — a shell that shows the notice, and a person who later\nasks why it came, both need to know which one it was, and reading that back out of\nthe sentence would be guessing.\n\n[`Self::SessionReport`] came after them, on 2026-09-05, and is the one that has no switch\nof its own here: it carries the finished-report of `DoneHandling`'s second and third\nstage, which used to be written straight into the conversation as a line of the companion\n(`companion-daemon`, `done::announce` calling `Brain::announce`). That is a session\nreporting about itself, and `DESIGN.md` § Chat-Hygiene keeps those out of the history —\nso it travels the way every other session notice travels, as a bubble at the figure and a\nline in the notice log.",
+      "oneOf": [
+        {
+          "description": "A session has been busy without a sign of life for longer than the person allows.",
+          "type": "string",
+          "const": "session_stalled"
+        },
+        {
+          "description": "The subscription budget has passed the share the person set.",
+          "type": "string",
+          "const": "budget_tight"
+        },
+        {
+          "description": "An appointment starts shortly.",
+          "type": "string",
+          "const": "appointment_soon"
+        },
+        {
+          "description": "The overview at the first appearance of the day.",
+          "type": "string",
+          "const": "morning_briefing"
+        },
+        {
+          "description": "What the check of a finished run found — the gate commands of the approved job, and\nthe critic's verdict on the result file where one was reached.\n\nUnlike the four above this one is not the observer's: it is published by\n`done::announce` the moment a session reports itself finished, and whether it happens\nat all is [`crate::DoneHandling`]'s decision, not a switch in\n[`crate::ProactiveSettings`].",
+          "type": "string",
+          "const": "session_report"
+        },
+        {
+          "description": "A workbench task changed where it stands (`claude-workbench/docs/AGENTS-PLAN.md` § 6,\nthe class \"Aufgabe\"). Published by the daemon when the task's carrier reports a new\n`task_state`, never by the observer.\n\nEvery such event goes into the notice log and to the figure, never into the chat\nhistory. Whether it also *addresses* the person — tone, banner, spoken sentence — is\n`proactive.task_events`, off at the factory, and even then only for a task that needs\nthe person ([`crate::TaskState::needs_person`]); the notice says which of the two it is\nin its `quiet` field.",
+          "type": "string",
+          "const": "task_event"
+        },
+        {
+          "description": "A workbench world needs the person (`claude-workbench/docs/AGENTS-PLAN.md` § 7, the\ncompanion as the way \"braucht dich\" reaches them): its lead agent asked a question, or\nan agent marked a message to the person as a question or a result. Published by the\ndaemon's reader of the worlds, never by the observer.\n\nThe same split as [`Self::TaskEvent`]: every item goes into the notice log and to the\nfigure, and whether it also addresses the person is `proactive.world_events`, off at\nthe factory. A marked message carries an `ack` on its notice, which the shell sends back\nonce the person heard or read it.",
+          "type": "string",
+          "const": "world_event"
         }
       ]
     },
@@ -2215,6 +3747,42 @@
         "timestamp_ms",
         "adapter",
         "event"
+      ]
+    },
+    "PairResult": {
+      "description": "What a redeemed pairing hands the device. Said once and never again.",
+      "type": "object",
+      "properties": {
+        "device_id": {
+          "$ref": "#/$defs/DeviceId"
+        },
+        "token": {
+          "description": "The device token. The daemon keeps only a hash of it, so a device that loses this\nhas to be paired again.",
+          "type": "string"
+        },
+        "level": {
+          "$ref": "#/$defs/DeviceLevel"
+        },
+        "client_certificate_pem": {
+          "description": "The client certificate for the later mutual-TLS way, PEM encoded, signed by the\ndaemon's own certificate.",
+          "type": "string"
+        },
+        "client_key_pem": {
+          "description": "The private key belonging to it, PEM encoded. Leaves the daemon exactly once.",
+          "type": "string"
+        },
+        "machine": {
+          "description": "Who this machine is, for a client that keeps one connection per machine.",
+          "$ref": "#/$defs/MachineIdentity"
+        }
+      },
+      "required": [
+        "device_id",
+        "token",
+        "level",
+        "client_certificate_pem",
+        "client_key_pem",
+        "machine"
       ]
     }
   }

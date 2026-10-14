@@ -17,17 +17,31 @@ path = "src/main.rs"
 name = "companion-hook"
 path = "src/hook.rs"
 
+[features]
+# Passed straight through to `companion-voice`. On by default, so an ordinary build speaks
+# Opus with the phone; `cargo build -p companion-daemon --no-default-features` produces a
+# daemon that builds without cmake and honestly reports no Opus in `capabilities`. Without
+# this the escape hatch of `companion-voice` would lead nowhere: the daemon would keep
+# pulling the codec in through the default features of its dependency.
+default = ["opus"]
+opus = ["companion-voice/opus"]
+
 [dependencies]
 companion-adapter-claude.workspace = true
 companion-adapter-codex.workspace = true
+companion-adapter-hermes.workspace = true
 companion-adapter-pty.workspace = true
 companion-adapter-workbench.workspace = true
 companion-brain.workspace = true
 companion-core.workspace = true
 companion-protocol.workspace = true
-companion-voice.workspace = true
+companion-skills.workspace = true
+companion-voice = { workspace = true, default-features = false }
 
 async-trait.workspace = true
+# The morning overview needs the machine's own local day, which `std::time` does not carry.
+chrono.workspace = true
+rustls.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = [
@@ -39,7 +53,10 @@ tokio = { workspace = true, features = [
     "signal",
     "time",
     "io-std",
+    # The workbench's world programs, `wb-welt` and friends, run as child processes.
+    "process",
 ] }
+tokio-rustls.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

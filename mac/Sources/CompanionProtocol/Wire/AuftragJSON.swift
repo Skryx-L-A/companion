@@ -148,10 +148,15 @@ extension Limits {
 
 extension Approval {
     var jsonValue: JSONValue {
-        .object([
+        var members: [String: JSONValue] = [
             "approved_at_ms": .number(approvedAtMs),
             "text_sha256": .string(textSha256),
-        ])
+            "confirmation": .string(confirmation.rawValue),
+        ]
+        // Left out while absent, the way the daemon writes it: an approval made at the
+        // machine has no device, and a null there would look like one that was lost.
+        if let device { members["device"] = .string(device) }
+        return .object(members)
     }
 }
 
@@ -304,13 +309,20 @@ extension Approval: Codable {
     private enum CodingKeys: String, CodingKey {
         case approvedAtMs = "approved_at_ms"
         case textSha256 = "text_sha256"
+        case device
+        case confirmation
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
             approvedAtMs: try container.decode(UInt64.self, forKey: .approvedAtMs),
-            textSha256: try container.decode(String.self, forKey: .textSha256))
+            textSha256: try container.decode(String.self, forKey: .textSha256),
+            device: try container.decodeIfPresent(DeviceId.self, forKey: .device),
+            // A file written before the field existed carries an approval made at the
+            // machine: no device could approve anything until it did.
+            confirmation: try container.decodeIfPresent(
+                ApprovalConfirmation.self, forKey: .confirmation) ?? .shell)
     }
 
     public func encode(to encoder: any Encoder) throws {

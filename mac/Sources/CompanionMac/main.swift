@@ -5,104 +5,15 @@ import CompanionProtocol
 import CompanionUI
 import Foundation
 
-/// Command line of the shell. Everything here exists so the overlay can be started and looked
-/// at without a person clicking anything, and so a test run never touches the configuration
-/// or the settings of an installed copy.
-struct Options {
-    var configDirectory: URL?
-    var socketPath: String?
-    var connectToDaemon = true
-    var demo = false
-    var printDiagnostics = false
-    var quitAfter: TimeInterval?
-    var onboarding: CompanionShell.OnboardingPolicy = .auto
-    /// Where to write what the shell knows about the sessions, as JSON.
-    var dumpSessionsTo: String?
-    /// Where to write a picture of the session list, drawn without a window.
-    var snapshotTo: String?
-    /// Throwaway settings domain. A test must never write into the settings the user is
-    /// actually running with.
-    var defaultsSuite: String?
-    /// Start without the voice path. A test run uses this: taking a global key combination
-    /// away from the person at the machine is an intervention, and so is opening a microphone.
-    var voiceEnabled = true
-    /// Report what the microphone path would do, without recording a sample.
-    var printAudioDiagnostics = false
-
-    static func parse(_ arguments: [String]) -> Options {
-        var options = Options()
-        var index = 0
-        while index < arguments.count {
-            switch arguments[index] {
-            case "--config-dir":
-                index += 1
-                if index < arguments.count {
-                    options.configDirectory = URL(fileURLWithPath: arguments[index])
-                }
-            case "--socket":
-                index += 1
-                if index < arguments.count { options.socketPath = arguments[index] }
-            case "--no-daemon":
-                options.connectToDaemon = false
-            case "--demo":
-                options.demo = true
-                options.connectToDaemon = false
-            case "--diagnostics":
-                options.printDiagnostics = true
-            case "--quit-after":
-                index += 1
-                if index < arguments.count { options.quitAfter = TimeInterval(arguments[index]) }
-            case "--onboarding":
-                index += 1
-                if index < arguments.count {
-                    options.onboarding =
-                        CompanionShell.OnboardingPolicy(rawValue: arguments[index]) ?? .auto
-                }
-            case "--dump-sessions":
-                index += 1
-                if index < arguments.count { options.dumpSessionsTo = arguments[index] }
-            case "--snapshot":
-                index += 1
-                if index < arguments.count { options.snapshotTo = arguments[index] }
-            case "--defaults-suite":
-                index += 1
-                if index < arguments.count { options.defaultsSuite = arguments[index] }
-            case "--no-voice":
-                options.voiceEnabled = false
-            case "--audio-diagnostics":
-                options.printAudioDiagnostics = true
-            case "--help":
-                print("""
-                companion-mac
-                  --config-dir <pfad>        Konfigurationsverzeichnis (Token, Socket)
-                  --socket <pfad>            Socket des Daemons
-                  --no-daemon                nicht verbinden
-                  --demo                     Beispielinhalt zeigen, ohne Daemon
-                  --diagnostics              Fensterzustand als JSON auf die Standardausgabe
-                  --quit-after <sek>         nach n Sekunden beenden
-                  --onboarding auto|skip|force  Schnellstart zeigen oder ueberspringen
-                  --dump-sessions <pfad>     Sessionliste als JSON schreiben, vor dem Beenden
-                  --snapshot <pfad>          Bild der Sessionliste schreiben, ohne Fenster
-                  --defaults-suite <name>    Einstellungen in eine eigene Domain schreiben
-                  --no-voice                 ohne Mikrofon und ohne globale Taste starten
-                  --audio-diagnostics        Zustand des Mikrofonwegs als JSON, ohne Aufnahme
-                """)
-                exit(0)
-            default:
-                break
-            }
-            index += 1
-        }
-        return options
-    }
-}
-
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let options: Options
     private var shell: CompanionShell?
+    /// Held for as long as this shell runs, and given up in `applicationWillTerminate`.
+    private let instanceLock: SingleInstanceGuard?
 
-    init(options: Options) {
+    init(options: Options, instanceLock: SingleInstanceGuard?) {
         self.options = options
+        self.instanceLock = instanceLock
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -115,7 +26,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let shell = CompanionShell(
             paths: paths, socketPath: options.socketPath, defaults: defaults,
             voiceEnabled: options.voiceEnabled)
+        // A test window never takes the focus or the keyboard from the person at the
+        // machine (`regeln/tests-und-eingriffe.md`). A run that answers the setup itself is
+        // one by definition and needs no keyboard, so it gives key status up without being
+        // asked; every other run says so with the flag. Set before `start`, because the
+        // assistant can open inside it.
+        if options.noKeyWindow || !options.setupAnswers.isEmpty {
+            shell.overlay.takesKeyWindow = false
+        }
         shell.start(connectToDaemon: options.connectToDaemon, onboarding: options.onboarding)
+        if !options.setupAnswers.isEmpty { shell.answerSetup(options.setupAnswers) }
         if options.demo { shell.seedDemoContent() }
         self.shell = shell
 
@@ -148,13 +68,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             switch SystemMicrophoneAuthorization().authorization {
             case .granted: return "granted"
             case .denied: return "denied"
+            case .restricted: return "restricted"
             case .undetermined: return "undetermined"
             }
         }()
         report["pushToTalkDefault"] = HotkeyCombination.pushToTalkDefault.settingsValue
         guard let data = try? JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]),
               let line = String(data: data, encoding: .utf8) else {
-            FileHandle.standardError.write(Data("Audiozustand liess sich nicht als JSON schreiben\n".utf8))
+            FileHandle.standardError.write(Data("Audiozustand ließ sich nicht als JSON schreiben\n".utf8))
             return
         }
         print(line)
@@ -170,6 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         shell?.stop()
         shell = nil
+        instanceLock?.release()
     }
 
     @MainActor
@@ -178,7 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let dump = shell.sessionDump()
         guard let data = try? JSONSerialization.data(
             withJSONObject: dump, options: [.prettyPrinted, .sortedKeys]) else {
-            FileHandle.standardError.write(Data("Sessionliste liess sich nicht als JSON schreiben\n".utf8))
+            FileHandle.standardError.write(Data("Sessionliste ließ sich nicht als JSON schreiben\n".utf8))
             return
         }
         do {
@@ -192,7 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func writeSnapshot(_ shell: CompanionShell) {
         guard let path = options.snapshotTo else { return }
         guard let png = PanelSnapshot.sessionListPNG(model: shell.overlay.model) else {
-            FileHandle.standardError.write(Data("Bild der Sessionliste liess sich nicht zeichnen\n".utf8))
+            FileHandle.standardError.write(Data("Bild der Sessionliste ließ sich nicht zeichnen\n".utf8))
             return
         }
         do {
@@ -204,7 +126,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 let options = Options.parse(Array(CommandLine.arguments.dropFirst()))
+
+// Before AppKit does anything at all. A second shell that got as far as building the overlay
+// would have registered the push-to-talk key and drawn a figure into the corner before it
+// found out it is the second one — the two symptoms this refusal exists to prevent.
+let instanceLock: SingleInstanceGuard? = options.guardsAgainstASecondInstance
+    ? SingleInstanceGuard(path: CompanionPaths(configDirectory: options.configDirectory).instanceLockPath)
+    : nil
+if case .alreadyRunning(let pid) = instanceLock?.acquire() {
+    FileHandle.standardError.write(Data("\(SingleInstanceGuard.refusalMessage(pid: pid))\n".utf8))
+    exit(1)
+}
+
 let application = NSApplication.shared
-let delegate = AppDelegate(options: options)
+let delegate = AppDelegate(options: options, instanceLock: instanceLock)
 application.delegate = delegate
 application.run()

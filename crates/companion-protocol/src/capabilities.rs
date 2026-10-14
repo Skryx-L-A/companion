@@ -42,6 +42,14 @@ pub enum StatusField {
     LastOutput,
     OpenQuestion,
     AuftragId,
+    /// Whether the adapter can say that a session is an orchestrator or a worker. An
+    /// adapter that leaves this out reports neither, and the session list keeps showing
+    /// its sessions rather than filtering on a guess.
+    Kind,
+    DisplayName,
+    /// Whether the adapter can name the machine a session runs on in a stable way. Most
+    /// cannot: the daemon fills its own machine in for anything that runs here.
+    MachineIdentity,
 }
 
 /// What one adapter can do. `DESIGN.md` § Sicherheit requires this to be honest about

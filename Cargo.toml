@@ -12,17 +12,52 @@ repository = "https://github.com/Skryx-L-A/companion"
 [workspace.dependencies]
 companion-protocol = { path = "crates/companion-protocol" }
 companion-core = { path = "crates/companion-core" }
+companion-skills = { path = "crates/companion-skills" }
 companion-adapter-workbench = { path = "crates/companion-adapter-workbench" }
 companion-adapter-claude = { path = "crates/companion-adapter-claude" }
 companion-adapter-codex = { path = "crates/companion-adapter-codex" }
+companion-adapter-hermes = { path = "crates/companion-adapter-hermes" }
 companion-adapter-pty = { path = "crates/companion-adapter-pty" }
-companion-voice = { path = "crates/companion-voice" }
+# No default features here, so every consumer has to say whether it wants the Opus codec.
+# `companion-daemon` says so through a feature of its own, which is what makes
+# `cargo build -p companion-daemon --no-default-features` a daemon that needs no cmake.
+companion-voice = { path = "crates/companion-voice", default-features = false }
 companion-brain = { path = "crates/companion-brain" }
+# Mac-only, and only companion-core reaches for it (behind the same `cfg` its dependencies
+# live behind) — see that crate's Cargo.toml for why it is not `[lints] workspace = true`.
+companion-macos-ffi = { path = "crates/companion-macos-ffi" }
 
 async-trait = "0.1"
 base64 = "0.22"
+# The completion handlers of EventKit's access request are Objective-C blocks; block2 is
+# the one crate that turns a Rust closure into one. Only `companion-macos-ffi` uses it.
+block2 = "0.6"
+# `current_time` needs the machine's local offset, which `std::time` does not carry at all;
+# chrono's own unsafe stays inside chrono, not in this workspace's `unsafe_code = "forbid"`.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 reqwest = { version = "0.13", default-features = false }
+# No image or SVG rendering: the tool draws its QR into a terminal with block characters.
+qrcode = { version = "0.14", default-features = false }
+# The pattern set behind `companion_core::redact`. No unsafe code of its own, so it needs no
+# carve-out from this workspace's `unsafe_code = "forbid"`.
+regex = "1"
+rcgen = { version = "0.14", default-features = false, features = [
+    "crypto",
+    "pem",
+    "ring",
+] }
 rusqlite = { version = "0.40", features = ["bundled"] }
+# The ring provider rather than the default aws-lc-rs: it needs no cmake and no assembler
+# on the build machine, which keeps a checkout buildable without extra system packages.
+# No `tls12`: the only client of the network port is the companion's own app, so there is
+# nobody to be compatible with, and leaving the older version out of the build is stronger
+# than choosing against it at runtime.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "logging",
+] }
+rustls-pemfile = "2"
 schemars = "1.2"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
@@ -33,6 +68,10 @@ serde_json = { version = "1", features = ["preserve_order"] }
 subtle = "2"
 thiserror = "2"
 tokio = "1"
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "logging",
+] }
 tokio-stream = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

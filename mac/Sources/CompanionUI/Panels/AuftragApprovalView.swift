@@ -51,8 +51,8 @@ struct AuftragApprovalView: View {
             Text("Das wird beauftragt")
                 .font(.title3.weight(.semibold))
             Text("""
-                Lies die Zeilen. Freigegeben wird genau dieser Inhalt; jede spaetere Aenderung \
-                an der Datei macht die Freigabe ungueltig.
+                Lies die Zeilen. Freigegeben wird genau dieser Inhalt; jede spätere Änderung \
+                an der Datei macht die Freigabe ungültig.
                 """)
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -98,7 +98,7 @@ struct AuftragApprovalView: View {
 
     private var hashBlock: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Pruefsumme des angezeigten Inhalts")
+            Text("Prüfsumme des angezeigten Inhalts")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             Text(AuftragText.groupedHash(subject.shownHash))
@@ -106,7 +106,7 @@ struct AuftragApprovalView: View {
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
             Text("""
-                Ueber diesen Wert laeuft die Freigabe. Der Daemon rechnet ihn neu und lehnt \
+                Über diesen Wert läuft die Freigabe. Der Daemon rechnet ihn neu und lehnt \
                 ab, wenn die Datei inzwischen eine andere ist.
                 """)
                 .font(.caption)
@@ -163,10 +163,10 @@ struct AuftragApprovalView: View {
                 }
                 Spacer(minLength: 8)
                 if case .started = phase {
-                    Button("Schliessen", action: onClose)
+                    Button("Schließen", action: onClose)
                         .keyboardShortcut(.defaultAction)
                 } else {
-                    Button("Zurueck zum Formular", action: onBack)
+                    Button("Zurück zum Formular", action: onBack)
                         .keyboardShortcut(.cancelAction)
                         .disabled(isBusy)
                     Button("Freigeben und starten", action: onApprove)

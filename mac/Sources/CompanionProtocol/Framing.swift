@@ -8,6 +8,16 @@ public enum TransportError: Error, Equatable, Sendable {
     case socketPathTooLong(max: Int)
     case connectFailed(errno: Int32)
     case notConnected
+    /// The address of a network endpoint is not one this client can dial.
+    case badAddress(String)
+    /// The connection failed below TLS: no route, refused, the network went away.
+    case networkFailed(String)
+    /// TLS itself did not come up.
+    case tlsFailed(String)
+    /// The daemon answered with a certificate other than the pinned one. Never a warning and
+    /// never a question: `DESIGN.md` section Mobil, Identitaet und Vertrauen makes the
+    /// fingerprint from the pairing the only thing that decides this.
+    case certificateMismatch(expected: String, presented: String)
 }
 
 /// Splits a byte stream into newline-delimited messages.

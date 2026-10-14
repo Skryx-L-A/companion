@@ -46,16 +46,89 @@ extension EndReason: RawRepresentable, Codable {
     }
 }
 
+/// Why the companion said something nobody asked it for.
+///
+/// `DESIGN.md` section Ausbau, "Volle Proaktivität" names the first four: a session that
+/// has been quiet too long, a budget getting tight, an appointment coming up, and the overview
+/// at the first appearance of the day. Each class is switchable on its own, which is why the
+/// notice carries it rather than leaving a reader to work it out of the sentence.
+///
+/// The class also decides where the notice goes. Three of them are the companion talking
+/// about the person's day and stand in the chat history; `sessionStalled` and `sessionReport`
+/// are a session reporting about itself and go to the figure and the notice log, which is
+/// what `DESIGN.md` section Chat-Hygiene asks for.
+public enum ProactiveClass: Sendable, Equatable, Hashable {
+    case sessionStalled
+    case budgetTight
+    case appointmentSoon
+    case morningBriefing
+    /// What the check of a finished run found. Published by the daemon's finished-report
+    /// handling rather than by the observer, and switched by `doneHandling` rather than by a
+    /// class of its own.
+    case sessionReport
+    /// A workbench task changed where it stands. Published by the daemon when the task's
+    /// carrier reports a new state; it goes to the figure and the notice log and never into
+    /// the history, and `quiet` on the notice says whether it is also said to the person.
+    case taskEvent
+    /// A workbench world needs the person: an open question of its lead agent, or a message an
+    /// agent marked as a question or a result for them. Like `taskEvent` it goes to the figure
+    /// and the notice log, and `quiet` says whether it is also said; a marked message carries an
+    /// `ack` the shell sends back once it was heard or read.
+    case worldEvent
+    /// A class a newer daemon knows and this shell does not. The notice is still shown: the
+    /// sentence is the part a person reads, and the class only decides how it is announced.
+    case unrecognised(String)
+}
+
+extension ProactiveClass: RawRepresentable, Codable {
+    public init(rawValue: String) {
+        switch rawValue {
+        case "session_stalled": self = .sessionStalled
+        case "budget_tight": self = .budgetTight
+        case "appointment_soon": self = .appointmentSoon
+        case "morning_briefing": self = .morningBriefing
+        case "session_report": self = .sessionReport
+        case "task_event": self = .taskEvent
+        case "world_event": self = .worldEvent
+        default: self = .unrecognised(rawValue)
+        }
+    }
+
+    public var rawValue: String {
+        switch self {
+        case .sessionStalled: return "session_stalled"
+        case .budgetTight: return "budget_tight"
+        case .appointmentSoon: return "appointment_soon"
+        case .morningBriefing: return "morning_briefing"
+        case .sessionReport: return "session_report"
+        case .taskEvent: return "task_event"
+        case .worldEvent: return "world_event"
+        case .unrecognised(let raw): return raw
+        }
+    }
+
+    public init(from decoder: any Decoder) throws {
+        self.init(rawValue: try decoder.singleValueContainer().decode(String.self))
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
 /// The name of an event without its payload: the thirteen an adapter or the bus produces, in
 /// the order `DESIGN.md` section Session-Adapter lists them, the four the voice pipeline
-/// produces, the three the companion's own answer produces, and the one the daemon sends when
-/// its settings document changed. No adapter ever delivers a voice, a chat or a settings
-/// event; they belong to no session.
+/// produces, the three the companion's own answer produces, and the two the daemon sends by
+/// itself: its settings document changed, and it said something out of its own observation. No
+/// adapter ever delivers a voice, a chat, a settings or a proactive event; they belong to no
+/// session.
 public enum EventKind: String, Sendable, Codable, Hashable, CaseIterable {
     case sessionStarted = "session_started"
     case sessionEnded = "session_ended"
     case questionOpen = "question_open"
     case waitingForInput = "waiting_for_input"
+    case permissionRefused = "permission_refused"
     case busy
     case idle
     case done
@@ -73,6 +146,7 @@ public enum EventKind: String, Sendable, Codable, Hashable, CaseIterable {
     case chatTool = "chat_tool"
     case chatDone = "chat_done"
     case settingsChanged = "settings_changed"
+    case proactiveNotice = "proactive_notice"
 
     /// True for the four that come from the voice pipeline rather than from a session.
     public var isVoice: Bool {
@@ -99,6 +173,9 @@ public enum Event: Sendable, Equatable {
     case questionOpen(questionId: String, question: String)
     /// The session waits for input without having asked, for example at a permission prompt.
     case waitingForInput(hint: String?)
+    /// A tool call was refused automatically, by policy, rather than left for a person to
+    /// decide. Distinct from `waitingForInput`: nothing here is still waiting on an answer.
+    case permissionRefused(hint: String?)
     case busy
     case idle
     /// The session reports its work as finished. `sessionEnded` may or may not follow.
@@ -128,6 +205,22 @@ public enum Event: Sendable, Equatable {
     /// The settings document changed, here or in another shell of the person. It carries
     /// nothing: whoever cares reads the document again.
     case settingsChanged
+    /// The companion says something out of its own observation, without having been asked.
+    /// It belongs to no session even where it is about one — the sentence names the session.
+    ///
+    /// `quiet` marks a notice for the log and the figure only: no tone, no banner, no spoken
+    /// sentence. Absent on the wire means false, which is what every notice before the field
+    /// meant.
+    ///
+    /// `ack` is what `acknowledge_notice` sends back once the person heard the notice to its
+    /// end or opened it. Only a world's marked message short enough to be in the notice whole
+    /// carries one; opaque to the shell.
+    ///
+    /// `noticeId` is what `notice_shown` sends back once the shell put the notice in front of
+    /// the person. Every world notice carries one; opaque to the shell.
+    case proactiveNotice(
+        class: ProactiveClass, text: String, quiet: Bool = false, ack: String? = nil,
+        noticeId: String? = nil)
     /// An event a newer daemon knows and this shell does not. Kept so the sequence stays
     /// readable instead of the whole line being dropped.
     case unrecognised(kind: String)
@@ -138,6 +231,7 @@ public enum Event: Sendable, Equatable {
         case .sessionEnded: return .sessionEnded
         case .questionOpen: return .questionOpen
         case .waitingForInput: return .waitingForInput
+        case .permissionRefused: return .permissionRefused
         case .busy: return .busy
         case .idle: return .idle
         case .done: return .done
@@ -161,6 +255,7 @@ public enum Event: Sendable, Equatable {
             case .chatDone: return .chatDone
             }
         case .settingsChanged: return .settingsChanged
+        case .proactiveNotice: return .proactiveNotice
         case .unrecognised: return nil
         }
     }
@@ -199,6 +294,11 @@ extension Event: Codable {
         case iteration
         case message
         case missed
+        case `class`
+        case text
+        case quiet
+        case ack
+        case noticeId = "notice_id"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -217,6 +317,9 @@ extension Event: Codable {
                 question: try container.decode(String.self, forKey: .question))
         case .waitingForInput:
             self = .waitingForInput(hint: try container.decodeIfPresent(String.self, forKey: .hint))
+        case .permissionRefused:
+            self = .permissionRefused(
+                hint: try container.decodeIfPresent(String.self, forKey: .hint))
         case .busy:
             self = .busy
         case .idle:
@@ -252,6 +355,13 @@ extension Event: Codable {
             self = .chat(try ChatEvent(from: decoder))
         case .settingsChanged:
             self = .settingsChanged
+        case .proactiveNotice:
+            self = .proactiveNotice(
+                class: try container.decode(ProactiveClass.self, forKey: .class),
+                text: try container.decode(String.self, forKey: .text),
+                quiet: try container.decodeIfPresent(Bool.self, forKey: .quiet) ?? false,
+                ack: try container.decodeIfPresent(String.self, forKey: .ack),
+                noticeId: try container.decodeIfPresent(String.self, forKey: .noticeId))
         case nil:
             self = .unrecognised(kind: tag)
         }
@@ -273,6 +383,9 @@ extension Event: Codable {
             try container.encode(question, forKey: .question)
         case .waitingForInput(let hint):
             try container.encode(EventKind.waitingForInput.rawValue, forKey: .event)
+            try container.encode(hint, forKey: .hint)
+        case .permissionRefused(let hint):
+            try container.encode(EventKind.permissionRefused.rawValue, forKey: .event)
             try container.encode(hint, forKey: .hint)
         case .busy:
             try container.encode(EventKind.busy.rawValue, forKey: .event)
@@ -313,6 +426,14 @@ extension Event: Codable {
             try chat.encode(to: encoder)
         case .settingsChanged:
             try container.encode(EventKind.settingsChanged.rawValue, forKey: .event)
+        case .proactiveNotice(let noticeClass, let text, let quiet, let ack, let noticeId):
+            try container.encode(EventKind.proactiveNotice.rawValue, forKey: .event)
+            try container.encode(noticeClass, forKey: .class)
+            try container.encode(text, forKey: .text)
+            // Left out while false, the way the daemon does it.
+            if quiet { try container.encode(true, forKey: .quiet) }
+            try container.encodeIfPresent(ack, forKey: .ack)
+            try container.encodeIfPresent(noticeId, forKey: .noticeId)
         case .unrecognised(let kind):
             try container.encode(kind, forKey: .event)
         }

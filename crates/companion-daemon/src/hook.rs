@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use companion_core::{FileTokenStore, TokenStore, paths};
 use companion_protocol::{
-    AdapterId, ClientMessage, Hello, PROTOCOL_VERSION, Request, RequestEnvelope, ServerMessage,
-    SessionId, SessionState, SessionStatus,
+    AdapterId, ClientMessage, Hello, PROTOCOL_VERSION, Provenance, Request, RequestEnvelope,
+    ServerMessage, SessionId, SessionState, SessionStatus,
 };
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -30,9 +30,24 @@ use tokio::net::UnixStream;
 /// The daemon is local; anything slower than this means it cannot help right now.
 const DEADLINE: Duration = Duration::from_secs(2);
 
+/// What the whole hook may take, however many steps it is made of.
+///
+/// Every step already has [`DEADLINE`], but they add up: reading the payload, connecting,
+/// the handshake and two requests are five of them, and a daemon that answers each one just
+/// inside its own limit would hold the session for ten seconds. Claude Code waits for a hook
+/// before it goes on, so what has to be bounded is the total.
+const TOTAL: Duration = Duration::from_secs(2);
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::process::ExitCode {
-    if let Err(reason) = report().await {
+    let outcome = match tokio::time::timeout(TOTAL, report()).await {
+        Ok(outcome) => outcome,
+        Err(_) => Err(format!(
+            "gave up after {} s so the session does not wait on it",
+            TOTAL.as_secs()
+        )),
+    };
+    if let Err(reason) = outcome {
         eprintln!("companion-hook: {reason}");
     }
     // Always 0: see the module comment.
@@ -60,8 +75,12 @@ async fn report() -> Result<(), String> {
         &mut writer,
         &ClientMessage::Hello(Hello {
             protocol_version: PROTOCOL_VERSION,
+            min_protocol_version: None,
+            max_protocol_version: None,
             token: tokens.agent,
             client_name: "companion-hook".to_owned(),
+            audio_formats: Vec::new(),
+            client_capabilities: Vec::new(),
         }),
     )
     .await?;
@@ -129,6 +148,14 @@ fn build_requests(payload: &Value) -> Option<Vec<Request>> {
         .get("cwd")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    // Claude Code names the file it writes its own conversation to. Passing it on is worth
+    // more than any rule for deriving it: the rule belongs to that program, this one only
+    // copies it, and a copy can go stale.
+    let transcript_path = payload
+        .get("transcript_path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned);
 
     let status = |state: SessionState, question: Option<String>| {
         let mut status = SessionStatus::new(
@@ -137,7 +164,14 @@ fn build_requests(payload: &Value) -> Option<Vec<Request>> {
             state,
         );
         status.project = project.clone();
+        status.transcript_path = transcript_path.clone();
         status.open_question = question;
+        // A name for the session, guessed from its project directory since the hook payload
+        // never names one. `kind` stays unknown: nothing here says whether Claude Code is
+        // running as an orchestrator or a worker. `model` stays unknown too — the documented
+        // Stop, Notification and SubagentStop payloads carry no model name to even estimate
+        // from.
+        status.display_name = display_name_from(project.as_deref());
         Request::ReportStatus {
             status: Box::new(status),
         }
@@ -151,15 +185,16 @@ fn build_requests(payload: &Value) -> Option<Vec<Request>> {
             } else {
                 message
             };
+            let question_id = payload
+                .get("uuid")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| question_id_for(session_id.as_str(), &question));
             Some(vec![
                 status(SessionState::Waiting, Some(question.clone())),
                 Request::AskQuestion {
                     session_id,
-                    question_id: payload
-                        .get("uuid")
-                        .and_then(Value::as_str)
-                        .unwrap_or("notification")
-                        .to_owned(),
+                    question_id,
                     question,
                 },
             ])
@@ -178,6 +213,48 @@ fn build_requests(payload: &Value) -> Option<Vec<Request>> {
         ]),
         _ => None,
     }
+}
+
+/// An id for a question the payload does not name one for.
+///
+/// `uuid` is not part of the documented `Notification` payload — it carries `session_id`,
+/// `transcript_path`, `cwd`, `hook_event_name` and `message` — so the fallback is the normal
+/// case and not the exception. It used to be the constant `"notification"`, which collapsed
+/// every unanswered question of a session onto one id: the second question overwrote the
+/// first, and an answer to either went to whichever was left.
+///
+/// Session, time and the text of the question together are what tell two apart. The hash is
+/// FNV-1a, written out rather than taken from `DefaultHasher`, whose output is not promised
+/// to stay the same between Rust versions — an id that changes shape under a compiler upgrade
+/// would be a puzzle nobody needs.
+/// A name for the session, estimated from the basename of its project directory.
+///
+/// Not a measurement: Claude Code's hook payload names a working directory, not a session
+/// name, so this is this binary's own guess rather than something the tool reported.
+fn display_name_from(project: Option<&str>) -> Provenance<String> {
+    project
+        .map(std::path::Path::new)
+        .and_then(std::path::Path::file_name)
+        .and_then(std::ffi::OsStr::to_str)
+        .map(|name| Provenance::Estimated(name.to_owned()))
+        .unwrap_or(Provenance::Unknown)
+}
+
+fn question_id_for(session_id: &str, question: &str) -> String {
+    format!(
+        "{session_id}-{}-{:016x}",
+        companion_core::now_ms(),
+        fnv1a(question)
+    )
+}
+
+fn fnv1a(text: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 async fn write_line(
@@ -216,7 +293,7 @@ mod tests {
         let payload = serde_json::json!({
             "session_id": "abc",
             "hook_event_name": "Stop",
-            "cwd": "/Users/me/AI/companion",
+            "cwd": "/Users/example/AI/companion",
         });
         let requests = build_requests(&payload).expect("Stop is handled");
         assert_eq!(requests.len(), 1, "a status is all there is to say");
@@ -225,7 +302,36 @@ mod tests {
         };
         assert_eq!(status.id.as_str(), "abc");
         assert_eq!(status.state, SessionState::Waiting);
-        assert_eq!(status.project.as_deref(), Some("/Users/me/AI/companion"));
+        assert_eq!(
+            status.project.as_deref(),
+            Some("/Users/example/AI/companion")
+        );
+        assert_eq!(
+            status.display_name,
+            Provenance::Estimated("companion".to_owned()),
+            "a name guessed from the project directory, not a measurement"
+        );
+        assert!(
+            status.kind.is_unknown(),
+            "the hook payload never says orchestrator or worker"
+        );
+        assert!(
+            status.model.is_unknown(),
+            "the hook payload names no model to estimate from"
+        );
+    }
+
+    #[test]
+    fn a_payload_without_a_project_leaves_the_display_name_unknown() {
+        let payload = serde_json::json!({
+            "session_id": "abc",
+            "hook_event_name": "Stop",
+        });
+        let requests = build_requests(&payload).expect("Stop is handled");
+        let Request::ReportStatus { status } = &requests[0] else {
+            panic!("Stop must report a status");
+        };
+        assert!(status.display_name.is_unknown());
     }
 
     #[test]
@@ -284,5 +390,89 @@ mod tests {
     fn a_payload_without_a_session_is_refused_instead_of_guessed() {
         let payload = serde_json::json!({"hook_event_name": "Stop"});
         assert!(build_requests(&payload).is_none());
+    }
+
+    #[test]
+    fn the_transcript_path_and_the_working_directory_are_passed_on() {
+        // Both are in every documented hook payload, and both are addresses: the first names
+        // the conversation, the second the project. The first was dropped until 2026-09-03.
+        let payload = serde_json::json!({
+            "session_id": "abc",
+            "hook_event_name": "Stop",
+            "cwd": "/tmp/projekt",
+            "transcript_path": "/tmp/projects/-tmp-projekt/abc.jsonl",
+        });
+        let requests = build_requests(&payload).expect("Stop is handled");
+        let Request::ReportStatus { status } = &requests[0] else {
+            panic!("the status must come first");
+        };
+        assert_eq!(status.project.as_deref(), Some("/tmp/projekt"));
+        assert_eq!(
+            status.transcript_path.as_deref(),
+            Some("/tmp/projects/-tmp-projekt/abc.jsonl")
+        );
+    }
+
+    #[test]
+    fn a_payload_without_a_transcript_leaves_the_field_out() {
+        let payload = serde_json::json!({"session_id": "abc", "hook_event_name": "Stop"});
+        let requests = build_requests(&payload).expect("Stop is handled");
+        let Request::ReportStatus { status } = &requests[0] else {
+            panic!("the status must come first");
+        };
+        assert_eq!(status.transcript_path, None);
+        let json = serde_json::to_value(status.as_ref()).expect("a status serialises");
+        assert!(
+            !json
+                .as_object()
+                .expect("an object")
+                .contains_key("transcript_path"),
+            "an absent address writes no key, so an older peer sees the bytes it always did"
+        );
+    }
+
+    #[test]
+    fn two_questions_of_one_session_do_not_share_an_id() {
+        // The documented Notification payload has no `uuid`, so the derived id is the normal
+        // case. Two different questions of the same session have to be two questions.
+        let ask = |message: &str| {
+            let payload = serde_json::json!({
+                "session_id": "abc",
+                "hook_event_name": "Notification",
+                "message": message,
+            });
+            let requests = build_requests(&payload).expect("Notification is handled");
+            let Request::AskQuestion { question_id, .. } = &requests[1] else {
+                panic!("the question must follow the status");
+            };
+            question_id.clone()
+        };
+
+        let first = ask("darf ich Bash benutzen");
+        let second = ask("darf ich pushen");
+        assert_ne!(first, second);
+        assert!(
+            first.starts_with("abc-"),
+            "the id names its session, saw {first}"
+        );
+        assert_ne!(
+            first, "notification",
+            "the constant used to collapse every unanswered question onto one id"
+        );
+    }
+
+    #[test]
+    fn a_payload_that_names_its_own_id_keeps_it() {
+        let payload = serde_json::json!({
+            "session_id": "abc",
+            "hook_event_name": "Notification",
+            "message": "darf ich",
+            "uuid": "11111111-2222-3333-4444-555555555555",
+        });
+        let requests = build_requests(&payload).expect("Notification is handled");
+        let Request::AskQuestion { question_id, .. } = &requests[1] else {
+            panic!("the question must follow the status");
+        };
+        assert_eq!(question_id, "11111111-2222-3333-4444-555555555555");
     }
 }

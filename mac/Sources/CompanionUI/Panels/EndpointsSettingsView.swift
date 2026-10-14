@@ -26,7 +26,7 @@ struct EndpointsSettingsView: View {
 
     var body: some View {
         Form {
-            if controller.isDaemonWriteMissing { draftNotice }
+            if controller.isDaemonWriteMissing { DaemonWriteMissingNotice() }
             if let notice = controller.notice { Section { NoticeLine(text: notice) } }
 
             profilesSection
@@ -37,58 +37,44 @@ struct EndpointsSettingsView: View {
         }
         .formStyle(.grouped)
         .onAppear { controller.load() }
+        .highRiskConfirmation(confirmation) { controller.save(confirmedHighRisk: true) }
     }
 
-    // MARK: - The notice for an older daemon
-
-    /// Said once, at the top, and only where it is true.
-    ///
-    /// The daemon owns the settings file, and this shell reads and writes it over the socket.
-    /// An older daemon has no request for that, and then the page would be a form that goes
-    /// nowhere; saying so is the only honest way to leave it on screen at all.
-    private var draftNotice: some View {
-        Section {
-            Label {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Der Daemon kann diese Seite nicht entgegennehmen")
-                        .font(.headline)
-                    Text("""
-                        Dieser Daemon ist aelter als die Oberflaeche und kennt den Weg noch \
-                        nicht, seine Einstellungsdatei zu lesen oder zu schreiben. Was hier \
-                        steht, bleibt deshalb ohne Wirkung, bis der Daemon aktuell ist.
-                        """)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            } icon: {
-                Image(systemName: "exclamationmark.triangle")
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-            }
-        }
+    /// The warning this page is waiting on, as the shared sheet takes it. Its own binding
+    /// rather than a second copy of the sheet, so the endpoints page asks the same question in
+    /// the same shape as the three pages that edit the rest of the document.
+    private var confirmation: Binding<HighRiskWarning?> {
+        Binding(
+            get: {
+                controller.pendingHighRisk.isEmpty
+                    ? nil : HighRiskWarning(lines: controller.pendingHighRisk)
+            },
+            set: { if $0 == nil { controller.dismissHighRisk() } })
     }
 
     // MARK: - Profiles
 
     private var profilesSection: some View {
-        Section("Profile") {
-            if draft.profiles.isEmpty {
-                Text("Noch kein Profil. Ein Profil ist ein Protokoll, eine Adresse und das Modell dahinter; wo es laeuft, steht nur in der Adresse.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+        Section("Modelle und Dienste") {
+            // Said whether or not the list is empty. It used to stand only in the empty state,
+            // so the one sentence explaining the whole page disappeared as soon as somebody
+            // added their first entry — exactly when a second one is next.
+            Text(draft.profiles.isEmpty
+                ? "Noch nichts eingetragen. Ein Eintrag ist eine Adresse und das Modell dahinter; wo es läuft, steht nur in der Adresse."
+                : "Ein Eintrag ist eine Adresse und das Modell dahinter. Weiter unten steht, wofür der Companion welchen benutzt.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             ForEach(draft.profiles.indices, id: \.self) { index in
                 profileRow(index)
             }
             HStack {
-                Button("Profil hinzufuegen") {
+                Button("Eintrag hinzufügen") {
                     let name = draft.addProfile()
                     expanded.insert(name)
                 }
                 Spacer(minLength: 8)
-                Button(controller.isSaving ? "Sichern laeuft" : "Sichern") {
+                Button(controller.isSaving ? "Sichern läuft" : "Sichern") {
                     controller.save()
                 }
                 .disabled(controller.isSaving)
@@ -180,7 +166,7 @@ struct EndpointsSettingsView: View {
             }
 
             LabeledContent("Modell") {
-                TextField("bleibt dem Endpoint ueberlassen", text: Binding(
+                TextField("bleibt dem Dienst überlassen", text: Binding(
                     get: { draft.profiles[index].model ?? "" },
                     set: { draft.profiles[index].model = $0.isEmpty ? nil : $0 })
                 )
@@ -188,9 +174,62 @@ struct EndpointsSettingsView: View {
                 .textFieldStyle(.roundedBorder)
             }
 
+            LabeledContent("Stimme") {
+                TextField("bleibt dem Dienst überlassen", text: Binding(
+                    get: { draft.profiles[index].voice ?? "" },
+                    set: { draft.profiles[index].voice = $0.isEmpty ? nil : $0 })
+                )
+                .labelsHidden()
+                .textFieldStyle(.roundedBorder)
+            }
+            Text("Nur für ein Sprachprofil von Bedeutung. Welche Stimmen es gibt, sagt der Dienst selbst, nicht diese Seite.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            LabeledContent("Sprache") {
+                TextField("keine Angabe", text: Binding(
+                    get: { draft.profiles[index].language ?? "" },
+                    set: { draft.profiles[index].language = $0.isEmpty ? nil : $0 })
+                )
+                .labelsHidden()
+                .textFieldStyle(.roundedBorder)
+            }
+            Text("""
+                Die Sprache, die dieser Eintrag gut spricht, als Kürzel: de, en. Steht hier \
+                etwas, nimmt der Companion diesen Eintrag für Sätze in dieser Sprache, auch \
+                wenn ein anderer weiter oben steht. Ohne Angabe bleibt es bei der Reihenfolge \
+                weiter unten.
+                """)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
             if !profile.protocolKind.isCli {
-                LabeledContent("Schluessel") {
-                    TextField("Name des Schluesselbund-Eintrags", text: Binding(
+                LabeledContent("Denkaufwand") {
+                    TextField("bleibt dem Dienst überlassen", text: Binding(
+                        get: { draft.profiles[index].reasoningEffort ?? "" },
+                        set: { draft.profiles[index].reasoningEffort = $0.isEmpty ? nil : $0 })
+                    )
+                    .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
+                }
+                Text("""
+                    Leer lassen, solange nichts dagegen spricht: das Feld geht als \
+                    reasoning_effort mit, und ein Dienst, der es nicht kennt, weist die \
+                    ganze Anfrage ab. Es hilft bei einem Modell, das sonst seine ganze Antwort \
+                    ins Nachdenken schreibt und nie zu schreiben anfängt. Gemessen am \
+                    05.09.2026 auf dieser Maschine: mit „none" fing ein lokales Modell nach \
+                    einer halben Sekunde an zu schreiben statt nach dreißig — und rief dann in \
+                    keinem einzigen von fünfzehn Läufen mehr ein Werkzeug auf, sondern erfand \
+                    die Antwort. Wer es setzt, prüft danach, ob die Werkzeuge noch laufen.
+                    """)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                LabeledContent("Schlüssel") {
+                    TextField("Name des Schlüsselbund-Eintrags", text: Binding(
                         get: { draft.profiles[index].keyRef ?? "" },
                         set: { draft.profiles[index].keyRef = $0.isEmpty ? nil : $0 })
                     )
@@ -198,9 +237,9 @@ struct EndpointsSettingsView: View {
                     .textFieldStyle(.roundedBorder)
                 }
                 Text("""
-                    Hier steht der Name eines Eintrags, nicht der Schluessel. Der Schluessel \
-                    selbst liegt im Schluesselbund und wird hier nie angezeigt und nie \
-                    gespeichert. Ein lokaler Endpoint braucht meist gar keinen.
+                    Hier steht der Name eines Eintrags, nicht der Schlüssel. Der Schlüssel \
+                    selbst liegt im Schlüsselbund und wird hier nie angezeigt und nie \
+                    gespeichert. Ein Dienst auf diesem Rechner braucht meist gar keinen.
                     """)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -213,7 +252,7 @@ struct EndpointsSettingsView: View {
 
             HStack {
                 Spacer(minLength: 8)
-                Button("Profil loeschen", role: .destructive) {
+                Button("Profil löschen", role: .destructive) {
                     expanded.remove(profile.id)
                     draft.removeProfile(profile.id)
                 }
@@ -233,22 +272,47 @@ struct EndpointsSettingsView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            if role == .subagentLlm { subagentCondensationToggle }
+
             if chain.isEmpty {
-                Text("Kein Profil. Diese Rolle bleibt ohne Endpoint, bis eines gewaehlt ist.")
+                Text("Noch nichts gewählt. Der Companion kann dafür nichts benutzen, bis hier ein Eintrag steht.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             ForEach(chain.indices, id: \.self) { position in
                 chainRow(role, chain: chain, position: position)
             }
 
             let free = draft.profiles.map(\.id).filter { !chain.contains($0) && !$0.isEmpty }
-            Menu("Profil zur Reihenfolge hinzufuegen") {
+            Menu("Eintrag zur Reihenfolge hinzufügen") {
                 ForEach(free, id: \.self) { name in
                     Button(name) { draft.addToChain(role, profile: name) }
                 }
             }
             .disabled(free.isEmpty)
+        }
+    }
+
+    /// The one setting this role's own chain does not otherwise say anything about: whether a
+    /// `Slow` tool step's already-gated local result additionally goes through this chain's
+    /// CLI profile to be condensed, or stays in the daemon whatever its class.
+    private var subagentCondensationToggle: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("Lange Werkzeugergebnisse zusammenfassen lassen", isOn: Binding(
+                get: { controller.subagentCondensationEnabled },
+                set: { controller.setSubagentCondensationEnabled($0) }))
+            .disabled(controller.isSavingSubagentCondensation)
+            Text("""
+                Betrifft nur einen Werkzeugschritt, der als langsam gilt — eine Recherche \
+                etwa. Sein Ergebnis lief schon durch die eigene Prüfung des Companions und \
+                geht dann zusätzlich durch den oben gewählten Eintrag, der daraus einen \
+                kurzen Bericht macht. Aus bleibt jeder Werkzeugschritt im Dienst im \
+                Hintergrund, wie lang sein Ergebnis auch ist.
+                """)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -283,22 +347,23 @@ struct EndpointsSettingsView: View {
     private var measurementSection: some View {
         Section("Messung") {
             Text("""
-                Die Messung fragt den Daemon, was seine eigenen Profile antworten. Sie ordnet \
-                Spracherkennung und Sprachausgabe; bei den beiden Modellrollen entscheidet die \
-                Qualitaet, nicht die Millisekunde. Ein CLI-Profil wird nur darauf geprueft, ob \
-                das Programm da ist.
+                Die Messung fragt den Dienst im Hintergrund, wie schnell seine eigenen \
+                Einträge antworten. Sie hilft bei Spracherkennung und Sprachausgabe; bei den \
+                beiden Modellen entscheidet die Qualität, nicht die Millisekunde. Ein Eintrag, \
+                der ein Programm auf diesem Rechner startet, wird nur darauf geprüft, ob es \
+                da ist.
                 """)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Button(controller.isProbing ? "Messung laeuft" : "Latenz messen") {
+            Button(controller.isProbing ? "Messung läuft" : "Latenz messen") {
                 controller.probe()
             }
             .disabled(controller.isProbing)
 
             if controller.health.isEmpty {
-                Text(controller.isProbing ? "Der Daemon misst." : "Noch nicht gemessen.")
+                Text(controller.isProbing ? "Es wird gemessen." : "Noch nicht gemessen.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }

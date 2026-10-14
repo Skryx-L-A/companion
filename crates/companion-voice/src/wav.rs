@@ -49,6 +49,128 @@ pub fn duration_seconds(samples: usize, sample_rate_hz: u32, channels: u16) -> f
     samples as f64 / per_second
 }
 
+/// Reads a RIFF/WAVE file that arrives in pieces and hands out the samples inside it.
+///
+/// The counterpart of [`wav_from_pcm16`], and the piece that lets a spoken answer be
+/// re-encoded while it is still being made: a TTS endpoint streams the file, and waiting for
+/// the last byte before starting to encode would give up the whole point of streaming.
+///
+/// Uncompressed PCM16 only. Anything else is named rather than played, because bytes read in
+/// the wrong encoding are noise at full volume and the person hearing it cannot tell why.
+#[derive(Debug, Default)]
+pub struct WavReader {
+    /// Sample rate and channel count out of the header, `None` until it has been read.
+    format: Option<(u32, u16)>,
+    buffer: Vec<u8>,
+    inside_data: bool,
+}
+
+/// Longest a header may be before it is treated as a broken file. A real one is well under
+/// a hundred bytes; the ceiling is what stops a file that never reaches its `data` chunk from
+/// growing without end.
+const MAX_HEADER_BYTES: usize = 1 << 16;
+
+impl WavReader {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sample rate and channels, once the header has been read.
+    pub fn format(&self) -> Option<(u32, u16)> {
+        self.format
+    }
+
+    /// Takes one piece of the file and returns the sample bytes in it.
+    ///
+    /// Empty while the header is still incomplete.
+    pub fn push(&mut self, piece: &[u8]) -> Result<Vec<u8>, String> {
+        if self.inside_data {
+            return Ok(piece.to_vec());
+        }
+        self.buffer.extend_from_slice(piece);
+        if self.buffer.len() < 12 {
+            return Ok(Vec::new());
+        }
+        if &self.buffer[0..4] != b"RIFF" || &self.buffer[8..12] != b"WAVE" {
+            return Err("the audio does not start with a RIFF/WAVE header".to_owned());
+        }
+
+        let mut at = 12usize;
+        while at + 8 <= self.buffer.len() {
+            let id: [u8; 4] = self.buffer[at..at + 4].try_into().expect("four bytes");
+            let declared =
+                u32::from_le_bytes(self.buffer[at + 4..at + 8].try_into().expect("four bytes"))
+                    as usize;
+            let payload = at + 8;
+
+            if &id == b"fmt " {
+                if self.buffer.len() < payload + 16 {
+                    break;
+                }
+                let encoding = u16::from_le_bytes(
+                    self.buffer[payload..payload + 2]
+                        .try_into()
+                        .expect("two bytes"),
+                );
+                let channels = u16::from_le_bytes(
+                    self.buffer[payload + 2..payload + 4]
+                        .try_into()
+                        .expect("two bytes"),
+                );
+                let rate = u32::from_le_bytes(
+                    self.buffer[payload + 4..payload + 8]
+                        .try_into()
+                        .expect("four bytes"),
+                );
+                let bits = u16::from_le_bytes(
+                    self.buffer[payload + 14..payload + 16]
+                        .try_into()
+                        .expect("two bytes"),
+                );
+                if encoding != 1 {
+                    return Err(format!(
+                        "the audio is not uncompressed PCM (format {encoding})"
+                    ));
+                }
+                if bits != 16 {
+                    return Err(format!(
+                        "the audio has {bits} bits per sample, this reads 16"
+                    ));
+                }
+                if rate == 0 || channels == 0 {
+                    return Err(format!("the header says {rate} Hz and {channels} channels"));
+                }
+                self.format = Some((rate, channels));
+            } else if &id == b"data" {
+                let Some(_) = self.format else {
+                    return Err("the samples come before the format chunk".to_owned());
+                };
+                self.inside_data = true;
+                let samples = self.buffer[payload.min(self.buffer.len())..].to_vec();
+                self.buffer = Vec::new();
+                return Ok(samples);
+            }
+
+            // RIFF chunks are padded to an even length; the pad byte is not part of the size.
+            let next = payload
+                .saturating_add(declared)
+                .saturating_add(declared % 2);
+            if next <= at {
+                return Err("a chunk of the header declares no length".to_owned());
+            }
+            at = next;
+        }
+
+        if self.buffer.len() > MAX_HEADER_BYTES {
+            return Err(format!(
+                "the header is still not finished after {} bytes",
+                self.buffer.len()
+            ));
+        }
+        Ok(Vec::new())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,6 +217,38 @@ mod tests {
         let wav = wav_from_pcm16(&[0u8; 8], 16_000, 0);
         assert_eq!(field(&wav, 22, 2), 1);
         assert_eq!(duration_seconds(32_000, 16_000, 0), 1.0);
+    }
+
+    #[test]
+    fn the_reader_finds_the_samples_however_the_file_is_cut_into_pieces() {
+        let samples: Vec<u8> = (0..400u16).flat_map(|value| value.to_le_bytes()).collect();
+        let wav = wav_from_pcm16(&samples, 24_000, 1);
+
+        for piece_size in [1usize, 7, 44, 45, 1000] {
+            let mut reader = WavReader::new();
+            let mut read = Vec::new();
+            for piece in wav.chunks(piece_size) {
+                read.extend_from_slice(&reader.push(piece).expect("a valid file"));
+            }
+            assert_eq!(reader.format(), Some((24_000, 1)), "pieces of {piece_size}");
+            assert_eq!(read, samples, "pieces of {piece_size}");
+        }
+    }
+
+    #[test]
+    fn audio_this_reader_cannot_take_apart_is_named_rather_than_passed_on() {
+        let mut reader = WavReader::new();
+        let error = reader
+            .push(b"ID3\x04not an mp3 either")
+            .expect_err("must refuse");
+        assert!(error.contains("RIFF"), "{error}");
+
+        // A well-formed header that says 8 bits per sample: readable, but not by this.
+        let mut eight_bit = wav_from_pcm16(&[0u8; 8], 16_000, 1);
+        eight_bit[34] = 8;
+        let mut reader = WavReader::new();
+        let error = reader.push(&eight_bit).expect_err("must refuse");
+        assert!(error.contains("8 bits"), "{error}");
     }
 
     #[test]

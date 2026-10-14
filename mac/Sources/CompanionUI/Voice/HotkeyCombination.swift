@@ -128,10 +128,10 @@ public struct HotkeyCombination: Sendable, Equatable, Hashable {
     /// would switch the keyboard layout instead of recording.
     public var systemConflict: String? {
         if key == .space && modifiers == [.control, .option] {
-            return "macOS benutzt diese Kombination fuer den Wechsel zur vorherigen Eingabequelle. Wer mehr als eine Tastaturbelegung hat, nimmt besser eine andere."
+            return "macOS benutzt diese Kombination für den Wechsel zur vorherigen Eingabequelle. Wer mehr als eine Tastaturbelegung hat, nimmt besser eine andere."
         }
         if key == .space && modifiers == [.control] {
-            return "macOS benutzt diese Kombination fuer den Wechsel der Eingabequelle."
+            return "macOS benutzt diese Kombination für den Wechsel der Eingabequelle."
         }
         return nil
     }

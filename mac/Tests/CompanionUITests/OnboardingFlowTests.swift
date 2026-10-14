@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
+import CompanionProtocol
 import XCTest
 
 @testable import CompanionUI
@@ -12,7 +13,7 @@ final class OnboardingFlowTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        suiteName = "de.skryx.companion.setuptest.\(UUID().uuidString.prefix(8))"
+        suiteName = "de.skryx.companion.setuptest.\(fixedSuiteSuffix)"
         defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
     }
 
@@ -32,21 +33,34 @@ final class OnboardingFlowTests: XCTestCase {
         XCTAssertEqual(flow.stepCount, 3)
     }
 
-    /// `DESIGN.md` section Ersteinrichtung numbers thirteen points, and they are in that order.
-    func testTheFullSetupWalksTheThirteenPointsInOrder() {
+    /// The thirteen points of `DESIGN.md` section Ersteinrichtung, on six pages.
+    ///
+    /// Thirteen pages for thirteen questions of two lines each left two thirds of the window
+    /// empty under every one of them (user test, 05.09.2026, Befund 11). Nothing was dropped:
+    /// the doc comment of every case says which points it carries.
+    func testTheFullSetupWalksTheSixPagesInOrder() {
         let flow = OnboardingFlow(settings: makeSettings(), path: .full)
         XCTAssertEqual(flow.steps, [
-            .workMode, .agentBoundary, .companionAutonomy, .inventory, .harness, .voice,
-            .budget, .conversationStyle, .models, .skills, .doneHandling, .reporting,
-            .toolBoundary,
+            .workMode, .harness, .voice, .boundaries, .conversationStyle, .reporting,
         ])
-        XCTAssertEqual(flow.stepCount, 13)
-        XCTAssertEqual(Set(flow.steps).count, 13, "no question twice")
+        XCTAssertEqual(flow.stepCount, 6)
+        XCTAssertEqual(Set(flow.steps).count, 6, "no question twice")
     }
 
-    func testEveryStepOfEveryPathHasAQuestionToShow() {
+    /// The three of the quick start are the first three of the full setup, so switching path
+    /// never puts somebody behind a question they already answered.
+    func testTheQuickStartIsThePrefixOfTheFullSetup() {
+        XCTAssertEqual(Array(SetupPath.full.steps.prefix(3)), SetupPath.quickStart.steps)
+    }
+
+    func testEveryStepOfEveryPathHasAQuestionAndAPurposeToShow() {
         for step in SetupStep.allCases {
             XCTAssertFalse(step.title.isEmpty, "\(step) has no question")
+            for path in SetupPath.allCases {
+                XCTAssertFalse(
+                    step.purpose(in: path).isEmpty,
+                    "\(step) says nothing about what its answer does on \(path)")
+            }
         }
     }
 
@@ -81,14 +95,14 @@ final class OnboardingFlowTests: XCTestCase {
 
         flow.switchPath(to: .full)
         XCTAssertEqual(flow.path, .full)
-        XCTAssertEqual(flow.current, .harness, "the same question, further along the longer path")
-        XCTAssertEqual(flow.stepNumber, 5, "point 5 of the thirteen")
+        XCTAssertEqual(flow.current, .harness, "the same question, on the longer path")
+        XCTAssertEqual(flow.stepNumber, 2, "page 2 of the six")
     }
 
     func testSwitchingBackToAPathWithoutThatQuestionStartsAtTheFront() {
         let flow = OnboardingFlow(settings: makeSettings(), path: .full)
-        flow.advance()
-        XCTAssertEqual(flow.current, .agentBoundary)
+        flow.jump(to: .boundaries)
+        XCTAssertEqual(flow.current, .boundaries)
 
         flow.switchPath(to: .quickStart)
         XCTAssertEqual(flow.path, .quickStart)
@@ -127,6 +141,67 @@ final class OnboardingFlowTests: XCTestCase {
         OnboardingFlow(settings: settings, path: .quickStart).finish()
         XCTAssertTrue(settings.hasCompletedOnboarding)
         XCTAssertFalse(settings.hasCompletedFullSetup)
+    }
+
+    func testFullSetupFinishAppliesTheSavedDefaultTierExactlyOnce() {
+        let daemon = StubDaemon()
+        let store = DaemonSettingsStore(send: daemon.sending, defaults: defaults)
+        store.loadSettings { _ in }
+        let endpoints = SetupEndpointsController(store: store)
+        let settings = makeSettings()
+        let flow = OnboardingFlow(settings: settings, path: .full, endpoints: endpoints)
+
+        flow.finish()
+        flow.finish()
+        store.pushSetupAnswers(from: settings)
+        store.pushSetupAnswers(from: settings)
+
+        XCTAssertEqual(daemon.requestNames.filter { $0 == "skills_apply" }.count, 1)
+        XCTAssertEqual(daemon.requestNames.last, "skills_apply")
+    }
+
+    func testFullSetupSavesAChangedTierBeforeApplyingIt() {
+        let daemon = StubDaemon()
+        let store = DaemonSettingsStore(send: daemon.sending, defaults: defaults)
+        store.loadSettings { _ in }
+        let settings = makeSettings()
+        let flow = OnboardingFlow(
+            settings: settings, path: .full, endpoints: SetupEndpointsController(store: store))
+        settings.skillLevel = .all
+
+        flow.finish()
+        store.pushSetupAnswers(from: settings)
+
+        XCTAssertEqual(daemon.requestNames, ["get_settings", "set_settings", "skills_apply"])
+        XCTAssertEqual(daemon.settings.skillLevel, .all)
+    }
+
+    func testCancellingFullSetupNeverAppliesSkills() {
+        let daemon = StubDaemon()
+        let store = DaemonSettingsStore(send: daemon.sending, defaults: defaults)
+        store.loadSettings { _ in }
+        let settings = makeSettings()
+        let flow = OnboardingFlow(
+            settings: settings, path: .full, endpoints: SetupEndpointsController(store: store))
+
+        flow.cancel()
+        store.pushSetupAnswers(from: settings)
+
+        XCTAssertFalse(daemon.requestNames.contains("skills_apply"))
+    }
+
+    func testQuickStartFinishNeverAppliesSkills() {
+        let daemon = StubDaemon()
+        let store = DaemonSettingsStore(send: daemon.sending, defaults: defaults)
+        store.loadSettings { _ in }
+        let settings = makeSettings()
+        let flow = OnboardingFlow(
+            settings: settings, path: .quickStart, endpoints: SetupEndpointsController(store: store))
+
+        flow.finish()
+        store.pushSetupAnswers(from: settings)
+
+        XCTAssertFalse(daemon.requestNames.contains("skills_apply"))
     }
 
     /// `DESIGN.md` section Ersteinrichtung: an abort leaves standards behind, never half a
@@ -194,6 +269,53 @@ final class OnboardingFlowTests: XCTestCase {
         OnboardingFlow(settings: settings, path: .quickStart).cancel()
         XCTAssertTrue(settings.hasCompletedOnboarding)
         XCTAssertFalse(settings.hasCompletedFullSetup)
+    }
+
+    /// An abort leaves standards behind, never half a state — and half the state a run writes
+    /// lives on the daemon. Review 2026-09-03: "Lokal einrichten" writes the endpoints and
+    /// `voice_server.enabled` right away, and Abbrechen used to roll back neither, so the
+    /// daemon was left permanently allowed to start that program.
+    func testAnAbortedSetupPutsTheDaemonsDocumentBackToo() {
+        let settings = makeSettings()
+        let daemon = StubDaemon()
+        let endpoints = SetupEndpointsController(
+            store: DaemonSettingsStore(send: daemon.sending, defaults: defaults),
+            locateSpeechServer: { "/opt/homebrew/bin/mlx_audio.server" },
+            locatePiperProgram: { nil }, locatePiperModel: { nil },
+            systemLanguageIsGerman: { false })
+        endpoints.refresh()
+        let before = daemon.settings
+
+        let flow = OnboardingFlow(settings: settings, path: .quickStart, endpoints: endpoints)
+        endpoints.letsDaemonStartServer = true
+        endpoints.connectLocalSpeech(startingTheServer: true)
+        XCTAssertTrue(daemon.settings.voiceServer.enabled, "the run really wrote it")
+        XCTAssertFalse(daemon.settings.endpoints.profiles.isEmpty)
+
+        flow.cancel()
+        XCTAssertFalse(
+            daemon.settings.voiceServer.enabled,
+            "a high-risk setting the person backed out of must not survive the abort")
+        XCTAssertEqual(daemon.settings, before)
+    }
+
+    /// Finishing keeps what was set up: only the abort puts it back.
+    func testFinishingKeepsWhatTheRunWroteToTheDaemon() {
+        let settings = makeSettings()
+        let daemon = StubDaemon()
+        let endpoints = SetupEndpointsController(
+            store: DaemonSettingsStore(send: daemon.sending, defaults: defaults),
+            locateSpeechServer: { "/opt/homebrew/bin/mlx_audio.server" },
+            locatePiperProgram: { nil }, locatePiperModel: { nil },
+            systemLanguageIsGerman: { false })
+        endpoints.refresh()
+
+        let flow = OnboardingFlow(settings: settings, path: .quickStart, endpoints: endpoints)
+        endpoints.connectLocalSpeech(startingTheServer: false)
+        flow.finish()
+
+        XCTAssertEqual(
+            daemon.settings.endpoints.roles[.stt]?.primary, LocalSpeechSetup.recogniserId)
     }
 
     /// The window closes through `windowWillClose` after Fertig as well, and that path calls

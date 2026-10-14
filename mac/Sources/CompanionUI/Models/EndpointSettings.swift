@@ -195,7 +195,7 @@ public final class EndpointDraft {
             } else if seen.contains(name) {
                 found.append(EndpointProblem(
                     profile: profile.id, field: .profileId,
-                    message: "Zwei Profile heissen \(name)."))
+                    message: "Zwei Profile heißen \(name)."))
             } else {
                 seen.append(name)
             }
@@ -211,8 +211,8 @@ public final class EndpointDraft {
                 found.append(EndpointProblem(
                     profile: profile.id, field: .url,
                     message: """
-                        In der Adresse steht ein Zugang. Ein Schluessel gehoert unter einem \
-                        Namen in den Schluesselbund, nicht in die Adresse, wo er in Logs und \
+                        In der Adresse steht ein Zugang. Ein Schlüssel gehört unter einem \
+                        Namen in den Schlüsselbund, nicht in die Adresse, wo er in Logs und \
                         Fehlermeldungen landet.
                         """))
             }
@@ -221,13 +221,13 @@ public final class EndpointDraft {
                 if profile.protocolKind.isCli {
                     found.append(EndpointProblem(
                         profile: profile.id, field: .keyRef,
-                        message: "Ein CLI-Profil benutzt keinen Schluessel, sondern das Abo."))
+                        message: "Ein CLI-Profil benutzt keinen Schlüssel, sondern das Abo."))
                 } else if !isNameNotKey(keyRef) {
                     found.append(EndpointProblem(
                         profile: profile.id, field: .keyRef,
                         message: """
-                            Hier steht der Schluessel selbst, wo der Name eines \
-                            Schluesselbund-Eintrags hingehoert. Lege den Schluessel unter \
+                            Hier steht der Schlüssel selbst, wo der Name eines \
+                            Schlüsselbund-Eintrags hingehört. Lege den Schlüssel unter \
                             einem Namen ab und trage den Namen ein.
                             """))
                 }
@@ -263,7 +263,7 @@ public enum EndpointStoreFailure: Error, Sendable, Equatable {
         switch self {
         case .notInProtocol:
             return """
-                Dieser Daemon ist aelter als diese Oberflaeche und kennt den Weg noch nicht, \
+                Dieser Daemon ist älter als diese Oberfläche und kennt den Weg noch nicht, \
                 seine Einstellungsdatei zu lesen oder zu schreiben.
                 """
         case .failed(let reason):
@@ -280,12 +280,27 @@ public enum EndpointStoreFailure: Error, Sendable, Equatable {
 @MainActor
 public protocol EndpointSettingsService: AnyObject {
     func loadEndpoints(completion: @escaping (Result<EndpointConfig, EndpointStoreFailure>) -> Void)
+    /// `confirmHighRisk` is true only where a person read the warning on the page and pressed
+    /// the button under it — see `endpointRaises(of:)` for what produces that warning.
     func saveEndpoints(
         _ config: EndpointConfig,
+        confirmHighRisk: Bool,
         completion: @escaping (Result<Void, EndpointStoreFailure>) -> Void)
+    /// What writing this configuration would raise, in the words the warning uses. Empty when
+    /// nothing is raised.
+    func endpointRaises(of config: EndpointConfig) -> [String]
     func probeEndpoints(
         role: EndpointRole?,
         completion: @escaping (Result<[EndpointHealth], ActionFailure>) -> Void)
+    /// Whether a `Slow` tool step's already-gated local result is condensed through the
+    /// `subagentLlm` role's CLI profile. Not part of `EndpointConfig` itself — the daemon
+    /// keeps it as its own field on the settings document — but this is the page that
+    /// explains what that role's chain is used for, so this is where the switch for it is
+    /// read and written too.
+    func loadSubagentCondensationEnabled(
+        completion: @escaping (Result<Bool, EndpointStoreFailure>) -> Void)
+    func saveSubagentCondensationEnabled(
+        _ enabled: Bool, completion: @escaping (Result<Void, EndpointStoreFailure>) -> Void)
 }
 
 // MARK: - Words for the settings page
@@ -294,7 +309,7 @@ extension EndpointRole {
     public var label: String {
         switch self {
         case .chatLlm: return "Chat-Modell"
-        case .subagentLlm: return "Modell der Sessions"
+        case .subagentLlm: return "Hilfsmodell des Companions"
         case .stt: return "Spracherkennung"
         case .tts: return "Sprachausgabe"
         case .wakeword: return "Weckwort"
@@ -306,19 +321,19 @@ extension EndpointRole {
     public var detail: String {
         switch self {
         case .chatLlm:
-            return "Das Modell, mit dem der Companion selbst spricht. Ein API-Profil ist hier der empfohlene Weg, weil es Token stroemt und satzweise gesprochen werden kann."
+            return "Das Modell, mit dem der Companion selbst spricht. Ein API-Profil ist hier der empfohlene Weg, weil es Token strömt und satzweise gesprochen werden kann."
         case .subagentLlm:
-            return "Das Modell, auf dem eine gestartete Session laeuft. Ein CLI-Profil nutzt hier das Abo ohne Schluessel."
+            return "Das zweite Modell, das der Companion für sich selbst benutzt: die Recherche im Netz und das Kürzen langer Werkzeugergebnisse. Nicht das Modell einer gestarteten Session — das steht im Auftrag. Suchen kann nur ein CLI-Profil mit claude, und das nutzt das Abo ohne Schlüssel."
         case .stt:
-            return "Wandelt Gesprochenes in Text. Ein Endpoint in der Cloud bekommt dein Audio zu hoeren."
+            return "Wandelt Gesprochenes in Text. Ein Endpoint in der Cloud bekommt dein Audio zu hören."
         case .tts:
-            return "Spricht die Antwort. Auf diesem Rechner liegt say als Profil ohne Schluessel bei."
+            return "Spricht die Antwort. Auf diesem Rechner liegt say als Profil ohne Schlüssel bei."
         case .wakeword:
-            return "Erkennt das Weckwort. Laeuft auf diesem Rechner; angelernt wird das Wort im eigenen Fenster."
+            return "Erkennt das Weckwort. Läuft auf diesem Rechner; angelernt wird das Wort im eigenen Fenster."
         case .s2s:
-            return "Sprache direkt zu Sprache, ohne Umweg ueber Text. Ein zusaetzlicher Modus, nicht der Standard."
+            return "Sprache direkt zu Sprache, ohne Umweg über Text. Ein zusätzlicher Modus, nicht der Standard."
         case .unrecognised:
-            return "Diese Rolle kennt der Daemon und diese Fassung der Oberflaeche nicht."
+            return "Diese Rolle kennt der Daemon und diese Fassung der Oberfläche nicht."
         }
     }
 }
@@ -344,11 +359,11 @@ extension EndpointProtocol {
         case .ollama:
             return "Die eigene API von Ollama unter /api."
         case .whisperServer:
-            return "Ein whisper.cpp-Server: Datei hoch, Text zurueck."
+            return "Ein whisper.cpp-Server: Datei hoch, Text zurück."
         case .cli:
-            return "Ein Programm auf diesem Rechner, das der Daemon startet. Kein Schluessel, dafuer Ausgabe in Bloecken und ein langsamerer Start."
+            return "Ein Programm auf diesem Rechner, das der Daemon startet. Kein Schlüssel, dafür Ausgabe in Blöcken und ein langsamerer Start."
         case .unrecognised:
-            return "Dieses Protokoll kennt diese Fassung der Oberflaeche nicht."
+            return "Dieses Protokoll kennt diese Fassung der Oberfläche nicht."
         }
     }
 }
@@ -359,7 +374,7 @@ extension EndpointHealth {
     public var latencyDisplay: String {
         switch latencyMs {
         case .measured(let value): return "\(value) ms, gemessen"
-        case .estimated(let value): return "\(value) ms, geschaetzt"
+        case .estimated(let value): return "\(value) ms, geschätzt"
         case .unknown: return "keine Zahl"
         }
     }

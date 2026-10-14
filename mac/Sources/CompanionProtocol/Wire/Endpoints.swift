@@ -10,7 +10,8 @@ import Foundation
 public enum EndpointRole: Sendable, Equatable, Hashable {
     /// The model the companion itself talks with.
     case chatLlm
-    /// The model a spawned session runs on.
+    /// The companion's own helper model: web research and the shortening of long tool
+    /// results. Not the model a spawned session runs on — that stands in the order.
     case subagentLlm
     /// Speech to text.
     case stt
@@ -175,6 +176,57 @@ public struct EndpointHealth: Codable, Sendable, Equatable {
 
 // MARK: - The endpoint part of the settings file
 
+/// Whether a url speaks http and points at this machine.
+///
+/// The daemon's `is_loopback_url` (`companion-protocol/src/settings.rs`), rule for rule: only
+/// http and https count at all, the userinfo of a url is not a host and a host hiding behind
+/// one is not local, an IPv6 literal is read out of its brackets, and local means `localhost`,
+/// `::1` or anything in 127. Checked by hand rather than with `URL`, for the same reason the
+/// Rust side gives — this is the whole question, a scheme and a host — and because `URL`
+/// answers differently in exactly the places that matter: it reads a host out of an address
+/// with no scheme, and it hands back the host of an address that carries a credential.
+public func isLoopbackURL(_ url: String) -> Bool {
+    let rest: Substring
+    if url.hasPrefix("http://") {
+        rest = url.dropFirst("http://".count)
+    } else if url.hasPrefix("https://") {
+        rest = url.dropFirst("https://".count)
+    } else {
+        return false
+    }
+    let authority = rest.split(
+        omittingEmptySubsequences: false, whereSeparator: { $0 == "/" || $0 == "?" || $0 == "#" }
+    ).first ?? ""
+    if authority.contains("@") { return false }
+    let host: Substring
+    if authority.hasPrefix("[") {
+        // An IPv6 literal in brackets; the port comes after the closing one.
+        let inner = authority.dropFirst()
+        guard let end = inner.firstIndex(of: "]") else { return false }
+        host = inner[inner.startIndex..<end]
+    } else {
+        host = authority.split(separator: ":", omittingEmptySubsequences: false).first ?? ""
+    }
+    return host == "localhost" || host == "::1" || host.hasPrefix("127.")
+}
+
+/// The host of a url, for a warning a person reads.
+///
+/// The daemon's `host_of`, for the same reason it exists there: only the host, never the whole
+/// address, because the path and the query of an endpoint url are where a credential ends up
+/// when somebody puts one there, and a warning is displayed, logged and read out. A url this
+/// cannot read is shown as `(unreadable address)` rather than passed through whole.
+public func hostOfURL(_ url: String) -> String {
+    let afterScheme = url.range(of: "://").map { String(url[$0.upperBound...]) } ?? url
+    let authority = afterScheme.split(
+        omittingEmptySubsequences: false, whereSeparator: { $0 == "/" || $0 == "?" || $0 == "#" }
+    ).first ?? ""
+    // Whatever hides in front of an `@` is userinfo, not a host.
+    let host = authority.range(of: "@", options: .backwards)
+        .map { authority[$0.upperBound...] } ?? authority[authority.startIndex...]
+    return host.isEmpty ? "(unreadable address)" : String(host)
+}
+
 /// One provider profile: how to reach a backend, and under which name its key lives.
 ///
 /// The shape is the one `companion-core` writes into the settings file, field for field, so
@@ -182,6 +234,11 @@ public struct EndpointHealth: Codable, Sendable, Equatable {
 /// A profile never carries a key, only the name of one: there is no field a key could go
 /// into.
 public struct EndpointProfile: Codable, Sendable, Equatable, Identifiable {
+    /// The local Breeze TTS 2 profile shared by setup and the daemon migration.
+    public static let breezeProfileID = "breeze-tts"
+    public static let breezeModel = "mlx-community/Breeze-TTS-2-mlx-4bit"
+    public static let breezeVoice = "S0"
+
     /// Name the role bindings and the settings page use.
     public var id: String
     public var protocolKind: EndpointProtocol
@@ -194,8 +251,20 @@ public struct EndpointProfile: Codable, Sendable, Equatable, Identifiable {
     /// Model this profile uses. `DESIGN.md` section Endpoints wants the settings page to show
     /// it for every profile.
     public var model: String?
+    /// Voice this profile speaks with, when the caller names none. A speech endpoint has its
+    /// own set of voice names, so which ones exist belongs to the profile, next to the model.
+    public var voice: String?
     /// Fixed arguments for a CLI profile, in front of whatever the driver adds.
     public var args: [String]
+    /// The spoken language this profile is good at, as a lowercase ISO code (`"de"`). Nil for
+    /// a profile nobody tagged — the daemon's TTS role chain then behaves exactly as it did
+    /// before this field existed.
+    public var language: String?
+    /// How much a reasoning model may think before it writes the answer, sent to an
+    /// OpenAI-compatible endpoint as `reasoning_effort`. Nil for a profile that never asked
+    /// for it, and then the daemon sends no such field at all — an endpoint that does not
+    /// know it answers the whole request with 400.
+    public var reasoningEffort: String?
 
     public init(
         id: String,
@@ -203,14 +272,42 @@ public struct EndpointProfile: Codable, Sendable, Equatable, Identifiable {
         url: String,
         keyRef: String? = nil,
         model: String? = nil,
-        args: [String] = []
+        voice: String? = nil,
+        args: [String] = [],
+        language: String? = nil,
+        reasoningEffort: String? = nil
     ) {
         self.id = id
         self.protocolKind = protocolKind
         self.url = url
         self.keyRef = keyRef
         self.model = model
+        self.voice = voice
         self.args = args
+        self.language = language
+        self.reasoningEffort = reasoningEffort
+    }
+
+    /// Breeze TTS 2 on the local speech server at `url`, with its own speaker tag.
+    public static func breeze(url: String) -> EndpointProfile {
+        EndpointProfile(
+            id: breezeProfileID, protocolKind: .openaiCompat, url: url,
+            model: breezeModel, voice: breezeVoice, language: "en")
+    }
+
+    /// Whether talking to this endpoint sends what it is given off this machine.
+    ///
+    /// The daemon's `endpoint_leaves_the_machine` (`companion-protocol/src/settings.rs`), rule
+    /// for rule, because the two are read as one warning and the daemon is the side that
+    /// refuses. Three things stay here: a CLI profile, which is a local program; a unix
+    /// socket; and an http address `isLoopbackURL` calls local. Everything else counts as
+    /// leaving, an address on the home network included — a machine in the next room is still
+    /// not this one.
+    public var leavesTheMachine: Bool {
+        if protocolKind.isCli { return false }
+        let address = url.trimmingCharacters(in: .whitespaces)
+        if address.hasPrefix("unix:") || address.hasPrefix("/") { return false }
+        return !isLoopbackURL(address)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -219,7 +316,10 @@ public struct EndpointProfile: Codable, Sendable, Equatable, Identifiable {
         case url
         case keyRef = "key_ref"
         case model
+        case voice
         case args
+        case language
+        case reasoningEffort = "reasoning_effort"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -229,7 +329,10 @@ public struct EndpointProfile: Codable, Sendable, Equatable, Identifiable {
         url = try container.decode(String.self, forKey: .url)
         keyRef = try container.decodeIfPresent(String.self, forKey: .keyRef)
         model = try container.decodeIfPresent(String.self, forKey: .model)
+        voice = try container.decodeIfPresent(String.self, forKey: .voice)
         args = try container.decodeIfPresent([String].self, forKey: .args) ?? []
+        language = try container.decodeIfPresent(String.self, forKey: .language)
+        reasoningEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -241,7 +344,10 @@ public struct EndpointProfile: Codable, Sendable, Equatable, Identifiable {
         // key reference of its own kind in a file somebody reads by hand.
         try container.encodeIfPresent(keyRef, forKey: .keyRef)
         try container.encodeIfPresent(model, forKey: .model)
+        try container.encodeIfPresent(voice, forKey: .voice)
         if !args.isEmpty { try container.encode(args, forKey: .args) }
+        try container.encodeIfPresent(language, forKey: .language)
+        try container.encodeIfPresent(reasoningEffort, forKey: .reasoningEffort)
     }
 }
 

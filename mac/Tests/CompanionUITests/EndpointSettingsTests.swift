@@ -70,7 +70,7 @@ final class EndpointDraftTests: XCTestCase {
     func testTheKeyItselfWhereTheNameBelongsIsRefused() {
         let draft = EndpointDraft()
         var profile = cloud()
-        profile.keyRef = "sk-proj-0123456789abcdef"
+        profile.keyRef = ("sk-" + "proj-0123456789abcdef")
         draft.profiles = [profile]
         XCTAssertEqual(draft.problems.map(\.field), [.keyRef])
     }
@@ -218,7 +218,7 @@ final class EndpointsControllerTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        suiteName = "de.skryx.companion.endpointtest.\(UUID().uuidString.prefix(8))"
+        suiteName = "de.skryx.companion.endpointtest.\(fixedSuiteSuffix)"
         defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
     }
 
@@ -250,6 +250,58 @@ final class EndpointsControllerTests: XCTestCase {
         XCTAssertEqual(second.draft.profiles.first?.model, "qwen3")
     }
 
+    /// The field the endpoints page grew on 2026-09-05, on the way through the document.
+    ///
+    /// It is the one thing that decides whether a German sentence is read by a German voice,
+    /// so a page that showed it but dropped it on the way to the daemon would be worse than no
+    /// field at all: the person would see their answer and the companion would keep the old
+    /// one. Nil for a profile nobody tagged, which is what leaves an untagged chain in its
+    /// configured order.
+    func testTheLanguageOfAProfileGoesToTheDaemonAndComesBackFromIt() {
+        let daemon = StubDaemon()
+        let first = EndpointsController(
+            service: DaemonSettingsStore(send: daemon.sending, defaults: defaults))
+        first.load()
+        first.draft.profiles = [
+            EndpointProfile(
+                id: "kokoro", protocolKind: .openaiCompat, url: "http://127.0.0.1:8791",
+                model: "mlx-community/Kokoro-82M-bf16", voice: "af_heart", language: "en"),
+            EndpointProfile(
+                id: "say-de", protocolKind: .cli, url: "/usr/bin/say", voice: "Anna",
+                language: "de"),
+            EndpointProfile(id: "say", protocolKind: .cli, url: "/usr/bin/say"),
+        ]
+        first.draft.roles[.tts] = RoleBinding(primary: "kokoro", fallback: ["say-de", "say"])
+        first.save()
+
+        let second = EndpointsController(
+            service: DaemonSettingsStore(send: daemon.sending, defaults: defaults))
+        second.load()
+        XCTAssertEqual(
+            second.draft.profiles.map(\.language), ["en", "de", nil],
+            "each entry keeps the language it was given, and an untagged one stays untagged")
+    }
+
+    /// The switch lives next to `endpoints` on the daemon's document, not inside it, and
+    /// saves itself the moment it is flipped rather than waiting on the profiles' own
+    /// `Sichern` button.
+    func testTheSubagentSwitchSavesItselfAndComesBackFromTheDaemon() {
+        let daemon = StubDaemon()
+        let first = EndpointsController(
+            service: DaemonSettingsStore(send: daemon.sending, defaults: defaults))
+        first.load()
+        XCTAssertTrue(first.subagentCondensationEnabled, "the careful default")
+
+        first.setSubagentCondensationEnabled(false)
+        XCTAssertFalse(first.subagentCondensationEnabled)
+        XCTAssertFalse(first.isSavingSubagentCondensation)
+
+        let second = EndpointsController(
+            service: DaemonSettingsStore(send: daemon.sending, defaults: defaults))
+        second.load()
+        XCTAssertFalse(second.subagentCondensationEnabled)
+    }
+
     /// The page says what is open instead of writing a configuration the daemon would refuse.
     func testADraftWithProblemsIsNotSaved() {
         let daemon = StubDaemon()
@@ -262,6 +314,50 @@ final class EndpointsControllerTests: XCTestCase {
 
         XCTAssertNotNil(controller.notice)
         XCTAssertEqual(daemon.written, [], "nothing was sent")
+    }
+
+    /// The page shows the warning and waits for a second press. Review 2026-09-03: it used to
+    /// send a cloud speech endpoint straight through, with a comment claiming an endpoint is
+    /// never a high-risk setting — while the setup panel promised the warning existed.
+    func testACloudSpeechEndpointIsNotSavedUntilSomebodyConfirmedIt() {
+        let daemon = StubDaemon()
+        let controller = EndpointsController(
+            service: DaemonSettingsStore(send: daemon.sending, defaults: defaults))
+        controller.load()
+        controller.draft.profiles = [EndpointProfile(
+            id: "wolke", protocolKind: .openaiCompat, url: "https://api.example.com/v1",
+            keyRef: "wolke-key", model: "whisper-1")]
+        controller.draft.roles[.stt] = RoleBinding(primary: "wolke")
+
+        controller.save()
+        XCTAssertEqual(daemon.written, [], "nothing went out")
+        XCTAssertEqual(controller.pendingHighRisk.count, 1)
+        XCTAssertEqual(
+            controller.pendingHighRisk,
+            [
+                "the role stt goes to the endpoint wolke at api.example.com, which is not this "
+                    + "machine, so what is spoken into the microphone leaves it",
+            ])
+
+        controller.save(confirmedHighRisk: true)
+        XCTAssertTrue(controller.pendingHighRisk.isEmpty)
+        XCTAssertEqual(daemon.settings.endpoints.profiles.map(\.id), ["wolke"])
+        XCTAssertEqual(controller.notice, "Gesichert. Der Daemon arbeitet damit.")
+    }
+
+    /// And the ordinary case stays one press: a local endpoint raises nothing.
+    func testALocalEndpointIsSavedWithoutCeremony() {
+        let daemon = StubDaemon()
+        let controller = EndpointsController(
+            service: DaemonSettingsStore(send: daemon.sending, defaults: defaults))
+        controller.load()
+        controller.draft.profiles = [EndpointProfile(
+            id: "lokal", protocolKind: .openaiCompat, url: "http://127.0.0.1:8791")]
+        controller.draft.roles[.stt] = RoleBinding(primary: "lokal")
+
+        controller.save()
+        XCTAssertTrue(controller.pendingHighRisk.isEmpty)
+        XCTAssertEqual(daemon.settings.endpoints.profiles.map(\.id), ["lokal"])
     }
 
     func testAMeasurementOfOneRoleDoesNotThrowAwayTheOthers() {

@@ -12,6 +12,7 @@ companion-core.workspace = true
 companion-protocol.workspace = true
 
 async-trait.workspace = true
+chrono.workspace = true
 # The same reasoning as in companion-voice: `system-proxy` would send a request to
 # 127.0.0.1 through whatever proxy the system settings name, and the TLS backend is picked
 # explicitly rather than inherited.
@@ -21,11 +22,27 @@ reqwest = { workspace = true, default-features = false, features = [
     "charset",
     "json",
     "stream",
+    # `weather` and `places` build their Open-Meteo/Photon/OSRM requests with `.query(&[...])`
+    # rather than hand-formatting a query string.
+    "query",
 ] }
 serde.workspace = true
 serde_json.workspace = true
+# For the digests of the earlier default prompts, so an unedited old one is replaced by
+# today's instead of standing forever (`prompt::PREVIOUS_DEFAULTS`).
+sha2.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "process", "sync", "time", "rt", "io-util"] }
+# "macros" for the one `tokio::select!` in `Brain::run_continuation`, which races a model
+# call against the cancellation of its exchange.
+tokio = { workspace = true, features = [
+    "fs",
+    "process",
+    "sync",
+    "time",
+    "rt",
+    "io-util",
+    "macros",
+] }
 tokio-stream = { workspace = true, features = ["io-util"] }
 tracing.workspace = true
 

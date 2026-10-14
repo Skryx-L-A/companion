@@ -41,6 +41,51 @@ final class ChatRequestWireTests: XCTestCase {
         XCTAssertFalse(Request.chatMessage(text: "t", voice: false).isVoice)
         XCTAssertFalse(Request.ttsSpeak(text: "t", voice: nil).isChat)
         XCTAssertFalse(Request.send(sessionId: "s", text: "t").isChat)
+        // Cancelling is not the request that finds out whether the daemon has a chat model:
+        // it is only ever sent while a report of that very model is running, and treating a
+        // refusal of it as "no chat model connected" would switch the conversation off over a
+        // report that had merely finished first.
+        XCTAssertFalse(Request.chatCancel(turnId: "turn-1").isChat)
+    }
+
+    func testCancellingNamesTheTurnAndNothingElse() throws {
+        let written = try object(.chatCancel(turnId: "turn-1"))
+        XCTAssertEqual(written["request"] as? String, "chat_cancel")
+        XCTAssertEqual(written["turn_id"] as? String, "turn-1")
+        XCTAssertNil(written["session_id"], "a report belongs to no session")
+        XCTAssertNil(written["text"])
+    }
+}
+
+/// What the daemon answers a `chat_cancel` with. The two cases are worth telling apart: a
+/// report that was still running has been stopped, one that had already finished was not.
+final class ChatCancelResponseWireTests: XCTestCase {
+    private func body(_ payload: String) throws -> ResponseBody {
+        let line = Data(#"{"type":"response","id":4,"status":"ok","payload":"#.utf8) + Data(payload.utf8)
+            + Data("}".utf8)
+        guard case .response(let response) = try WireCodec.decode(line),
+              case .success(let body) = response.result
+        else {
+            throw XCTSkip("not a successful response")
+        }
+        return body
+    }
+
+    func testAStoppedReportAndAFinishedOneAreToldApart() throws {
+        XCTAssertEqual(
+            try body(#"{"body":"chat_cancelled","cancelled":true}"#),
+            .chatCancelled(cancelled: true))
+        XCTAssertEqual(
+            try body(#"{"body":"chat_cancelled","cancelled":false}"#),
+            .chatCancelled(cancelled: false))
+    }
+
+    func testTheBodySurvivesARoundTrip() throws {
+        let encoded = try JSONEncoder().encode(ResponseBody.chatCancelled(cancelled: true))
+        let object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertEqual(object["body"] as? String, "chat_cancelled")
+        XCTAssertEqual(object["cancelled"] as? Bool, true)
     }
 }
 
@@ -57,48 +102,81 @@ final class ChatEventWireTests: XCTestCase {
         return envelope.event
     }
 
-    func testADeltaCarriesThePieceOfTheAnswer() throws {
+    func testADeltaCarriesTheTurnIdAndThePieceOfTheAnswer() throws {
         XCTAssertEqual(
-            try event(#"{"event":"chat_delta","text":"Zwei Sessions "}"#),
-            .chat(.delta(text: "Zwei Sessions ")))
+            try event(#"{"event":"chat_delta","turn_id":"t1","text":"Zwei Sessions "}"#),
+            .chat(.delta(turnId: "t1", text: "Zwei Sessions ")))
     }
 
-    func testAToolLineCarriesItsNameAndItsSummary() throws {
+    func testAToolLineCarriesItsTurnIdItsNameAndItsSummary() throws {
         XCTAssertEqual(
-            try event(#"{"event":"chat_tool","name":"list","summary":"drei Sessions gelesen"}"#),
-            .chat(.tool(name: "list", summary: "drei Sessions gelesen")))
+            try event(
+                #"{"event":"chat_tool","turn_id":"t1","name":"list","summary":"drei Sessions gelesen"}"#
+            ),
+            .chat(.tool(turnId: "t1", name: "list", summary: "drei Sessions gelesen")))
     }
 
-    func testTheEndCarriesTheWholeAnswerAndWhetherItWasSpoken() throws {
+    func testTheEndCarriesTheWholeAnswerWhetherItWasSpokenAndWhetherMoreIsComing() throws {
         XCTAssertEqual(
-            try event(#"{"event":"chat_done","text":"Zwei Sessions laufen.","spoken":true}"#),
-            .chat(.done(text: "Zwei Sessions laufen.", spoken: true)))
+            try event(
+                #"{"event":"chat_done","turn_id":"t1","text":"Zwei Sessions laufen.","spoken":true,"continues":true}"#
+            ),
+            .chat(.done(turnId: "t1", text: "Zwei Sessions laufen.", spoken: true, continues: true)))
     }
 
     /// Read tolerantly although the schema requires every field: one that is missing leaves its
     /// value at what an empty one would be, the event is not thrown away over it, and nothing is
     /// invented in its place.
     func testAMissingFieldLeavesTheEventReadableRatherThanDroppingIt() throws {
-        XCTAssertEqual(try event(#"{"event":"chat_delta"}"#), .chat(.delta(text: "")))
-        XCTAssertEqual(try event(#"{"event":"chat_tool"}"#), .chat(.tool(name: "", summary: "")))
-        XCTAssertEqual(try event(#"{"event":"chat_done"}"#), .chat(.done(text: "", spoken: false)))
+        XCTAssertEqual(
+            try event(#"{"event":"chat_delta"}"#), .chat(.delta(turnId: "", text: "")))
+        XCTAssertEqual(
+            try event(#"{"event":"chat_tool"}"#),
+            .chat(.tool(turnId: "", name: "", summary: "")))
+        XCTAssertEqual(
+            try event(#"{"event":"chat_done"}"#),
+            .chat(.done(turnId: "", text: "", spoken: false, continues: false)))
     }
 
-    /// An answer that says nothing about having been spoken was not spoken. The other way
-    /// round would leave a person waiting for words that never come.
-    func testAnEndWithoutTheFlagCountsAsNotSpoken() throws {
+    /// An answer that says nothing about having been spoken was not spoken, and one that says
+    /// nothing about continuing is the end of the exchange. Either way round would leave a
+    /// person waiting for something that never comes — words, or a report.
+    func testAnEndWithoutTheFlagsCountsAsNotSpokenAndFinal() throws {
         XCTAssertEqual(
-            try event(#"{"event":"chat_done","text":"fertig"}"#),
-            .chat(.done(text: "fertig", spoken: false)))
+            try event(#"{"event":"chat_done","turn_id":"t1","text":"fertig"}"#),
+            .chat(.done(turnId: "t1", text: "fertig", spoken: false, continues: false)))
+    }
+
+    /// A deferred confirmation names the turn id its report will use, so a client can tell
+    /// that turn apart from an unrelated one that opens in the meantime.
+    func testADeferredConfirmationNamesItsReportsTurnId() throws {
+        XCTAssertEqual(
+            try event(
+                #"""
+                {"event":"chat_done","turn_id":"t1","text":"Ich schaue nach.","spoken":false,\#
+                "continues":true,"report_turn_id":"t2"}
+                """#
+            ),
+            .chat(.done(
+                turnId: "t1", text: "Ich schaue nach.", spoken: false, continues: true,
+                reportTurnId: "t2")))
+
+        // Absent on the wire — an older daemon, or the exchange's own final word — reads as
+        // nil rather than as some invented turn id.
+        XCTAssertEqual(
+            try event(#"{"event":"chat_done","turn_id":"t1","text":"fertig","continues":false}"#),
+            .chat(.done(turnId: "t1", text: "fertig", spoken: false, continues: false)))
     }
 
     func testEveryChatEventSurvivesARoundTrip() throws {
         let events: [ChatEvent] = [
-            .delta(text: "ein Stueck"),
-            .tool(name: "list", summary: "drei Sessions"),
-            .tool(name: "list", summary: ""),
-            .done(text: "Der ganze Satz.", spoken: false),
-            .done(text: "Der ganze Satz.", spoken: true),
+            .delta(turnId: "t1", text: "ein Stueck"),
+            .tool(turnId: "t1", name: "list", summary: "drei Sessions"),
+            .tool(turnId: "t1", name: "list", summary: ""),
+            .done(
+                turnId: "t1", text: "Der ganze Satz.", spoken: false, continues: true,
+                reportTurnId: "t2"),
+            .done(turnId: "t2", text: "Der ganze Satz.", spoken: true, continues: false),
         ]
         for event in events {
             let data = try JSONEncoder().encode(Event.chat(event))
@@ -106,17 +184,17 @@ final class ChatEventWireTests: XCTestCase {
         }
     }
 
-    /// The three chat kinds have their own names among the twenty-one, and the shell can tell
-    /// them from the voice ones without looking at the payload.
-    func testTheThreeChatKindsAreAmongTheTwentyOne() {
-        XCTAssertEqual(EventKind.allCases.count, 21)
+    /// The three chat kinds have their own names among the twenty-three, and the shell can
+    /// tell them from the voice ones without looking at the payload.
+    func testTheThreeChatKindsAreAmongTheTwentyThree() {
+        XCTAssertEqual(EventKind.allCases.count, 23)
         for kind in ChatEventKind.allCases {
             let matching = EventKind(rawValue: kind.rawValue)
             XCTAssertNotNil(matching, "\(kind.rawValue) is missing from EventKind")
             XCTAssertEqual(matching?.isChat, true)
             XCTAssertEqual(matching?.isVoice, false)
         }
-        XCTAssertEqual(Event.chat(.delta(text: "x")).kind, .chatDelta)
+        XCTAssertEqual(Event.chat(.delta(turnId: "t1", text: "x")).kind, .chatDelta)
         XCTAssertEqual(EventKind.ttsDone.isChat, false)
         XCTAssertEqual(EventKind.busy.isChat, false)
     }
@@ -127,11 +205,21 @@ final class ChatEventWireTests: XCTestCase {
         XCTAssertEqual(try event(#"{"event":"chat_thinking"}"#), .unrecognised(kind: "chat_thinking"))
     }
 
+    /// Two turns of one exchange — a confirmation and its later report — never share an id,
+    /// and `turnId` reads it back whichever case the event is.
+    func testTurnIdIsReadableFromEveryCase() {
+        XCTAssertEqual(ChatEvent.delta(turnId: "t1", text: "x").turnId, "t1")
+        XCTAssertEqual(ChatEvent.tool(turnId: "t1", name: "n", summary: "s").turnId, "t1")
+        XCTAssertEqual(
+            ChatEvent.done(turnId: "t1", text: "x", spoken: false, continues: false).turnId, "t1")
+    }
+
     /// Neither what was asked nor what was answered reaches a log line.
     func testTheDescriptionCarriesNoWords() {
-        let done = ChatEvent.done(text: "mein Passwort ist Hummel", spoken: false)
+        let done = ChatEvent.done(
+            turnId: "t1", text: "mein Passwort ist Hummel", spoken: false, continues: false)
         XCTAssertFalse(done.description.contains("Hummel"))
         XCTAssertTrue(done.description.contains("24 Zeichen"))
-        XCTAssertFalse(ChatEvent.delta(text: "Hummel").description.contains("Hummel"))
+        XCTAssertFalse(ChatEvent.delta(turnId: "t1", text: "Hummel").description.contains("Hummel"))
     }
 }

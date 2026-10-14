@@ -15,7 +15,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use companion_protocol::{ClientRole, RequestKind};
+use companion_protocol::{ClientRole, DeviceLevel, RequestKind};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -68,16 +68,34 @@ pub enum TokenError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("the keychain refused: {detail}")]
+    Keychain { detail: String },
 }
 
 /// A random token, hex encoded.
 pub fn generate_token() -> Result<String, TokenError> {
-    let mut bytes = [0u8; TOKEN_BYTES];
+    random_hex(TOKEN_BYTES)
+}
+
+/// `len` random bytes, hex encoded.
+pub fn random_hex(len: usize) -> Result<String, TokenError> {
+    Ok(random_bytes(len)?
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+/// `len` random bytes.
+///
+/// One place reads the randomness, so anything that needs a secret or an identifier gets
+/// it from the same source rather than opening its own.
+pub fn random_bytes(len: usize) -> Result<Vec<u8>, TokenError> {
+    let mut bytes = vec![0u8; len];
     let mut source = fs::File::open("/dev/urandom").map_err(TokenError::Randomness)?;
     source
         .read_exact(&mut bytes)
         .map_err(TokenError::Randomness)?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+    Ok(bytes)
 }
 
 /// Where the tokens live.
@@ -223,6 +241,106 @@ impl Authenticator {
     }
 }
 
+/// Whether a device of this level may issue a request.
+///
+/// `DESIGN.md` § Mobil, Geräte-Token: the two levels are the ones of the remote machines,
+/// watch only or drive. A device always has the role `human` — there is no `agent` at the
+/// network port — so this is a second gate on top of [`permits`] rather than a replacement
+/// for it, and a request has to pass both.
+///
+/// Watching is the read-only set and nothing else. Talking to the companion is not in it on
+/// purpose: an answer of his can start a tool, and a device that was paired to watch would
+/// then be driving the machine through a sentence.
+pub fn device_permits(level: DeviceLevel, kind: RequestKind) -> bool {
+    match level {
+        // Written out one kind at a time rather than as "everything": a new request kind has
+        // to be classified here before a device can reach it, which is the same forcing
+        // function [`permits`] has for the role model. A blanket `true` would hand every
+        // future kind to every paired phone the day it is added.
+        //
+        // Approving a job and running one of its gate commands are in the list.
+        // `DESIGN.md` § Mobil, Freigaben vom Handy allows both from a phone that is paired to
+        // drive, and demands in the same breath: "der Freigabe-Record vermerkt stets Gerät
+        // und Bestätigungsart". [`crate::registry::ApprovalRecord`] carries both since schema
+        // version 3, and the daemon refuses an approval from a device that does not say how
+        // it was confirmed. Running a gate rides on that record: what it runs is the text of
+        // an approval whose origin is written down, and the run itself permits nothing the
+        // approval did not.
+        //
+        // `SetSettings` is in the list and is fenced off a second time in the daemon:
+        // `Settings::device_forbidden_changes` refuses a raise and every change to a program
+        // this machine would start. The reason it is not simply absent here is that an
+        // ordinary setting — the name of the figure, a notification channel — is exactly what
+        // a phone should be able to change.
+        //
+        // `SetSessionPreference` is in the list for the same reason and with less at stake:
+        // "immer mich fragen" for one session can only ever make the companion answer less
+        // on its own, and a person who is away from the machine is exactly the one who wants
+        // to reach for it. Reading the preferences is in the watching set as well — it says
+        // who answers, not what was answered.
+        DeviceLevel::Control => match kind {
+            RequestKind::List
+            | RequestKind::Spawn
+            | RequestKind::Send
+            | RequestKind::Read
+            | RequestKind::Interrupt
+            | RequestKind::Stop
+            | RequestKind::Capabilities
+            | RequestKind::CreateAuftrag
+            | RequestKind::ApproveAuftrag
+            | RequestKind::RunGate
+            | RequestKind::ChatMessage
+            | RequestKind::VoiceWarm
+            | RequestKind::ChatCancel
+            | RequestKind::VoiceBegin
+            | RequestKind::VoiceChunk
+            | RequestKind::VoiceEnd
+            | RequestKind::TtsSpeak
+            | RequestKind::TtsStop
+            | RequestKind::ProbeEndpoints
+            | RequestKind::GetSettings
+            | RequestKind::SetSettings
+            | RequestKind::ListDevices
+            | RequestKind::SetSessionPreference
+            | RequestKind::ListSessionPreferences
+            // Reading the register is reading, and a phone paired to drive already sees
+            // every running session and the settings document. What it adds is the history
+            // of the same machine, which is the one thing a person away from the Mac most
+            // often wants: what ran overnight, what it answered by itself, what it cost.
+            | RequestKind::ListRegistry
+            // A phone the person reads a world's notice on is where it was read. It
+            // acknowledges only what the daemon itself announced, and changes nothing else.
+            | RequestKind::AcknowledgeNotice
+            // Saying a notice was shown writes nothing into a world.
+            | RequestKind::NoticeShown => true,
+            // The three of the docking orchestrator. There is no role `agent` at the network
+            // port at all, so a device has nothing to report about and nobody to ask.
+            RequestKind::ReportStatus | RequestKind::AskQuestion | RequestKind::Report => false,
+            // Handing out a key to this machine, and taking one away, stay with the person
+            // at it (closed 2026-09-03, security review). `create_pairing` answers with the
+            // code itself, and a device could redeem that code from anywhere, so a stolen
+            // *control* phone used to breed further *control* phones without anybody
+            // standing at the Mac — and `revoke_device` let it throw the owner's own device
+            // out in the same breath. Reading the list stays: seeing which devices exist is
+            // not changing who may reach the machine.
+            RequestKind::CreatePairing | RequestKind::RevokeDevice | RequestKind::SkillsApply => false,
+        },
+        DeviceLevel::Observe => matches!(
+            kind,
+            RequestKind::List
+                | RequestKind::Read
+                | RequestKind::Capabilities
+                | RequestKind::GetSettings
+                | RequestKind::ListSessionPreferences
+                | RequestKind::ListDevices
+                | RequestKind::ListRegistry
+                // A watching phone that showed a world's notice has shown it; confirming that
+                // changes nothing in the world, only whether the daemon says it again.
+                | RequestKind::NoticeShown
+        ),
+    }
+}
+
 /// Whether a role may issue a request.
 ///
 /// This is the whole rule, in one place, so a new request kind has to be classified here
@@ -235,6 +353,9 @@ pub fn permits(role: ClientRole, kind: RequestKind) -> bool {
         // outward actions and stay with the person. The voice requests are in the same
         // class: the microphone and the speaker belong to the person at the machine, and an
         // agent that could dictate or speak would be using them without anybody asking.
+        // Pairing a device, listing the paired ones and revoking one belong to the person
+        // as well: a docked orchestrator that could pair a device would be handing out a
+        // key to the machine.
         ClientRole::Agent => matches!(
             kind,
             RequestKind::ReportStatus | RequestKind::AskQuestion | RequestKind::Report
@@ -292,6 +413,19 @@ mod tests {
             RequestKind::Capabilities,
             RequestKind::CreateAuftrag,
             RequestKind::ApproveAuftrag,
+            RequestKind::CreatePairing,
+            RequestKind::ListDevices,
+            RequestKind::RevokeDevice,
+            // The register is the history of every session on this machine, not just the
+            // reporter's own. `DESIGN.md` § Verhalten puts the panel that reads it in front
+            // of the person, and an orchestrator that could read it would see what every
+            // other project on this machine did.
+            RequestKind::ListRegistry,
+            // Acknowledging a world's message says the person has seen it, and an
+            // orchestrator is not the person.
+            RequestKind::AcknowledgeNotice,
+            // Nor is confirming that a shell of the person showed a notice.
+            RequestKind::NoticeShown,
         ] {
             assert!(
                 !permits(ClientRole::Agent, kind),
@@ -304,10 +438,12 @@ mod tests {
     #[test]
     fn only_the_person_may_use_the_microphone_and_the_speaker() {
         for kind in [
+            RequestKind::VoiceWarm,
             RequestKind::VoiceBegin,
             RequestKind::VoiceChunk,
             RequestKind::VoiceEnd,
             RequestKind::TtsSpeak,
+            RequestKind::TtsStop,
             RequestKind::ProbeEndpoints,
         ] {
             assert!(
@@ -324,13 +460,112 @@ mod tests {
         // job file they approved, never from what an orchestrator said. Changing a setting
         // is named there explicitly, and reading the document is where the machine says
         // what it may do without asking.
-        for kind in [RequestKind::GetSettings, RequestKind::SetSettings] {
+        for kind in [
+            RequestKind::GetSettings,
+            RequestKind::SetSettings,
+            RequestKind::SkillsApply,
+        ] {
             assert!(
                 !permits(ClientRole::Agent, kind),
                 "agent must not do {kind:?}"
             );
             assert!(permits(ClientRole::Human, kind), "human needs {kind:?}");
         }
+    }
+
+    #[test]
+    fn a_device_that_only_watches_changes_nothing() {
+        for kind in [
+            RequestKind::List,
+            RequestKind::Read,
+            RequestKind::Capabilities,
+            RequestKind::GetSettings,
+            RequestKind::ListDevices,
+            RequestKind::ListRegistry,
+            // Confirming a notice was shown writes nothing into a world.
+            RequestKind::NoticeShown,
+        ] {
+            assert!(
+                device_permits(DeviceLevel::Observe, kind),
+                "watching needs {kind:?}"
+            );
+        }
+        for kind in [
+            RequestKind::Spawn,
+            RequestKind::Send,
+            RequestKind::Stop,
+            RequestKind::Interrupt,
+            RequestKind::SetSettings,
+            RequestKind::ChatMessage,
+            RequestKind::VoiceBegin,
+            // An acknowledgement is written into the world's postbox.
+            RequestKind::AcknowledgeNotice,
+        ] {
+            assert!(
+                !device_permits(DeviceLevel::Observe, kind),
+                "watching must not do {kind:?}"
+            );
+            assert!(
+                device_permits(DeviceLevel::Control, kind),
+                "driving needs {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_paired_device_applies_the_local_skill_package() {
+        assert!(!device_permits(
+            DeviceLevel::Observe,
+            RequestKind::SkillsApply
+        ));
+        assert!(!device_permits(
+            DeviceLevel::Control,
+            RequestKind::SkillsApply
+        ));
+    }
+
+    #[test]
+    fn no_device_hands_out_a_key_to_this_machine_or_takes_one_away() {
+        // Closed 2026-09-03 (security review): `create_pairing` answers with the code
+        // itself, and whoever holds it can redeem it from anywhere. A stolen *control*
+        // phone used to breed further *control* phones without anybody standing at the Mac,
+        // and revoke the owner's own device in the same breath.
+        for level in [DeviceLevel::Control, DeviceLevel::Observe] {
+            assert!(!device_permits(level, RequestKind::CreatePairing));
+            assert!(!device_permits(level, RequestKind::RevokeDevice));
+        }
+        // Seeing which devices exist is not changing who may reach the machine.
+        assert!(device_permits(
+            DeviceLevel::Control,
+            RequestKind::ListDevices
+        ));
+        assert!(device_permits(
+            DeviceLevel::Observe,
+            RequestKind::ListDevices
+        ));
+        // And the person at the machine still does both.
+        assert!(permits(ClientRole::Human, RequestKind::CreatePairing));
+        assert!(permits(ClientRole::Human, RequestKind::RevokeDevice));
+    }
+
+    #[test]
+    fn a_device_that_drives_may_approve_a_job_and_run_a_gate_and_one_that_watches_may_not() {
+        // DESIGN.md, Mobil: an approval from the phone has to be written down with the
+        // device and the way it was confirmed. ApprovalRecord carries both since schema
+        // version 3, so the level decides again — and watching still changes nothing.
+        for kind in [RequestKind::ApproveAuftrag, RequestKind::RunGate] {
+            assert!(
+                device_permits(DeviceLevel::Control, kind),
+                "a device that drives needs {kind:?}"
+            );
+            assert!(
+                !device_permits(DeviceLevel::Observe, kind),
+                "a device that only watches must not {kind:?}"
+            );
+        }
+        // The shell of the person is not a device and is untouched by this.
+        assert!(permits(ClientRole::Human, RequestKind::ApproveAuftrag));
+        assert!(permits(ClientRole::Human, RequestKind::RunGate));
     }
 
     #[test]

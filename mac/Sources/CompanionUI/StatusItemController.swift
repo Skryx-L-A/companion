@@ -54,13 +54,13 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
         menu.addItem(visibility)
 
         let chat = NSMenuItem(
-            title: controller.model.isChatOpen ? "Chat schliessen" : "Chat oeffnen",
+            title: controller.model.isChatOpen ? "Chat schließen" : "Chat öffnen",
             action: #selector(toggleChat), keyEquivalent: "")
         chat.target = self
         menu.addItem(chat)
 
         let sessions = NSMenuItem(
-            title: controller.model.isSessionListOpen ? "Sessionliste schliessen" : "Sessionliste zeigen",
+            title: controller.model.isSessionListOpen ? "Sessionliste schließen" : "Sessionliste zeigen",
             action: #selector(toggleSessions), keyEquivalent: "")
         sessions.target = self
         menu.addItem(sessions)
@@ -73,7 +73,31 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
         auftrag.isEnabled = controller.onNewAuftrag != nil
         menu.addItem(auftrag)
 
+        let session = NSMenuItem(
+            title: "Neue Session...", action: #selector(newSession), keyEquivalent: "")
+        session.target = self
+        session.isEnabled = controller.onNewSession != nil
+        menu.addItem(session)
+
+        // The history, next to the things that make history. Greyed out rather than hidden
+        // while there is no daemon: the register lives in the daemon, and the state says why
+        // it cannot be opened right now.
+        let registry = NSMenuItem(
+            title: "Register...", action: #selector(openRegistry), keyEquivalent: "r")
+        registry.target = self
+        registry.isEnabled = controller.onOpenRegistry != nil
+        menu.addItem(registry)
+
         menu.addItem(.separator())
+
+        // The second way to ask for quiet, next to saying it. `DESIGN.md` section Ausbau:
+        // "‚leise' wird respektiert" — and somebody who has the figure hidden has no other
+        // place to click.
+        let quiet = NSMenuItem(title: "Leise", action: #selector(toggleQuiet), keyEquivalent: "")
+        quiet.target = self
+        quiet.state = controller.model.isQuiet ? .on : .off
+        quiet.toolTip = "Kein Ton und kein ungefragtes Sprechen. Fragen und Mitteilungen kommen weiter."
+        menu.addItem(quiet)
 
         let cornerItem = NSMenuItem(title: "Ecke", action: nil, keyEquivalent: "")
         let cornerMenu = NSMenu()
@@ -122,6 +146,18 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func newAuftrag() {
         controller.onNewAuftrag?()
+    }
+
+    @objc private func newSession() {
+        controller.onNewSession?()
+    }
+
+    @objc private func openRegistry() {
+        controller.onOpenRegistry?()
+    }
+
+    @objc private func toggleQuiet() {
+        controller.setQuiet(!controller.model.isQuiet)
     }
 
     @objc private func selectCorner(_ sender: NSMenuItem) {

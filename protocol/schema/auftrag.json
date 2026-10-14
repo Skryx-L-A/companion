@@ -85,7 +85,7 @@
   ],
   "$defs": {
     "AuftragId": {
-      "description": "Identifies a job file under `.companion/auftraege/<id>.json`.",
+      "description": "Identifies a job file under `.companion/auftraege/<id>.json`. One path segment: see [`AuftragId::checked`] for what that rules out.",
       "type": "string"
     },
     "Reference": {
@@ -215,11 +215,61 @@
         "text_sha256": {
           "description": "Hex-encoded SHA-256 of the approved job text, so a later edit invalidates it.",
           "type": "string"
+        },
+        "device": {
+          "description": "The device it came from, or absent for the shell at the machine.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeviceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "confirmation": {
+          "description": "How the person proved it was them. Absent means [`ApprovalConfirmation::Shell`],\nwhich is what every approval written before this field existed was.",
+          "$ref": "#/$defs/ApprovalConfirmation",
+          "default": "shell"
         }
       },
       "required": [
         "approved_at_ms",
         "text_sha256"
+      ]
+    },
+    "DeviceId": {
+      "description": "Identifies one paired device. Handed out when a pairing code is redeemed, and what a revocation names.",
+      "type": "string"
+    },
+    "ApprovalConfirmation": {
+      "description": "How the person proved it was them when they approved something.\n\n`DESIGN.md` § Mobil, Freigaben vom Handy: \"der Freigabe-Record vermerkt stets Gerät und\nBestätigungsart\". At the machine the shell of the person is itself the proof — whoever\nsits in front of an unlocked Mac is the person — which is what [`Self::Shell`] means and\nwhy it is the default for a record written before this field existed. From a phone the\napp says which of the three steps of that chapter it actually took, and [`Self::None`] is\na real answer rather than a missing one: the person chose that level and was warned.",
+      "oneOf": [
+        {
+          "description": "The desktop shell at the machine. There is no device and no second step.",
+          "type": "string",
+          "const": "shell"
+        },
+        {
+          "description": "Face ID or Touch ID immediately before sending.",
+          "type": "string",
+          "const": "biometric"
+        },
+        {
+          "description": "The device passcode, which is what a device without biometrics falls back to and what\na high-risk setting demands whatever the level.",
+          "type": "string",
+          "const": "passcode"
+        },
+        {
+          "description": "The app asked for nothing: whoever holds the unlocked phone approves.\n\nNot accepted for an approval from a device (closed 2026-09-03, security review).\n`DESIGN.md` § Mobil, Freigaben vom Handy asks for \"immer mindestens die\nGerätecode-Bestätigung des Systems\", and a device that could send this would be\ndeciding for itself that the sentence does not apply to it — the flag and the wish\ncome from the same client. It stays in the enum because a record written before that\nday may carry it, and an audit trail does not get to rewrite what happened.",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "A kind this build does not know, out of a record a newer one wrote.\n\nNever read as one of the four above, and [`Self::Shell`] least of all: an audit trail\nthat turned a confirmation it cannot name into \"the person at the Mac\" would be making\na claim about somebody. A request that carries this is refused rather than stored — a\nclient names a kind this daemon knows or gets no approval.",
+          "type": "string",
+          "const": "unknown"
+        }
       ]
     }
   }

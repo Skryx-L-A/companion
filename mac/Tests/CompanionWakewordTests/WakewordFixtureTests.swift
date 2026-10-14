@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
+import Foundation
 import XCTest
 
 @testable import CompanionWakeword
@@ -11,25 +12,38 @@ import XCTest
 /// macOS speech synthesis — the same clips the Rust measurement rig scores, so a number that
 /// moves here and a number that moves there are the same number.
 ///
-/// The fixtures are not in git (they are minutes of generated audio) and this package is what
-/// goes into the public repository, so the directory arrives as an environment variable rather
-/// than as a path from here into the private tree. Without it the tests skip and say how to
-/// make them run: `tests/mac/wakeword-ffi.sh` does both steps.
+/// The fixtures are not in git (they are minutes of generated audio), and the test finds the
+/// generated set at the fixed private-tree path `tests/wakeword/fixtures`. The environment
+/// variable remains an explicit override for `tests/mac/wakeword-ffi.sh`.
 final class WakewordFixtureTests: XCTestCase {
     private var fixtures: URL!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        guard let path = ProcessInfo.processInfo.environment["COMPANION_WAKEWORD_FIXTURES"],
-              FileManager.default.fileExists(atPath: path)
-        else {
-            throw XCTSkip("""
-                Ohne die say-Fixtures. Erzeugen und laufen lassen: tests/mac/wakeword-ffi.sh \
-                (oder tests/wakeword/gen-fixtures.sh und dann \
-                COMPANION_WAKEWORD_FIXTURES=<pfad> swift test).
-                """)
+        let environment = ProcessInfo.processInfo.environment
+        if let path = environment["COMPANION_WAKEWORD_FIXTURES"],
+           FileManager.default.fileExists(atPath: path) {
+            fixtures = URL(fileURLWithPath: path)
+            return
         }
-        fixtures = URL(fileURLWithPath: path)
+        if let fixedPath = Self.fixedFixtureDirectory,
+           FileManager.default.fileExists(atPath: fixedPath.path) {
+            fixtures = fixedPath
+            return
+        }
+        throw FixtureError.missing
+    }
+
+    private static var fixedFixtureDirectory: URL? {
+        var directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        for _ in 0..<8 {
+            let candidate = directory.appendingPathComponent("tests/wakeword/fixtures")
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+            directory.deleteLastPathComponent()
+        }
+        return nil
     }
 
     /// The word trained from one voice, then heard again from that same voice at a speaking
@@ -198,5 +212,9 @@ final class WakewordFixtureTests: XCTestCase {
     private enum Failure: Error {
         case notWave(String)
         case wrongFormat(String, String)
+    }
+
+    private enum FixtureError: Error {
+        case missing
     }
 }

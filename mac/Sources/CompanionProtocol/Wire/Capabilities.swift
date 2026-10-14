@@ -65,6 +65,12 @@ public enum StatusField: String, Sendable, Codable, Hashable, CaseIterable {
     case lastOutput = "last_output"
     case openQuestion = "open_question"
     case auftragId = "auftrag_id"
+    /// Whether the adapter can say that a session is an orchestrator or a worker. One that
+    /// leaves this out reports neither, and the session list keeps showing its sessions.
+    case kind
+    case displayName = "display_name"
+    /// Whether the adapter can name the machine a session runs on in a stable way.
+    case machineIdentity = "machine_identity"
 }
 
 /// What one adapter can do, including how far its limits really reach.

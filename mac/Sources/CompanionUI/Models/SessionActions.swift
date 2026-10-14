@@ -46,19 +46,30 @@ public struct SessionActions: Sendable {
     public var stop: (SessionId) -> Void
     /// Run the gate at this position of the session's approved job.
     public var runGate: (SessionId, Int) -> Void
+    /// Decide who answers this session's questions. `true` means the companion never answers
+    /// them itself and every one of them reaches the person.
+    public var setAlwaysAsk: (SessionId, Bool) -> Void
+    /// Answer the question this session is blocked on. Since 2026-09-05 this is where the
+    /// field for it stands: the chat panel is the conversation with the companion and carries
+    /// nothing of a session (`DESIGN.md` section Chat-Hygiene).
+    public var answer: (OpenQuestion, String) -> Void
 
     public init(
         send: @escaping (SessionId, String) -> Void = { _, _ in },
         read: @escaping (SessionId) -> Void = { _ in },
         interrupt: @escaping (SessionId) -> Void = { _ in },
         stop: @escaping (SessionId) -> Void = { _ in },
-        runGate: @escaping (SessionId, Int) -> Void = { _, _ in }
+        runGate: @escaping (SessionId, Int) -> Void = { _, _ in },
+        setAlwaysAsk: @escaping (SessionId, Bool) -> Void = { _, _ in },
+        answer: @escaping (OpenQuestion, String) -> Void = { _, _ in }
     ) {
         self.send = send
         self.read = read
         self.interrupt = interrupt
         self.stop = stop
         self.runGate = runGate
+        self.setAlwaysAsk = setAlwaysAsk
+        self.answer = answer
     }
 
     /// A set that does nothing, for previews and for the snapshot renderer.

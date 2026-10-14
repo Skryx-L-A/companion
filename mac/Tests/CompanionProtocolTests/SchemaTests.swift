@@ -39,6 +39,15 @@ final class SchemaTests: XCTestCase {
         }
     }
 
+    func testEverySessionKindOfTheSchemaHasACase() throws {
+        let names = try enumValues(in: "server_message.json", definition: "SessionKind")
+        for name in names {
+            if case .unrecognised = SessionKind(rawValue: name) {
+                XCTFail("the schema knows the kind \(name), this shell does not")
+            }
+        }
+    }
+
     func testEveryEndReasonAndCommandAndOutcomeHasACase() throws {
         for name in try enumValues(in: "server_message.json", definition: "EndReason") {
             if case .unrecognised = EndReason(rawValue: name) {
@@ -70,11 +79,32 @@ final class SchemaTests: XCTestCase {
         // Decoding the fixture proves the required ones are read; here the point is that the
         // shell knows every property the schema has, required or not.
         let known: Set<String> = [
-            "id", "adapter", "machine", "project", "model", "state", "runtime_ms", "context",
-            "budget", "iteration", "last_output", "open_question", "auftrag_id",
+            "id", "adapter", "machine", "project", "transcript_path", "model", "state",
+            "last_activity_ms", "runtime_ms", "context", "budget", "iteration", "last_output",
+            "open_question", "permission_refused", "auftrag_id", "kind", "display_name",
+            "machine_identity", "task_state", "task_reason", "task_title", "task_wake_at",
+            "task_machine",
         ]
         XCTAssertEqual(Set(properties.keys), known)
         XCTAssertTrue(required.isSubset(of: known))
+    }
+
+    func testEveryTaskStateOfTheSchemaHasACase() throws {
+        let names = try enumValues(in: "session_status.json", definition: "TaskState")
+        XCTAssertEqual(names, Set(TaskState.known.map(\.rawValue)))
+    }
+
+    func testAnOlderWaitingSpellingStillReadsAsWaitingForThePerson() {
+        XCTAssertEqual(TaskState(rawValue: "wartet_auf_" + "jemand"), .wartetAufNutzer)
+        XCTAssertEqual(TaskState.wartetAufNutzer.rawValue, "wartet_auf_nutzer")
+    }
+
+    func testEveryProactiveClassOfTheSchemaHasACase() throws {
+        for name in try enumValues(in: "server_message.json", definition: "ProactiveClass") {
+            if case .unrecognised = ProactiveClass(rawValue: name) {
+                XCTFail("the schema knows the notice class \(name), this shell does not")
+            }
+        }
     }
 
     func testTheProvenanceOriginsAreTheThreeTheShellKnows() throws {

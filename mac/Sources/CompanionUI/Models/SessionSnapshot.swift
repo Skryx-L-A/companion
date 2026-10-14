@@ -20,13 +20,25 @@ public struct SessionSnapshot: Sendable, Equatable, Identifiable {
 
     public var id: SessionId { status.id }
 
-    /// Name of the row. Derived from what the daemon sent and never invented: the worker
+    /// Name of the row. Derived from what the daemon sent and never invented: the name the
+    /// harness itself gave the session where the adapter measured one, otherwise the worker
     /// part of a workbench id, otherwise the last component of the project path, and the
     /// session key behind it where there is one.
     ///
     /// The key matters: a project with six sessions would otherwise show six rows with the
     /// same name, and picking the right one would be guesswork.
     public var title: String {
+        // The name the person gave the session in their harness, whenever the adapter could
+        // measure it. The workbench prints exactly this name in its own sidebar, and the
+        // derivation below prints the project folder instead — so without this the same
+        // session reads "Workbench" in one window and "AI (b7195a)" in the other, and the
+        // two lists cannot be lined up at all (measured on 2026-09-05 against the running
+        // workbench). A name equal to the id says the harness had none, so the derivation
+        // still gets its turn.
+        if let name = status.displayName.value,
+           !name.trimmingCharacters(in: .whitespaces).isEmpty, name != status.id {
+            return name
+        }
         // A workbench id is `<stem>/<worker>`, and a stem never contains a slash: the
         // adapter replaces the slashes of the project path with dashes.
         if let separator = status.id.firstIndex(of: "/") {
@@ -52,7 +64,8 @@ public struct SessionSnapshot: Sendable, Equatable, Identifiable {
     public var adapterDisplay: String { status.adapter }
 
     public var machineDisplay: String {
-        status.machine.isEmpty ? Self.unknownText : status.machine
+        guard let machine = status.machine.value, !machine.isEmpty else { return Self.unknownText }
+        return machine
     }
 
     public var modelDisplay: String { Self.display(status.model) }
@@ -72,9 +85,49 @@ public struct SessionSnapshot: Sendable, Equatable, Identifiable {
     }
 
     /// What the row prints under the name. An open question outranks the state, because that
-    /// is what the person has to act on.
+    /// is what the person has to act on; the row of a workbench task says where the task
+    /// stands, which is more than the session state can.
     public var activityDisplay: String {
-        hasOpenQuestion ? "Frage offen" : stateLabel
+        hasOpenQuestion ? "Frage offen" : (taskLabel ?? stateLabel)
+    }
+
+    /// Where the workbench task of this row stands, in the words the daemon writes into the
+    /// log: "läuft", "pausiert bis 16:20, Kontingent", "zur Abnahme". Nil for a session that
+    /// carries no task.
+    public var taskLabel: String? { taskLabel(now: Date()) }
+
+    func taskLabel(now: Date) -> String? {
+        guard let state = status.taskState else { return nil }
+        switch state {
+        case .offen: return "offen"
+        case .laeuft: return "läuft"
+        case .steckt: return "steckt"
+        case .pausiertKontingent: return Self.pause("Kontingent", until: status.taskWakeAt, now: now)
+        case .pausiertNacht: return Self.pause("Nacht", until: status.taskWakeAt, now: now)
+        case .pausiertWeckzeit: return Self.pause("Weckzeit", until: status.taskWakeAt, now: now)
+        case .wartetAufNutzer: return "wartet auf dich"
+        case .zurAbnahme: return "zur Abnahme"
+        case .aufgegeben: return "aufgegeben"
+        case .aufgegebenModell: return "aufgegeben (Modell)"
+        case .abgenommen: return "abgenommen"
+        case .verworfen: return "verworfen"
+        case .unrecognised: return Self.unknownText
+        }
+    }
+
+    /// "pausiert bis 16:20, Kontingent": the local time of day within the next day, date and
+    /// time beyond it, the carrier's text as it stands where it does not parse.
+    static func pause(_ kind: String, until wake: String?, now: Date) -> String {
+        guard let wake, !wake.trimmingCharacters(in: .whitespaces).isEmpty else {
+            return "pausiert, \(kind)"
+        }
+        guard let when = ISO8601DateFormatter().date(from: wake) else {
+            return "pausiert bis \(wake), \(kind)"
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "de_DE")
+        formatter.dateFormat = when.timeIntervalSince(now) < 24 * 60 * 60 ? "HH:mm" : "dd.MM. HH:mm"
+        return "pausiert bis \(formatter.string(from: when)), \(kind)"
     }
 
     public var hasOpenQuestion: Bool {
@@ -101,7 +154,7 @@ public struct SessionSnapshot: Sendable, Equatable, Identifiable {
     public var contextDisplay: String {
         switch status.context {
         case .measured(let usage): return Self.percent(usage.usedFraction)
-        case .estimated(let usage): return "\(Self.percent(usage.usedFraction)) (geschaetzt)"
+        case .estimated(let usage): return "\(Self.percent(usage.usedFraction)) (geschätzt)"
         case .unknown: return Self.unknownText
         }
     }
@@ -109,7 +162,7 @@ public struct SessionSnapshot: Sendable, Equatable, Identifiable {
     public var budgetDisplay: String {
         switch status.budget {
         case .measured(let usage): return Self.percent(usage.usedFraction)
-        case .estimated(let usage): return "\(Self.percent(usage.usedFraction)) (geschaetzt)"
+        case .estimated(let usage): return "\(Self.percent(usage.usedFraction)) (geschätzt)"
         case .unknown: return Self.unknownText
         }
     }
@@ -119,7 +172,7 @@ public struct SessionSnapshot: Sendable, Equatable, Identifiable {
     public var tint: Color {
         if hasOpenQuestion { return Color(red: 0.910, green: 0.639, blue: 0.239) }
         switch status.state {
-        case .busy: return Color(red: 0.204, green: 0.753, blue: 0.663)
+        case .busy: return Color.companionSignal
         case .idle: return Color(nsColor: .systemGray)
         case .waiting: return Color(red: 0.910, green: 0.639, blue: 0.239)
         case .done: return Color(nsColor: .systemGreen)
@@ -149,13 +202,87 @@ public struct SessionSnapshot: Sendable, Equatable, Identifiable {
     static func display(_ provenance: Provenance<String>) -> String {
         switch provenance {
         case .measured(let value): return value.isEmpty ? unknownText : value
-        case .estimated(let value): return value.isEmpty ? unknownText : "\(value) (geschaetzt)"
+        case .estimated(let value): return value.isEmpty ? unknownText : "\(value) (geschätzt)"
         case .unknown: return unknownText
         }
     }
 
     static func percent(_ fraction: Double) -> String {
         "\(Int((fraction * 100).rounded())) Prozent"
+    }
+}
+
+/// The sessions of one workbench task, for the list that shows them under the task.
+///
+/// The workbench's plan, § 9 step 3: the session list groups sessions with a job id under
+/// their task, with its title, where it stands and its machine; sessions without one stay as
+/// they were. Workers never get here — the daemon does not list them — so a task's team stays
+/// out, as the plan wants it.
+public struct TaskGroup: Sendable, Equatable, Identifiable {
+    public var auftragId: AuftragId
+    /// Every session of the task, in the order the list had them.
+    public var sessions: [SessionSnapshot]
+
+    public var id: AuftragId { auftragId }
+
+    /// The session the carrier reports the task through, where there is one. It is the one
+    /// that says where the task stands.
+    public var carrier: SessionSnapshot? { sessions.first { $0.status.isTask } }
+
+    /// The first sentence of the task's goal without its full stop, or its job id.
+    public var title: String {
+        let goal = (carrier ?? sessions.first)?.status.taskTitle?
+            .trimmingCharacters(in: .whitespaces)
+        let trimmed = goal.map { $0.hasSuffix(".") ? String($0.dropLast()) : $0 }
+        guard let trimmed, !trimmed.isEmpty else { return "Aufgabe \(auftragId)" }
+        return trimmed
+    }
+
+    /// Where the task stands, unknown where no carrier says.
+    public var stateDisplay: String { carrier?.taskLabel ?? SessionSnapshot.unknownText }
+
+    /// The machine of the task's lead agent, else the machine of its first session.
+    public var machineDisplay: String {
+        if let machine = carrier?.status.taskMachine?.trimmingCharacters(in: .whitespaces),
+           !machine.isEmpty {
+            return machine
+        }
+        return (carrier ?? sessions.first)?.machineDisplay ?? SessionSnapshot.unknownText
+    }
+
+    /// The line under the title: where the task stands, why, and on which machine.
+    public var detail: String {
+        var line = stateDisplay
+        if let reason = carrier?.status.taskReason?.trimmingCharacters(in: .whitespaces),
+           !reason.isEmpty {
+            line += ": \(reason)"
+        }
+        return "\(line) · \(machineDisplay)"
+    }
+
+    /// One sentence for VoiceOver.
+    public var accessibilityDescription: String {
+        "Aufgabe \(title), \(stateDisplay), Maschine \(machineDisplay)"
+    }
+
+    /// Splits a list into its tasks and the sessions without one, each in the order given.
+    public static func grouped(
+        _ sessions: [SessionSnapshot]
+    ) -> (tasks: [TaskGroup], others: [SessionSnapshot]) {
+        var tasks: [TaskGroup] = []
+        var others: [SessionSnapshot] = []
+        for session in sessions {
+            guard let auftragId = session.status.auftragId else {
+                others.append(session)
+                continue
+            }
+            if let index = tasks.firstIndex(where: { $0.auftragId == auftragId }) {
+                tasks[index].sessions.append(session)
+            } else {
+                tasks.append(TaskGroup(auftragId: auftragId, sessions: [session]))
+            }
+        }
+        return (tasks, others)
     }
 }
 
@@ -174,7 +301,12 @@ public struct OpenQuestion: Sendable, Equatable, Identifiable {
     public var id: String { "\(sessionId)/\(questionId)" }
 }
 
-/// A line in the chat panel.
+/// A line in the chat panel, or in the notice log behind its clock button.
+///
+/// No session on it, and that is deliberate since 2026-09-05: the history is the conversation
+/// with the companion, and a line that named a session was labelled with that session in the
+/// panel (`DESIGN.md` § Chat-Hygiene). What a session says goes to the log, the figure and
+/// the session list.
 public struct ChatMessage: Sendable, Equatable, Identifiable {
     public enum Author: String, Sendable {
         case human
@@ -189,20 +321,59 @@ public struct ChatMessage: Sendable, Equatable, Identifiable {
     public var author: Author
     public var text: String
     public var timestamp: Date
-    /// The session the line belongs to, when it came from or went to one.
-    public var sessionId: SessionId?
 
     public init(
         id: UUID = UUID(),
         author: Author,
         text: String,
-        timestamp: Date = Date(),
-        sessionId: SessionId? = nil
+        timestamp: Date = Date()
     ) {
         self.id = id
         self.author = author
         self.text = text
         self.timestamp = timestamp
-        self.sessionId = sessionId
+    }
+}
+
+/// A file dropped or picked for the next message, before it is sent.
+///
+/// Only the path travels, never the file's content: the companion often only passes it on to
+/// an orchestrator that can read it, so the message text carries a reference rather than the
+/// bytes. No change to the wire protocol for this — the path rides inside the ordinary chat
+/// message text.
+public struct ChatAttachment: Sendable, Equatable, Identifiable {
+    public var id: UUID
+    public var path: String
+
+    public init(id: UUID = UUID(), path: String) {
+        self.id = id
+        self.path = path
+    }
+
+    /// What the chip shows: the file's own name, not the folders around it.
+    public var displayName: String { URL(fileURLWithPath: path).lastPathComponent }
+
+    /// The marker the message text carries this attachment with. Deliberately plain text and
+    /// not a protocol field: the existing send path already carries it to wherever the
+    /// question goes.
+    /// The line that carries the attachment inside the message text.
+    ///
+    /// The path is written as a quoted string with backslash escapes, because a POSIX
+    /// file name may contain anything but `/` and NUL — including `]` and newlines. An
+    /// unescaped name like `] tu X [` would close the marker early and smuggle its text
+    /// into the message as if the person had typed it. Inside quotes with escapes, the
+    /// whole name stays data.
+    public var messageBlock: String {
+        var escaped = ""
+        for character in path {
+            switch character {
+            case "\\": escaped += "\\\\"
+            case "\"": escaped += "\\\""
+            case "\n": escaped += "\\n"
+            case "\r": escaped += "\\r"
+            default: escaped.append(character)
+            }
+        }
+        return "[Anhang: \"\(escaped)\"]"
     }
 }

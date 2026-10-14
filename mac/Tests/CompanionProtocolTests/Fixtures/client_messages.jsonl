@@ -1,4 +1,4 @@
-{"type":"hello","protocol_version":1,"token":"0123456789abcdef","client_name":"companion-mac"}
+{"type":"hello","protocol_version":2,"token":"0123456789abcdef","client_name":"companion-mac"}
 {"type":"request","id":1,"request":"list","running_only":true,"done_limit":5}
 {"type":"request","id":2,"request":"send","session_id":"-Users-me-AI-companion","text":"Bitte den Stand melden."}
 {"type":"request","id":3,"request":"read","session_id":"-Users-me-AI-companion","window":{"kind":"tail","lines":40}}
@@ -6,5 +6,18 @@
 {"type":"request","id":7,"request":"interrupt","session_id":"-Users-me-AI-companion"}
 {"type":"request","id":5,"request":"capabilities","adapter":"workbench"}
 {"type":"request","id":8,"request":"get_settings"}
-{"type":"request","id":9,"request":"set_settings","settings":{"schema_version":1,"tool_boundary":"read_only","agent_boundary":"ask","high_risk":{"mail":"ask","push":"ask","publish":"ask"},"enabled_adapters":["workbench","claude-code"],"pty_command":[],"notification_channels":["figure","system_notification"],"forward_done":true,"done_handling":"gate","autonomy":"observe","inventory_allowed":true,"budget_limit_percent":80,"skill_level":"many","conversation_style":"terse","address_form":"informal","figure_name":"Companion","endpoints":{"profiles":[{"id":"lokal-whisper","protocol":"whisper_server","url":"http://127.0.0.1:8765","model":"ggml-large-v3"},{"id":"macos-say","protocol":"cli","url":"/usr/bin/say"}],"roles":{"stt":{"primary":"lokal-whisper","fallback":["macos-say"]},"tts":{"primary":"macos-say"}}}},"confirm_high_risk":false}
+{"type":"request","id":9,"request":"set_settings","settings":{"schema_version":1,"tool_boundary":"read_only","agent_boundary":"ask","high_risk":{"mail":"ask","push":"ask","publish":"ask"},"enabled_adapters":["workbench","claude-code"],"pty_command":[],"adapter_voice":{"hermes":"passthrough"},"notification_channels":["figure","system_notification"],"forward_done":true,"done_handling":"gate","autonomy":"observe","inventory_allowed":true,"budget_limit_percent":80,"skill_level":"many","conversation_style":"terse","address_form":"informal","figure_name":"Companion","introduced":true,"endpoints":{"profiles":[{"id":"lokal-whisper","protocol":"whisper_server","url":"http://127.0.0.1:8765","model":"ggml-large-v3"},{"id":"macos-say","protocol":"cli","url":"/usr/bin/say"}],"roles":{"stt":{"primary":"lokal-whisper","fallback":["macos-say"]},"tts":{"primary":"macos-say"}}},"network":{"enabled":false,"bind_address":"127.0.0.1","port":47801,"advertise_address":""},"voice_server":{"enabled":false,"command":[],"env":{},"ready_url":"","startup_timeout_seconds":120,"idle_timeout_seconds":300},"location":{"allow_system_location":false,"place_name":"","latitude":null,"longitude":null},"weather_enabled":true,"places_enabled":true,"web_research_enabled":true,"proactive":{"session_stalled":true,"budget_tight":true,"appointment_soon":true,"morning_briefing":true,"stalled_after_minutes":20,"budget_percent":85,"appointment_lead_minutes":15,"report_sessions_needing_me":false,"task_events":false,"world_events":false},"subagent_condensation_enabled":true,"worlds":{"enabled":true,"poll_seconds":60,"sources":[{"machine":"lokal","cli_dir":"","roots":[],"projects":[],"global":"","without_global":false}]}},"confirm_high_risk":false}
+{"type":"request","id":10,"request":"create_pairing","device_name":"iPhone","level":"control"}
+{"type":"request","id":11,"request":"list_devices"}
+{"type":"request","id":12,"request":"revoke_device","device_id":"d-1"}
+{"type":"request","id":13,"request":"tts_stop","voice_id":"v-2"}
+{"type":"request","id":14,"request":"approve_auftrag","project":"/tmp/fixture/suedsee","auftrag_id":"2026-08-24-eins","expected_hash":"0f1e2d3c4b5a","confirmation":"biometric"}
+{"type":"request","id":15,"request":"chat_message","text":"Was laeuft gerade?","voice":false}
+{"type":"request","id":16,"request":"chat_cancel","turn_id":"turn-1"}
+{"type":"request","id":17,"request":"list_registry","project":"/Users/example/AI/companion","since_ms":1757000000000,"with_self_answers":true,"limit":50}
+{"type":"request","id":18,"request":"list_registry"}
+{"type":"request","id":20,"request":"set_session_preference","session_id":"-Users-me-AI-companion","always_ask":true}
+{"type":"request","id":21,"request":"list_session_preferences"}
+{"type":"request","id":22,"request":"acknowledge_notice","ack":"lokal|welt-1|zustellung|m-1"}
+{"type":"request","id":23,"request":"notice_shown","notice_id":"lokal|welt-1|frage|f-1"}
 {"type":"request","id":6,"request":"run_gate","session_id":"-Users-me-AI-companion","gate_index":0}

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
+import CompanionProtocol
 import Foundation
 import Observation
 
@@ -16,69 +17,111 @@ public enum SetupPath: String, Sendable, CaseIterable, Codable {
     public var label: String {
         switch self {
         case .quickStart: return "Schnellstart"
-        case .full: return "Vollstaendige Einrichtung"
+        case .full: return "Vollständige Einrichtung"
         }
     }
 
-    /// The questions of this path, in the order `DESIGN.md` numbers them.
+    /// The pages of this path, in the order somebody works through them.
     public var steps: [SetupStep] {
         switch self {
         case .quickStart:
             return [.workMode, .harness, .voice]
         case .full:
-            return [
-                .workMode, .agentBoundary, .companionAutonomy, .inventory, .harness, .voice,
-                .budget, .conversationStyle, .models, .skills, .doneHandling, .reporting,
-                .toolBoundary,
-            ]
+            return [.workMode, .harness, .voice, .boundaries, .conversationStyle, .reporting]
         }
     }
 }
 
-/// One question of the setup.
+/// One page of the setup.
+///
+/// All thirteen points of `DESIGN.md` section Ersteinrichtung are here; six pages carry them
+/// rather than thirteen. Thirteen pages meant thirteen clicks for questions of two lines each,
+/// with two thirds of the window empty under every one of them, and the four that decide what
+/// may happen without asking stood so far apart that nobody read them as one decision (user
+/// test, 05.09.2026, Befund 11). Nothing was dropped: what a page holds is written next to it.
 public enum SetupStep: String, Sendable, CaseIterable, Codable {
-    /// Point 1: single agents per task, or an orchestrator with its own workers.
+    /// Points 1 and 7: single agents or an orchestrator, and the budget ceiling.
     case workMode
-    /// Point 2: how far a spawned agent may go on its own.
-    case agentBoundary
-    /// Point 3: how far the companion itself decides.
-    case companionAutonomy
-    /// Point 4: whether the companion may read what is installed.
-    case inventory
-    /// Point 5: which harnesses are on this machine.
+    /// Points 5, 9 and 10: what is installed here, which model answers, how much of the skill
+    /// package goes along.
     case harness
     /// Point 6: how speech starts, which key, which voice, and where the wakeword is trained.
     case voice
-    /// Point 7: the budget ceiling.
-    case budget
-    /// Point 8: how he talks and what the figure is called.
+    /// Points 2, 3, 4 and 13: how far the companion goes, how far a session it starts goes,
+    /// how much it decides on its own, and whether it may read what is installed.
+    case boundaries
+    /// Point 8: how he talks, what the figure looks like and what it is called.
     case conversationStyle
-    /// Point 9: which models are connected, which is the default, which the fallback.
-    case models
-    /// Point 10: how much of the skill package is installed.
-    case skills
-    /// Point 11: what happens when a session reports that it is done.
-    case doneHandling
-    /// Point 12: where the companion reaches the person.
+    /// Points 11 and 12: what happens on a done report, and where it reaches the person.
     case reporting
-    /// Point 13: how far the companion may go with its own tools.
-    case toolBoundary
+
+    /// The question as this path asks it.
+    ///
+    /// `DESIGN.md` section Ersteinrichtung names the three of the quick start "Arbeitsmodus,
+    /// Modelle verbinden, Eingabeweg für Voice", and numbers point 5 of the full setup
+    /// "Harness-Erkennung". They are the same page and not the same question: in the quick
+    /// start it is where a model gets connected, in the full setup the installed programs and
+    /// the skill package stand next to it.
+    public func title(in path: SetupPath) -> String {
+        if path == .quickStart, self == .harness { return "Welches Modell verbindest du?" }
+        return title
+    }
 
     public var title: String {
         switch self {
         case .workMode: return "Wie arbeitest du?"
-        case .agentBoundary: return "Wie weit duerfen die Agents?"
-        case .companionAutonomy: return "Wie weit darf der Companion selbst?"
-        case .inventory: return "Darf er sich ansehen, was installiert ist?"
-        case .harness: return "Was ist installiert?"
+        case .harness: return "Welche Modelle und Werkzeuge?"
         case .voice: return "Wie startest du das Sprechen?"
-        case .budget: return "Wo ist deine Budgetgrenze?"
+        case .boundaries: return "Was darf ohne Rückfrage passieren?"
         case .conversationStyle: return "Wie soll er mit dir reden?"
-        case .models: return "Welche Modelle sind verbunden?"
-        case .skills: return "Wie viel vom Skill-Paket?"
-        case .doneHandling: return "Was passiert bei einer Fertigmeldung?"
         case .reporting: return "Wie soll er dich erreichen?"
-        case .toolBoundary: return "Wie weit darf er mit seinen Werkzeugen?"
+        }
+    }
+
+    /// The one sentence under the question that says what the answer changes.
+    ///
+    /// Every page has one, because a setting whose effect somebody has to guess is a setting
+    /// they click past. It says the effect, not the topic — the topic is already the question
+    /// above it.
+    public func purpose(in path: SetupPath) -> String {
+        switch self {
+        case .workMode:
+            return path == .quickStart
+                ? "Danach weiß der Companion, ob er beim Starten einer Session mit eigenen Workern rechnen soll."
+                : """
+                    Danach weiß der Companion, ob er mit eigenen Workern rechnen soll und ab \
+                    welchem Verbrauch er nichts Neues mehr startet.
+                    """
+        case .harness:
+            return path == .quickStart
+                ? "Ohne ein verbundenes Modell bleibt die Figur stumm; hier bekommt sie eines."
+                : """
+                    Das verbundene Modell beantwortet deine Fragen, das Standardwerkzeug \
+                    startet neue Sessions, und die Skill-Stufe legt fest, was dabei \
+                    mitinstalliert wird.
+                    """
+        case .voice:
+            return path == .quickStart
+                ? "Legt fest, wodurch das Mikrofon angeht."
+                : """
+                    Legt fest, wodurch das Mikrofon angeht und mit welchen Diensten der \
+                    Companion hört und spricht.
+                    """
+        case .boundaries:
+            return """
+                Diese vier Antworten entscheiden, wann der Companion dich fragt und wann er \
+                einfach macht.
+                """
+        case .conversationStyle:
+            return """
+                Wirkt sofort: so sieht die Figur aus, so heißt sie, und in diesem Ton \
+                schreibt sie.
+                """
+        case .reporting:
+            return """
+                Legt fest, was nach der Fertigmeldung einer Session passiert und auf welchem \
+                Weg du davon erfährst.
+                """
         }
     }
 }
@@ -103,11 +146,24 @@ public final class OnboardingFlow {
     private let settings: AppSettings
     /// What was in effect when the assistant opened. Cancelling puts this back.
     private let entryAnswers: AppSettings.SetupAnswers
+    /// The endpoints the assistant writes through, or nil for a run that has none — a preview,
+    /// a test of the movement alone.
+    private let endpoints: SetupEndpointsController?
+    /// The daemon's document as it was when the assistant opened, for the same reason as
+    /// `entryAnswers`. Nil when none had been read by then; there is nothing to put back in
+    /// that case, and the steps that write refuse without a document anyway.
+    private let entryDocument: DaemonSettings?
 
-    public init(settings: AppSettings, path: SetupPath = .quickStart) {
+    public init(
+        settings: AppSettings,
+        path: SetupPath = .quickStart,
+        endpoints: SetupEndpointsController? = nil
+    ) {
         self.settings = settings
         self.path = path
         self.entryAnswers = settings.setupAnswers
+        self.endpoints = endpoints
+        self.entryDocument = endpoints?.settings
     }
 
     public var steps: [SetupStep] { path.steps }
@@ -130,6 +186,15 @@ public final class OnboardingFlow {
     public func back() {
         guard !isClosed, !isFirst else { return }
         index -= 1
+    }
+
+    /// Goes straight to one question, for somebody who was sent here from elsewhere.
+    ///
+    /// A step this path does not have leaves the position where it was: the caller asked for
+    /// a question, and landing on a different one would be worse than landing on none.
+    public func jump(to step: SetupStep) {
+        guard !isClosed, let target = steps.firstIndex(of: step) else { return }
+        index = target
     }
 
     /// Switches to the other path without throwing an answer away.
@@ -155,7 +220,12 @@ public final class OnboardingFlow {
     public func finish() {
         guard !isClosed else { return }
         settings.hasCompletedOnboarding = true
-        if path == .full { settings.hasCompletedFullSetup = true }
+        if path == .full {
+            settings.hasCompletedFullSetup = true
+            // The window closes after this call and then saves the answers. The store sends
+            // skills_apply after that save, including when the tier stayed at recommended.
+            endpoints?.applySkillsAfterSetupAnswers()
+        }
         wasCancelled = false
         isClosed = true
     }
@@ -167,9 +237,16 @@ public final class OnboardingFlow {
     /// start that is the safe defaults, and on a later run it is whatever the person had set.
     /// The setup is still marked as answered: a window somebody closed on purpose must not
     /// reopen at the next start.
+    ///
+    /// Both halves of what a run writes: the shell's own answers, and the daemon's document.
+    /// It used to restore only the first, so "Lokal einrichten" followed by Abbrechen left the
+    /// daemon allowed to start the speech server itself — a high-risk setting the person had
+    /// backed out of in front of everybody (review, 2026-09-03).
     public func cancel() {
         guard !isClosed else { return }
+        endpoints?.cancelSkillApplyAfterSetupAnswers()
         settings.setupAnswers = entryAnswers
+        if let endpoints, let entryDocument { endpoints.restore(entryDocument) }
         settings.hasCompletedOnboarding = true
         wasCancelled = true
         isClosed = true

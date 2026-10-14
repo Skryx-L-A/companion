@@ -28,6 +28,10 @@ import XCTest
 /// Rust unit tests there assert relations between hashes rather than literal values, which is
 /// why they cannot serve as the fixture themselves. `tests/mac/auftrag-hash-vector.sh` builds
 /// that program again and compares it against the values in this file.
+///
+/// The `richHash` below was recomputed on 2026-09-03 via `tests/mac/auftrag-hash-vector.sh`
+/// after the developer's home path in the job's `project` and `reference` fields was
+/// anonymised to `/Users/example/...`; the run confirmed both sides still agree.
 final class AuftragHashTests: XCTestCase {
     /// A job with everything in it that could move the bytes: non-ASCII, an em dash, an
     /// argument with a space, an empty argument, an argument with a quote in it, a working
@@ -35,10 +39,10 @@ final class AuftragHashTests: XCTestCase {
     private func richJob() -> Auftrag {
         Auftrag(
             id: "2026-08-24-mac-shell",
-            project: "/Users/me/AI/companion",
+            project: "/Users/example/AI/companion",
             goal: "Die Mac-Shell bedient Auftr\u{e4}ge und Gates \u{2014} caf\u{e9} \u{4e2d}\u{6587}",
             doneCriterion: "swift test l\u{e4}uft durch, e2e-daemon.sh bleibt gr\u{fc}n",
-            reference: .path("/Users/me/AI/companion/DESIGN.md"),
+            reference: .path("/Users/example/AI/companion/DESIGN.md"),
             guardrails: ["nichts pushen", "nur app/mac und tests/mac anfassen"],
             gateCommands: [
                 GateCommand(
@@ -74,13 +78,13 @@ final class AuftragHashTests: XCTestCase {
             "guardrails":["nichts pushen","nur app/mac und tests/mac anfassen"],\
             "id":"2026-08-24-mac-shell",\
             "limits":{"iterations":3,"time_seconds":5400,"tokens":null},\
-            "loop_type":"loop","model":"claude-opus-5","project":"/Users/me/AI/companion",\
-            "reference":{"kind":"path","path":"/Users/me/AI/companion/DESIGN.md"},\
+            "loop_type":"loop","model":"claude-opus-5","project":"/Users/example/AI/companion",\
+            "reference":{"kind":"path","path":"/Users/example/AI/companion/DESIGN.md"},\
             "schema_version":1}
             """
     }
 
-    private let richHash = "761ec1e9f4b013bfd4d069f56f9d983f2a58e1760563711cfb7e3ac66127f448"
+    private let richHash = "afff4f3c6bce0cd21e50f1cb38cd8d0d97ee1d98c01cc8c2144ed19247d5c259"
 
     private let minimalCanonical = """
         {"done_criterion":"Fertig","gate_commands":[],"goal":"Kurz","guardrails":[],\

@@ -22,7 +22,7 @@ final class AttentionTests: XCTestCase {
         try await super.setUp()
         // A throwaway settings domain: a test never writes into the settings somebody is
         // running with.
-        suite = "de.skryx.companion.test.\(UUID().uuidString.prefix(8))"
+        suite = "de.skryx.companion.test.\(fixedSuiteSuffix)"
         defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         controller = OverlayController(settings: AppSettings(defaults: defaults), spriteFolder: nil)
     }

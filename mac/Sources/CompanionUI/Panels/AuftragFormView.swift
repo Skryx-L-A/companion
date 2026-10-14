@@ -53,8 +53,8 @@ struct AuftragFormView: View {
                         .labelsHidden()
                         .pathField()
                         .accessibilityLabel("Projektverzeichnis")
-                    Button("Waehlen...", action: chooseProject)
-                        .accessibilityHint("Oeffnet den Dateiauswahldialog")
+                    Button("Wählen...", action: chooseProject)
+                        .accessibilityHint("Öffnet den Dateiauswahldialog")
                 }
             }
             problemText(for: .project)
@@ -110,11 +110,11 @@ struct AuftragFormView: View {
                     .disabled(draft.guardrails.count <= 1)
                 }
             }
-            Button("Verbot hinzufuegen") { draft.guardrails.append(DraftLine()) }
+            Button("Verbot hinzufügen") { draft.guardrails.append(DraftLine()) }
         } header: {
             Text("Verbote")
         } footer: {
-            Text("Stehen woertlich im Auftrag. Leere Zeilen werden nicht uebernommen.")
+            Text("Stehen wörtlich im Auftrag. Leere Zeilen werden nicht übernommen.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -126,13 +126,13 @@ struct AuftragFormView: View {
                 gateRow(index: index, gate: $gate)
                 if index < draft.gates.count - 1 { Divider() }
             }
-            Button("Gate hinzufuegen") { draft.gates.append(DraftGate()) }
+            Button("Gate hinzufügen") { draft.gates.append(DraftGate()) }
         } header: {
             Text("Gate-Befehle")
         } footer: {
             Text("""
-                Werden woertlich ausgefuehrt, ohne Shell: keine Variablen, keine Ersetzungen, \
-                kein Sternchen. Ein Argument je Zeile, damit sichtbar bleibt, wo eines aufhoert.
+                Werden wörtlich ausgeführt, ohne Shell: keine Variablen, keine Ersetzungen, \
+                kein Sternchen. Ein Argument je Zeile, damit sichtbar bleibt, wo eines aufhört.
                 """)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -164,7 +164,7 @@ struct AuftragFormView: View {
                 .accessibilityLabel("Argumente von Gate \(index + 1), eines je Zeile")
             TextField(
                 "Arbeitsverzeichnis", text: gate.workingDir,
-                prompt: Text("leer heisst Projektwurzel"))
+                prompt: Text("leer heißt Projektwurzel"))
                 .pathField()
                 .accessibilityLabel("Arbeitsverzeichnis von Gate \(index + 1)")
 
@@ -196,8 +196,8 @@ struct AuftragFormView: View {
             Text("Grenzen")
         } footer: {
             Text("""
-                Leer heisst: keine Grenze. Iterationen und Tokens zaehlt der Companion nur, wo \
-                der Adapter sie meldet; sonst traegt die Zeit.
+                Leer heißt: keine Grenze. Iterationen und Tokens zählt der Companion nur, wo \
+                der Adapter sie meldet; sonst trägt die Zeit.
                 """)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -214,7 +214,7 @@ struct AuftragFormView: View {
             }
             TextField(
                 "Modell", text: $draft.model,
-                prompt: Text("leer heisst: der Standard des Harness"))
+                prompt: Text("leer heißt: der Standard des Harness"))
         }
     }
 
@@ -268,7 +268,7 @@ struct AuftragFormView: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.prompt = "Waehlen"
+        panel.prompt = "Wählen"
         panel.message = "Verzeichnis des Projekts, in dem der Auftrag liegen soll"
         if !draft.project.isEmpty {
             panel.directoryURL = URL(fileURLWithPath: draft.project)

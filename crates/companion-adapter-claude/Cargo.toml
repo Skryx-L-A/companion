@@ -20,6 +20,11 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "rt", "process", "io-util", "macros"] }
 tracing.workspace = true
 
+# Asking whether a remembered process id is still alive, and signalling it when a session
+# that was adopted after a restart has to be stopped.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.28", features = ["signal"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 

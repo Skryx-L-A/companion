@@ -121,7 +121,7 @@ public final class AuftragFlow {
         notice = nil
         guard let auftrag = draft.makeAuftrag() else {
             notice = draft.problems.first?.message
-                ?? "Das Formular ist noch nicht vollstaendig."
+                ?? "Das Formular ist noch nicht vollständig."
             return
         }
         guard let service else {
@@ -184,7 +184,7 @@ public final class AuftragFlow {
                 guard approved.auftrag.contentHash == subject.shownHash else {
                     self.isBusy = false
                     self.notice = """
-                        Der Daemon hat einen anderen Auftrag zurueckgemeldet als den \
+                        Der Daemon hat einen anderen Auftrag zurückgemeldet als den \
                         freigegebenen. Es wird nichts gestartet.
                         """
                     return

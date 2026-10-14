@@ -9,16 +9,18 @@ import Foundation
 /// work runs on one private serial queue; handlers are called on the delivery queue the
 /// caller passes in. Messages are small control frames, so the write path blocks on that
 /// private queue instead of buffering.
-public final class UnixSocketTransport: @unchecked Sendable {
-    public enum State: Sendable, Equatable {
-        case idle
-        case connected
-        case closed
-        case failed(TransportError)
-    }
+///
+/// The local way of `DESIGN.md` section Mobil, Ferntransport, and the only one the desktop
+/// shell uses. An iOS app cannot reach it — the sandbox allows Unix sockets inside the app's
+/// own container and nowhere else — which is why `NetworkTransport` exists next to it.
+public final class UnixSocketTransport: DaemonTransport, @unchecked Sendable {
+    /// The transport state under its old name, so callers written against this type keep
+    /// reading.
+    public typealias State = TransportState
 
     private let queue = DispatchQueue(label: "companion.protocol.transport")
     private let deliveryQueue: DispatchQueue
+    private let configuredPath: String?
     private var descriptor: Int32 = -1
     private var readSource: DispatchSourceRead?
     private var framer = LineFramer()
@@ -27,7 +29,10 @@ public final class UnixSocketTransport: @unchecked Sendable {
     private var lineHandler: (@Sendable (Data) -> Void)?
     private var stateHandler: (@Sendable (State) -> Void)?
 
-    public init(deliveryQueue: DispatchQueue = .main) {
+    /// - Parameter path: the socket to open on `connect()`. Without one only
+    ///   `connect(toSocketAt:)` works, which is what the transport's own tests use.
+    public init(path: String? = nil, deliveryQueue: DispatchQueue = .main) {
+        self.configuredPath = path
         self.deliveryQueue = deliveryQueue
     }
 
@@ -44,6 +49,15 @@ public final class UnixSocketTransport: @unchecked Sendable {
         queue.async { self.stateHandler = handler }
     }
 
+    /// Opens the socket this transport was made for.
+    public func connect() {
+        guard let configuredPath else {
+            queue.async { self.failOnQueue(.notConnected) }
+            return
+        }
+        connect(toSocketAt: configuredPath)
+    }
+
     public func connect(toSocketAt path: String) {
         queue.async { self.connectOnQueue(path) }
     }
@@ -56,10 +70,14 @@ public final class UnixSocketTransport: @unchecked Sendable {
             var payload = line
             payload.append(0x0A)
             payload.withUnsafeBytes { raw in
+                // Nothing produces an empty buffer today — every line carries its newline —
+                // but `baseAddress` is nil for one, and the force unwrap below would trap the
+                // whole app on the day something does.
+                guard let base = raw.baseAddress, raw.count > 0 else { return }
                 var offset = 0
                 while offset < raw.count {
                     let written = Darwin.write(
-                        self.descriptor, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                        self.descriptor, base.advanced(by: offset), raw.count - offset)
                     if written > 0 {
                         offset += written
                     } else if written < 0 && errno == EINTR {

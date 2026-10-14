@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
+import CompanionFigure
 import Foundation
 import Observation
 
@@ -14,9 +15,12 @@ public final class AppSettings {
 
     private enum Key {
         static let corner = "overlay.corner"
+        static let screenName = "overlay.screenName"
+        static let screenDisplayID = "overlay.screenDisplayID"
         static let figureVisible = "overlay.figureVisible"
         static let hideDuringScreenCapture = "overlay.hideDuringScreenCapture"
         static let figureSize = "overlay.figureSize"
+        static let figureCharacter = "overlay.figureCharacter"
         static let onboardingDone = "onboarding.completed"
         static let workMode = "onboarding.workMode"
         static let defaultModelTool = "onboarding.defaultModelTool"
@@ -36,13 +40,36 @@ public final class AppSettings {
         static let figureName = "setup.figureName"
         static let skillLevel = "setup.skillLevel"
         static let doneHandling = "setup.doneHandling"
+        static let forwardsDone = "setup.forwardsDone"
         static let reportChannels = "setup.reportChannels"
+        static let notificationVolume = "notify.volume"
         static let speechVoice = "setup.speechVoice"
         static let setupCompleted = "setup.completed"
+        static let declinedUnconfigured = "onboarding.declinedWithoutEndpoints"
     }
 
     public var corner: ScreenCorner {
         didSet { defaults.set(corner.rawValue, forKey: Key.corner) }
+    }
+
+    /// Which screen the figure sits on. The default is the screen with the menu bar.
+    ///
+    /// Written as two plain values rather than one encoded blob, so a screen that is not
+    /// attached is still legible in the preferences and can be corrected by hand. The choice
+    /// stays put while the screen is away: `ScreenPlacement` moves the figure to the default
+    /// screen for that time and never writes the substitute back here, which is what brings it
+    /// home when the monitor comes back.
+    public var screenChoice: ScreenChoice {
+        didSet {
+            switch screenChoice {
+            case .automatic:
+                defaults.removeObject(forKey: Key.screenName)
+                defaults.removeObject(forKey: Key.screenDisplayID)
+            case .specific(let name, let displayID):
+                defaults.set(name, forKey: Key.screenName)
+                defaults.set(Int(displayID), forKey: Key.screenDisplayID)
+            }
+        }
     }
 
     public var isFigureVisible: Bool {
@@ -57,6 +84,12 @@ public final class AppSettings {
     /// Edge length of the figure in points.
     public var figureSize: CGFloat {
         didSet { defaults.set(Double(figureSize), forKey: Key.figureSize) }
+    }
+
+    /// Which drawn character the figure is. A sprite folder still overrides all three; see
+    /// `SpriteSet`.
+    public var figureCharacter: FigureCharacter {
+        didSet { defaults.set(figureCharacter.rawValue, forKey: Key.figureCharacter) }
     }
 
     /// True once the quick start has been answered or skipped. Its absence is what makes a
@@ -99,6 +132,20 @@ public final class AppSettings {
     /// trained, so the settings page can name it without reading the model file.
     public var wakeword: String {
         didSet { defaults.set(wakeword, forKey: Key.wakeword) }
+    }
+
+    /// The word the enrollment window starts with.
+    ///
+    /// Whatever was trained or typed before, once there is one. Before that it is the name
+    /// the figure carries: `DESIGN.md` section Ausbau, "Name und Persona" puts the trainable
+    /// wakeword on the name from the setup, and a field offering "Companion" while the figure
+    /// is called Freitag would have somebody type the same name twice. This is the prefill
+    /// and nothing else — what gets trained is whatever stands in the field when the button
+    /// is pressed.
+    public var suggestedWakeword: String {
+        if defaults.object(forKey: Key.wakeword) != nil { return wakeword }
+        let name = figureName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? wakeword : name
     }
 
     /// A finished dictation goes to the companion by itself instead of landing in the input
@@ -192,12 +239,29 @@ public final class AppSettings {
         didSet { defaults.set(doneHandling.rawValue, forKey: Key.doneHandling) }
     }
 
+    /// Whether a finished run is worth telling the person about at all.
+    ///
+    /// `forward_done` in the daemon's document. On by default, because a run that is done is
+    /// the one thing somebody is actually waiting for. Switching it off silences the report
+    /// of a *finished* run and nothing else: a question and a failure still come through.
+    public var forwardsDone: Bool {
+        didSet { defaults.set(forwardsDone, forKey: Key.forwardsDone) }
+    }
+
     /// Full setup, point 12: where the companion reaches the person. The figure alone by
     /// default: every other channel either makes noise or leaves the machine.
     public var reportChannels: Set<ReportChannel> {
         didSet {
             defaults.set(reportChannels.map(\.rawValue).sorted(), forKey: Key.reportChannels)
         }
+    }
+
+    /// How loud the report tone is, between 0 and 1. Its own setting rather than the system
+    /// volume: the tone arrives while somebody is working on something else, and how much of an
+    /// interruption that may be is a decision of theirs. Zero switches the sound off without
+    /// touching the channel, which is what somebody who wants it back tomorrow does.
+    public var notificationVolume: Double {
+        didSet { defaults.set(notificationVolume, forKey: Key.notificationVolume) }
     }
 
     /// Full setup, point 6: which voice the speech output uses. Nil leaves it to the endpoint.
@@ -212,15 +276,41 @@ public final class AppSettings {
         didSet { defaults.set(hasCompletedFullSetup, forKey: Key.setupCompleted) }
     }
 
+    /// True once somebody sent the assistant away while the daemon had no speech and no chat
+    /// model set up.
+    ///
+    /// The mark above says a run of the assistant happened; it lives in the preferences of
+    /// the shell and says nothing about what the daemon actually has. That is what let a
+    /// machine with a brand new daemon come up without the assistant: the configuration
+    /// directory was fresh, the preferences were not. A daemon with nothing set up therefore
+    /// counts as a first start again — and this is the one thing that stops it from asking a
+    /// person who said no. It is cleared as soon as something is set up, so a configuration
+    /// that is torn down later asks once more.
+    public var hasDeclinedSetupWithoutEndpoints: Bool {
+        didSet { defaults.set(hasDeclinedSetupWithoutEndpoints, forKey: Key.declinedUnconfigured) }
+    }
+
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let storedCorner = defaults.string(forKey: Key.corner).flatMap(ScreenCorner.init(rawValue:))
         corner = storedCorner ?? .bottomTrailing
+        // A stored name without a stored id would be half a choice; both have to be there, and
+        // anything else counts as nobody having picked a screen.
+        if let storedScreenName = defaults.string(forKey: Key.screenName),
+            let storedDisplayID = defaults.object(forKey: Key.screenDisplayID) as? Int
+        {
+            screenChoice = .specific(name: storedScreenName, displayID: UInt32(truncatingIfNeeded: storedDisplayID))
+        } else {
+            screenChoice = .automatic
+        }
         isFigureVisible = defaults.object(forKey: Key.figureVisible) as? Bool ?? true
         hideDuringScreenCapture = defaults.bool(forKey: Key.hideDuringScreenCapture)
         let storedSize = defaults.object(forKey: Key.figureSize) as? Double
         figureSize = CGFloat(storedSize ?? 104)
+        figureCharacter = defaults.string(forKey: Key.figureCharacter)
+            .flatMap(FigureCharacter.init(rawValue:)) ?? .standard
         hasCompletedOnboarding = defaults.bool(forKey: Key.onboardingDone)
+        hasDeclinedSetupWithoutEndpoints = defaults.bool(forKey: Key.declinedUnconfigured)
         workMode = defaults.string(forKey: Key.workMode).flatMap(WorkMode.init(rawValue:)) ?? .singleAgents
         defaultModelTool = defaults.string(forKey: Key.defaultModelTool)
         voiceTrigger = defaults.string(forKey: Key.voiceTrigger)
@@ -256,9 +346,15 @@ public final class AppSettings {
             .flatMap(SkillLevel.init(rawValue:)) ?? .recommended
         doneHandling = defaults.string(forKey: Key.doneHandling)
             .flatMap(DoneHandling.init(rawValue:)) ?? .forward
+        // Read through `object(forKey:)`: `bool(forKey:)` answers false for a value nobody
+        // has ever set, and false here means silence, which is not the default.
+        forwardsDone = defaults.object(forKey: Key.forwardsDone) as? Bool ?? true
         let storedChannels = defaults.stringArray(forKey: Key.reportChannels)
         reportChannels = storedChannels.map { Set($0.compactMap(ReportChannel.init(rawValue:))) }
             ?? [.figure]
+        // Read through `object(forKey:)`, because `double(forKey:)` answers zero for a value
+        // nobody has ever set — and zero here means silence, which is not the default.
+        notificationVolume = min(1, max(0, defaults.object(forKey: Key.notificationVolume) as? Double ?? 0.5))
         speechVoice = defaults.string(forKey: Key.speechVoice)
         hasCompletedFullSetup = defaults.bool(forKey: Key.setupCompleted)
     }

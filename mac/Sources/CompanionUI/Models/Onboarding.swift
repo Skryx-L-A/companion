@@ -21,7 +21,7 @@ public enum WorkMode: String, Sendable, CaseIterable, Codable {
         case .singleAgents:
             return "Jede Aufgabe bekommt einen Agenten, den du selbst startest. Sparsamer, weil niemand nebenher Worker anlegt."
         case .orchestrator:
-            return "Ein Orchestrator verteilt die Arbeit an eigene Worker. Schneller bei grossen Aufgaben, verbraucht aber mehr."
+            return "Ein Orchestrator verteilt die Arbeit an eigene Worker. Schneller bei großen Aufgaben, verbraucht aber mehr."
         }
     }
 }
@@ -47,11 +47,11 @@ public enum VoiceTrigger: String, Sendable, CaseIterable, Codable {
     public var detail: String {
         switch self {
         case .pushToTalk:
-            return "Das Mikrofon laeuft nur, solange die Taste gedrueckt ist."
+            return "Das Mikrofon läuft nur, solange die Taste gedrückt ist."
         case .click:
             return "Ein Klick auf die Figur startet und beendet die Aufnahme."
         case .wakeword:
-            return "Das Mikrofon hoert dauerhaft auf ein Weckwort. Das Wort wird in den Einstellungen angelernt und dort auch eingeschaltet, mit Datenschutzhinweis."
+            return "Das Mikrofon hört dauerhaft auf ein Weckwort. Das Wort wird in den Einstellungen angelernt und dort auch eingeschaltet, mit Datenschutzhinweis."
         }
     }
 }
@@ -93,6 +93,15 @@ public enum ToolDetection {
             if let path = searchKnownDirectories(tool.name) { found[tool.name] = path }
         }
         return known.map { DetectedTool(name: $0.name, displayName: $0.displayName, path: found[$0.name]) }
+    }
+
+    /// Where one named program is on this machine, or nil when it is not installed.
+    ///
+    /// The usual install locations only, without asking the login shell: this is used while a
+    /// step is being drawn, and a shell with a slow profile must not hold a panel for it. The
+    /// list already contains the two places a Homebrew or `uv` install ends up in.
+    public static func path(of name: String) -> String? {
+        searchKnownDirectories(name)
     }
 
     /// Runs the detection on a background queue and answers on the main queue.
@@ -193,11 +202,15 @@ public enum ToolBoundary: String, Sendable, CaseIterable, Codable {
     public var detail: String {
         switch self {
         case .readOnly:
-            return "Liest und meldet, schreibt nichts. Die sparsamste und harmloseste Stufe."
+            return """
+                Liest und meldet, schreibt nichts, und nichts verlässt den Rechner: Wetter, \
+                Orte und Recherche sind in dieser Stufe aus. Die sparsamste und harmloseste \
+                Stufe.
+                """
         case .ask:
             return "Fragt, bevor etwas geschrieben, gesendet oder gestartet wird."
         case .full:
-            return "Handelt ohne Rueckfrage, auch dort, wo etwas nach aussen geht."
+            return "Handelt ohne Rückfrage, auch dort, wo etwas nach außen geht."
         }
     }
 
@@ -249,7 +262,7 @@ public enum SkillLevel: String, Sendable, CaseIterable, Codable {
         switch self {
         case .none: return "Keine"
         case .recommended: return "Empfohlene"
-        case .many: return "Groessere Auswahl"
+        case .many: return "Größere Auswahl"
         case .all: return "Alle"
         }
     }
@@ -259,9 +272,9 @@ public enum SkillLevel: String, Sendable, CaseIterable, Codable {
         case .none:
             return "Nichts wird installiert. Nicht empfohlen: ohne den Pflichtkern meldet keine Session ihren Stand."
         case .recommended:
-            return "Der Pflichtkern: Schleifen, Protokoll, Spezifikation zuerst, unabhaengiger Kritiker, Uebergabe zwischen Sitzungen."
+            return "Der Pflichtkern: Schleifen, Protokoll, Spezifikation zuerst, unabhängiger Kritiker, Übergabe zwischen Sitzungen."
         case .many:
-            return "Der Pflichtkern und die geprueften Erweiterungen."
+            return "Der Pflichtkern und die geprüften Erweiterungen."
         case .all:
             return "Alles, was im Paket liegt."
         }
@@ -277,7 +290,7 @@ public enum DoneHandling: String, Sendable, CaseIterable, Codable {
     public var label: String {
         switch self {
         case .forward: return "Weiterleiten"
-        case .gate: return "Gate pruefen"
+        case .gate: return "Gate prüfen"
         case .reviewer: return "Reviewer-Session"
         }
     }
@@ -286,7 +299,7 @@ public enum DoneHandling: String, Sendable, CaseIterable, Codable {
         switch self {
         case .forward: return "Du bekommst die Meldung, sonst passiert nichts."
         case .gate: return "Die Gate-Befehle des Auftrags laufen, und du bekommst ihr Ergebnis."
-        case .reviewer: return "Eine zweite Session prueft das Ergebnis, bevor du es siehst. Kostet am meisten."
+        case .reviewer: return "Eine zweite Session prüft das Ergebnis, bevor du es siehst. Kostet am meisten."
         }
     }
 }
@@ -311,11 +324,11 @@ public enum ReportChannel: String, Sendable, CaseIterable, Codable {
 
     public var detail: String {
         switch self {
-        case .figure: return "Die Figur hebt die Hand. Verlaesst diesen Rechner nie."
+        case .figure: return "Die Figur hebt die Hand. Verlässt diesen Rechner nie."
         case .sound: return "Ein kurzer Ton dazu."
-        case .speech: return "Er sagt es laut, ueber die eingestellte Sprachausgabe."
+        case .speech: return "Er sagt es laut, über die eingestellte Sprachausgabe."
         case .systemNotification: return "Eine Mitteilung von macOS, auch wenn die Figur verdeckt ist."
-        case .phone: return "Eine Push-Nachricht aufs Telefon. Dafuer geht die Meldung ueber einen fremden Dienst."
+        case .phone: return "Eine Push-Nachricht aufs Telefon. Dafür geht die Meldung über einen fremden Dienst."
         }
     }
 
@@ -331,7 +344,7 @@ public enum ConversationStyle: String, Sendable, CaseIterable, Codable {
     public var label: String {
         switch self {
         case .terse: return "Knapp"
-        case .detailed: return "Ausfuehrlich"
+        case .detailed: return "Ausführlich"
         }
     }
 }

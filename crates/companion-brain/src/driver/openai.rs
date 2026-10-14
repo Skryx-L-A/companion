@@ -11,8 +11,25 @@ use companion_core::EndpointProfile;
 use serde_json::{Value, json};
 use tokio_stream::StreamExt;
 
-use super::{ChatDriver, Conversation, DeltaSink, DriverError, Message, Turn, status_error};
+use super::{
+    ChatDriver, Conversation, DeltaSink, DriverError, Message, TokenUsage, Turn, status_error,
+};
 use crate::tools::{ToolCall, ToolSpec};
+
+/// Ceiling on one unfinished line of the stream.
+///
+/// F7 of `notizen/audit-2026-09-03/brain-voice.md`: the buffer grew with every byte the
+/// endpoint sent and was only ever drained at a newline, so an endpoint that streams without
+/// one — a local server, a proxy, a URL somebody pasted — could push the daemon's memory as
+/// far as it liked until the request timeout, minutes later. The Opus decoder was given
+/// exactly such a ceiling for exactly this class of bug (`companion-voice`'s
+/// `codec::decode_chunk`); this is the same answer for the other direction.
+///
+/// A quarter of a megabyte is far more than any real line: an SSE line here holds one JSON
+/// chunk of a completion, which is a token or a piece of a tool call's arguments. A line
+/// past this is not a slow sender, it is a broken or hostile one, so the turn fails with a
+/// named error rather than waiting for the timeout.
+const MAX_PENDING_BYTES: usize = 256 * 1024;
 
 /// One tool call while it is still arriving in pieces.
 #[derive(Debug, Default, Clone)]
@@ -60,25 +77,33 @@ impl ChatDriver for OpenAiChat {
             });
         };
 
-        let body = json!({
+        let mut body = json!({
             "model": model,
             "stream": true,
             "messages": messages_for(conversation),
             "tools": tools.iter().map(tool_json).collect::<Vec<_>>(),
             "tool_choice": "auto",
         });
+        // Only for a profile that asked for it, never by default: an endpoint that does not
+        // know the field answers 400 and the whole chat turn fails over a knob nobody set —
+        // the same reason `stream_options.include_usage` is not sent either. What it buys
+        // where it is set is the difference between an answer and none: measured 2026-09-05,
+        // a local reasoning model without it writes its whole turn into `reasoning_content`,
+        // which this driver does not read, and the person waits half a minute for the first
+        // visible token (`EndpointProfile::reasoning_effort`).
+        if let Some(effort) = &self.profile.reasoning_effort {
+            body["reasoning_effort"] = Value::String(effort.clone());
+        }
 
-        let mut request = self.http.post(self.url()).json(&body);
+        let url = self.url();
+        let mut request = self.http.post(&url).json(&body);
         if let Some(key) = &self.key {
             request = request.bearer_auth(key);
         }
         let response = request
             .send()
             .await
-            .map_err(|source| DriverError::Transport {
-                profile: self.profile.id.clone(),
-                source,
-            })?;
+            .map_err(|source| DriverError::transport(&self.profile.id, &url, source))?;
         if !response.status().is_success() {
             return Err(status_error(&self.profile.id, response).await);
         }
@@ -89,11 +114,18 @@ impl ChatDriver for OpenAiChat {
         let mut pending = Vec::new();
 
         while let Some(piece) = stream.next().await {
-            let piece = piece.map_err(|source| DriverError::Transport {
-                profile: self.profile.id.clone(),
-                source,
-            })?;
+            let piece =
+                piece.map_err(|source| DriverError::transport(&self.profile.id, &url, source))?;
             pending.extend_from_slice(&piece);
+            if pending.len() > MAX_PENDING_BYTES {
+                return Err(DriverError::Malformed {
+                    profile: self.profile.id.clone(),
+                    detail: format!(
+                        "der Stream hat mehr als {MAX_PENDING_BYTES} Bytes ohne Zeilenende \
+                         geschickt"
+                    ),
+                });
+            }
 
             // Server-sent events are separated by newlines, and a network packet cuts
             // wherever it likes, so a line is only complete once its newline arrived.
@@ -116,6 +148,7 @@ impl ChatDriver for OpenAiChat {
             }
         }
 
+        turn.model = Some(model);
         turn.tool_calls = calls
             .into_iter()
             .enumerate()
@@ -148,6 +181,24 @@ fn apply_chunk(
     calls: &mut Vec<PartialCall>,
     sink: &mut (dyn FnMut(&str) + Send),
 ) {
+    // The usage block, where the endpoint sends one. OpenAI-compatible servers put it in
+    // the last chunk of the stream, next to an empty `choices`, so it is read before the
+    // delta and not inside it. Nothing here asks for it — `stream_options` is deliberately
+    // not sent, because a server that does not know the field answers 400 to the whole
+    // request, and a chat that fails over a cost counter would be the wrong trade. A server
+    // that reports nothing leaves the cost unknown, which is what `DESIGN.md` § Kosten asks
+    // for wherever no source exists.
+    if let Some(usage) = chunk.get("usage").filter(|usage| usage.is_object()) {
+        let counter = |name: &str| usage.get(name).and_then(Value::as_u64).unwrap_or(0);
+        let counted = TokenUsage {
+            input_tokens: counter("prompt_tokens"),
+            output_tokens: counter("completion_tokens"),
+        };
+        if !counted.is_empty() {
+            turn.usage = Some(counted);
+        }
+    }
+
     let Some(delta) = chunk
         .get("choices")
         .and_then(|choices| choices.get(0))
@@ -261,6 +312,137 @@ mod tests {
         move |piece: &str| collected.push_str(piece)
     }
 
+    /// The same finding as in `companion_voice::stt`: a provider that takes its key as a
+    /// query parameter had it quoted back by `reqwest::Error`, and this driver's failure
+    /// reaches the client as the text of a `chat_error` event.
+    #[tokio::test]
+    async fn a_failed_turn_names_the_endpoint_and_not_the_credential_in_its_url() {
+        use companion_core::EndpointProfile;
+        use companion_protocol::EndpointProtocol;
+
+        // A real address with nothing behind it: bound to learn a free port, then dropped.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the loopback interface has a free port");
+        let address = listener
+            .local_addr()
+            .expect("a bound socket has an address");
+        drop(listener);
+
+        let driver = OpenAiChat::new(
+            EndpointProfile::local(
+                "cloud",
+                EndpointProtocol::OpenaiCompat,
+                format!("http://{address}?key=AIzaXYZ"),
+            ),
+            None,
+            reqwest::Client::new(),
+        );
+        let mut collected = String::new();
+        let mut sink = sink_into(&mut collected);
+        let error = driver
+            .turn(
+                &Conversation {
+                    system: String::new(),
+                    messages: Vec::new(),
+                },
+                &[],
+                &mut sink,
+            )
+            .await
+            .expect_err("nothing is listening on that port");
+
+        let shown = error.to_string();
+        assert!(!shown.contains("key="), "{shown}");
+        assert!(!shown.contains("AIza"), "{shown}");
+        assert!(shown.contains("cloud"), "{shown}");
+    }
+
+    /// Takes one request, answers with an empty stream, and hands back the body it got.
+    async fn one_request_to(profile: EndpointProfile) -> serde_json::Value {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the loopback interface has a free port");
+        let address = listener
+            .local_addr()
+            .expect("a bound socket has an address");
+        let served = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("the driver connects");
+            let mut raw = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).await.expect("the request arrives");
+                if read == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&raw).into_owned();
+                if let Some(body) = text.split_once("\r\n\r\n").map(|(_, body)| body)
+                    && body.ends_with('}')
+                {
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                              Connection: close\r\n\r\ndata: [DONE]\n\n",
+                        )
+                        .await;
+                    let _ = stream.flush().await;
+                    return serde_json::from_str(body).expect("the driver sends JSON");
+                }
+            }
+            panic!("the request body never arrived in full");
+        });
+
+        let profile = EndpointProfile {
+            url: format!("http://{address}"),
+            ..profile
+        };
+        let driver = OpenAiChat::new(profile, None, reqwest::Client::new());
+        let mut collected = String::new();
+        let mut sink = sink_into(&mut collected);
+        let _ = driver
+            .turn(
+                &Conversation {
+                    system: "System".to_owned(),
+                    messages: vec![Message::User {
+                        text: "Wie spaet ist es?".to_owned(),
+                    }],
+                },
+                &[],
+                &mut sink,
+            )
+            .await;
+        served.await.expect("the stub finished")
+    }
+
+    /// `reasoning_effort` travels only for a profile that asked for it. Sending it to every
+    /// OpenAI-compatible server would be the `stream_options.include_usage` mistake again:
+    /// a server that does not know the field answers 400 and the chat turn fails over it.
+    #[tokio::test]
+    async fn reasoning_effort_travels_only_when_the_profile_names_one() {
+        use companion_core::EndpointProfile;
+        use companion_protocol::EndpointProtocol;
+
+        let bare = EndpointProfile {
+            model: Some("m".to_owned()),
+            ..EndpointProfile::local("local", EndpointProtocol::OpenaiCompat, "unset")
+        };
+        let body = one_request_to(bare.clone()).await;
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "a profile that named none sends none: {body}"
+        );
+
+        let thinking = EndpointProfile {
+            reasoning_effort: Some("none".to_owned()),
+            ..bare
+        };
+        let body = one_request_to(thinking).await;
+        assert_eq!(body["reasoning_effort"], "none", "{body}");
+    }
+
     #[test]
     fn only_data_lines_carry_a_payload() {
         assert_eq!(event_payload("data: {\"a\":1}"), Some("{\"a\":1}"));
@@ -336,7 +518,7 @@ mod tests {
             system: "System".to_owned(),
             messages: vec![
                 Message::User {
-                    text: "was laeuft".to_owned(),
+                    text: "was läuft".to_owned(),
                 },
                 Message::ToolCall {
                     id: "a".to_owned(),

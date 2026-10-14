@@ -1,0 +1,18 @@
+[package]
+name = "companion-skills"
+description = "Embedded companion skill package and manifest-based installer shared by CLI and daemon."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+companion-core.workspace = true
+companion-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

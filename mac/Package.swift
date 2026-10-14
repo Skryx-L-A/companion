@@ -14,12 +14,31 @@ let vendorDirectory = URL(fileURLWithPath: #filePath)
     .appendingPathComponent("Vendor")
     .path
 
+// Human acceptance tests and real-daemon tests have explicit entry points. Their source stays
+// in the ordinary test targets, but the default package run contains only tests that need no
+// person and no separately started daemon.
+let manualAcceptanceEnabled =
+    ProcessInfo.processInfo.environment["COMPANION_MANUAL_ACCEPTANCE"] == "1"
+let e2eAcceptanceEnabled =
+    ProcessInfo.processInfo.environment["COMPANION_E2E_ACCEPTANCE"] == "1"
+let manualAcceptanceSettings: [SwiftSetting] = manualAcceptanceEnabled
+    ? [.define("COMPANION_MANUAL_ACCEPTANCE")]
+    : []
+let e2eAcceptanceSettings: [SwiftSetting] = e2eAcceptanceEnabled
+    ? [.define("COMPANION_E2E_ACCEPTANCE")]
+    : []
+
+// Two platforms, and only the protocol and the mobile models are built for both. The iOS app
+// under `CompanionIOS/` links exactly those two products; the shell targets — AppKit, the
+// wakeword archive — are never built for iOS because nothing on that side asks for them.
 let package = Package(
     name: "companion-mac",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
         .executable(name: "companion-mac", targets: ["CompanionMac"]),
         .library(name: "CompanionProtocol", targets: ["CompanionProtocol"]),
+        .library(name: "CompanionMobile", targets: ["CompanionMobile"]),
+        .library(name: "CompanionFigure", targets: ["CompanionFigure"]),
         .library(name: "CompanionUI", targets: ["CompanionUI"]),
         .library(name: "CompanionWakeword", targets: ["CompanionWakeword"]),
     ],
@@ -38,13 +57,37 @@ let package = Package(
             dependencies: ["CWakeword", "CompanionProtocol"],
             linkerSettings: [.unsafeFlags(["-L\(vendorDirectory)"])]),
 
-        // Overlay panel, figure, panels, menu bar item.
-        .target(name: "CompanionUI", dependencies: ["CompanionProtocol", "CompanionWakeword"]),
+        // What the iOS app shows, without a single view: the paired machines and their
+        // connections, the session list with its filter and grouping, the chat, the voice
+        // turn. Free of SwiftUI and of both platforms, so `swift test` on the Mac covers it.
+        .target(name: "CompanionMobile", dependencies: ["CompanionProtocol", "CompanionFigure"]),
+
+        // The figure: its states, the frames that are drawn for them, the alpha mask the hit
+        // test uses. Its own target rather than a folder inside the shell, because
+        // `DESIGN.md` section Mobil, Technik der Clients has the app take the figure over from
+        // the desktop shells — and the shell is AppKit and never builds for a phone. Nothing
+        // in here is AppKit: Core Graphics and ImageIO are on both platforms.
+        .target(name: "CompanionFigure"),
+
+        // Overlay panel, panels, menu bar item.
+        .target(
+            name: "CompanionUI",
+            dependencies: ["CompanionProtocol", "CompanionWakeword", "CompanionFigure"]),
 
         .executableTarget(name: "CompanionMac", dependencies: ["CompanionUI"]),
 
+        // The shell binary's own command line. A test target may depend on an executable
+        // target; `Options` lives in its own file next to `main.swift` so the top-level
+        // code of the binary is not what the tests reach for.
+        .testTarget(name: "CompanionMacTests", dependencies: ["CompanionMac"]),
         .testTarget(name: "CompanionProtocolTests", dependencies: ["CompanionProtocol"]),
-        .testTarget(name: "CompanionUITests", dependencies: ["CompanionUI"]),
+        .testTarget(
+            name: "CompanionMobileTests", dependencies: ["CompanionMobile"],
+            swiftSettings: e2eAcceptanceSettings),
+        .testTarget(name: "CompanionFigureTests", dependencies: ["CompanionFigure"]),
+        .testTarget(
+            name: "CompanionUITests", dependencies: ["CompanionUI"],
+            swiftSettings: manualAcceptanceSettings + e2eAcceptanceSettings),
         .testTarget(name: "CompanionWakewordTests", dependencies: ["CompanionWakeword"]),
     ]
 )

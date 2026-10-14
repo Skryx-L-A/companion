@@ -11,6 +11,15 @@ repository.workspace = true
 companion-protocol.workspace = true
 
 async-trait.workspace = true
+# The register groups its rows by calendar day, and a calendar day is a local-time notion
+# `std::time` does not have at all.
+chrono.workspace = true
+rcgen.workspace = true
+# The pattern set behind `redact`: the alternation of fixed key/token shapes is not
+# something a handful of `str::find` calls can carry correctly, and the crate itself has no
+# unsafe code, so it fits the workspace's `unsafe_code = "forbid"` lint without a carve-out.
+regex.workspace = true
+rustls-pemfile.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -25,3 +34,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+companion-macos-ffi.workspace = true

@@ -3,11 +3,13 @@
 import AppKit
 import SwiftUI
 
-/// The full setup: the thirteen points of `DESIGN.md` section Ersteinrichtung, one per page.
+/// The full setup: the thirteen points of `DESIGN.md` section Ersteinrichtung, on six pages.
 ///
-/// Its own window rather than the corner panel, because thirteen questions in a 340 point
-/// column is a form nobody finishes. Weiter, Zurueck and Abbrechen are reachable at every step,
-/// and Abbrechen puts back what was in effect when the window opened.
+/// Its own window rather than the corner panel, because the thirteen points in a 340 point
+/// column are a form nobody finishes. They sit on six pages here, grouped by what they decide
+/// (`SetupStep`), which is also what fills the window: thirteen pages meant two thirds of it
+/// empty under every question. Weiter, Zurueck and Abbrechen are reachable at every step, and
+/// Abbrechen puts back what was in effect when the window opened.
 struct SetupWindowView: View {
     @Bindable var settings: AppSettings
     @Bindable var flow: OnboardingFlow
@@ -17,11 +19,15 @@ struct SetupWindowView: View {
     let onCancel: () -> Void
     let onTrainWakeword: () -> Void
     let onOpenEndpoints: () -> Void
+    /// The endpoints of the daemon, so the model questions connect something.
+    var endpoints: SetupEndpointsController?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
+            // The indicator is asked for rather than left to the system: a page whose last
+            // question stands below the edge without a bar is a question nobody answers.
             ScrollView {
                 SetupStepView(
                     settings: settings,
@@ -30,31 +36,33 @@ struct SetupWindowView: View {
                     tools: tools,
                     microphoneStatus: microphoneStatus,
                     onTrainWakeword: onTrainWakeword,
-                    onOpenEndpoints: onOpenEndpoints)
+                    onOpenEndpoints: onOpenEndpoints,
+                    endpoints: endpoints)
                     .padding(20)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .scrollIndicators(.visible)
             Divider()
             footer
         }
-        .frame(minWidth: 520, minHeight: 460)
+        .frame(minWidth: 560, minHeight: 520)
         .background(Color(nsColor: .windowBackgroundColor))
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Vollstaendige Einrichtung, Schritt \(flow.stepNumber) von \(flow.stepCount)")
+        .accessibilityLabel("Vollständige Einrichtung, Seite \(flow.stepNumber) von \(flow.stepCount)")
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(SetupPath.full.label)
                 .font(.title3.weight(.semibold))
-            Text("Schritt \(flow.stepNumber) von \(flow.stepCount)")
+            Text("Seite \(flow.stepNumber) von \(flow.stepCount)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            // A determinate bar rather than a spinner: thirteen questions need a visible end.
+            // A determinate bar rather than a spinner: a setup needs a visible end.
             ProgressView(value: Double(flow.stepNumber), total: Double(flow.stepCount))
                 .progressViewStyle(.linear)
                 .accessibilityLabel("Fortschritt der Einrichtung")
-                .accessibilityValue("Schritt \(flow.stepNumber) von \(flow.stepCount)")
+                .accessibilityValue("Seite \(flow.stepNumber) von \(flow.stepCount)")
         }
         .padding(.horizontal, 20)
         .padding(.top, 16)
@@ -67,7 +75,7 @@ struct SetupWindowView: View {
             Button("Abbrechen", role: .cancel, action: onCancel)
                 .keyboardShortcut(.cancelAction)
             Spacer(minLength: 8)
-            Button("Zurueck") { flow.back() }
+            Button("Zurück") { flow.back() }
                 .disabled(flow.isFirst)
             if flow.isLast {
                 Button("Fertig", action: onFinish)
@@ -83,7 +91,7 @@ struct SetupWindowView: View {
 }
 
 /// Holds the setup window, so a second call raises the open one instead of starting the
-/// thirteen questions over in a second copy.
+/// setup over in a second copy.
 @MainActor
 final class SetupWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
@@ -95,24 +103,32 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     ///   - continuing: a flow the quick start already started, so switching paths keeps the
     ///     answers and keeps Abbrechen rolling back to before the quick start. Nil starts a
     ///     fresh run.
+    ///   - startingAt: the page to open on. Used where somebody was sent here from
+    ///     somewhere else — the speech notice at the figure lands on the speech page and not
+    ///     on the first of the six.
     ///   - onClose: run after the window is gone. The shell uses it to look at
     ///     `flow.wasCancelled` and to put the figure back where it belongs.
     func show(
         settings: AppSettings,
         continuing existing: OnboardingFlow? = nil,
+        startingAt step: SetupStep? = nil,
         tools: [DetectedTool],
         microphoneStatus: String,
+        endpoints: SetupEndpointsController? = nil,
         onTrainWakeword: @escaping () -> Void,
         onOpenEndpoints: @escaping () -> Void,
         onClose: @escaping () -> Void
     ) {
         if let window {
+            if let step { self.flow?.jump(to: step) }
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
-        let flow = existing ?? OnboardingFlow(settings: settings, path: .full)
+        let flow = existing
+            ?? OnboardingFlow(settings: settings, path: .full, endpoints: endpoints)
         flow.switchPath(to: .full)
+        if let step { flow.jump(to: step) }
         self.flow = flow
         self.onClose = onClose
 
@@ -130,14 +146,15 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
                 self?.close()
             },
             onTrainWakeword: onTrainWakeword,
-            onOpenEndpoints: onOpenEndpoints)
+            onOpenEndpoints: onOpenEndpoints,
+            endpoints: endpoints)
 
         let hosting = NSHostingController(rootView: view)
         let window = NSWindow(contentViewController: hosting)
         window.title = SetupPath.full.label
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.setContentSize(NSSize(width: 560, height: 520))
-        window.minSize = NSSize(width: 520, height: 460)
+        window.setContentSize(NSSize(width: 600, height: 680))
+        window.minSize = NSSize(width: 560, height: 520)
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.center()

@@ -51,7 +51,7 @@ struct StartedView: View {
             }
             .textSelection(.enabled)
             Text("""
-                Die Gate-Befehle dieses Auftrags stehen ab jetzt im Menue der Session in der \
+                Die Gate-Befehle dieses Auftrags stehen ab jetzt im Menü der Session in der \
                 Liste. Sie laufen nur auf Zuruf, nie von selbst.
                 """)
                 .font(.callout)
@@ -60,7 +60,7 @@ struct StartedView: View {
             Spacer(minLength: 0)
             HStack {
                 Spacer(minLength: 8)
-                Button("Schliessen", action: onClose)
+                Button("Schließen", action: onClose)
                     .keyboardShortcut(.defaultAction)
             }
         }

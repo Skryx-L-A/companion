@@ -94,10 +94,62 @@ public struct Approval: Sendable, Equatable {
     public var approvedAtMs: UInt64
     /// Hex-encoded SHA-256 of the approved job text, so a later edit invalidates it.
     public var textSha256: String
+    /// The paired device it came from, or nil for the shell at the machine.
+    public var device: DeviceId?
+    /// How the person proved it was them.
+    public var confirmation: ApprovalConfirmation
 
-    public init(approvedAtMs: UInt64, textSha256: String) {
+    public init(
+        approvedAtMs: UInt64, textSha256: String, device: DeviceId? = nil,
+        confirmation: ApprovalConfirmation = .shell
+    ) {
         self.approvedAtMs = approvedAtMs
         self.textSha256 = textSha256
+        self.device = device
+        self.confirmation = confirmation
+    }
+}
+
+/// How the person proved it was them when they approved something.
+///
+/// `DESIGN.md` section Mobil, Freigaben vom Handy: "der Freigabe-Record vermerkt stets Geraet
+/// und Bestaetigungsart". At the machine the shell is itself the proof, which is what `shell`
+/// means and what an approval written before this field existed was. From a phone the app
+/// names the step it actually took, and `none` is a real answer rather than a missing one:
+/// the person picked that level and was shown what it means.
+public enum ApprovalConfirmation: Sendable, Equatable, Hashable {
+    /// The desktop shell at the machine. No device, no second step. A device may not claim
+    /// it; the daemon refuses one that tries.
+    case shell
+    /// Face ID or Touch ID immediately before sending.
+    case biometric
+    /// The device passcode, which is the fallback without biometrics and what a high-risk
+    /// setting demands whatever the level.
+    case passcode
+    /// The app asked for nothing.
+    case none
+    case unrecognised(String)
+}
+
+extension ApprovalConfirmation: RawRepresentable, Codable {
+    public init(rawValue: String) {
+        switch rawValue {
+        case "shell": self = .shell
+        case "biometric": self = .biometric
+        case "passcode": self = .passcode
+        case "none": self = .none
+        default: self = .unrecognised(rawValue)
+        }
+    }
+
+    public var rawValue: String {
+        switch self {
+        case .shell: return "shell"
+        case .biometric: return "biometric"
+        case .passcode: return "passcode"
+        case .none: return "none"
+        case .unrecognised(let name): return name
+        }
     }
 }
 

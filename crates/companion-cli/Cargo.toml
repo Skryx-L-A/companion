@@ -1,0 +1,36 @@
+[package]
+name = "companion-cli"
+description = "Command line tool of the companion: pairing a device, listing the paired ones and revoking one, and the MCP server an orchestrator docks onto over stdio."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "companion"
+path = "src/main.rs"
+
+[dependencies]
+# The MCP server reports sessions under the same adapter id the hook uses, and its installer
+# reuses the hook installer next to it: both halves of the Claude Code channel are wired up
+# by one command, out of one place.
+companion-adapter-claude.workspace = true
+companion-core.workspace = true
+companion-protocol.workspace = true
+companion-skills.workspace = true
+
+qrcode.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = [
+    "rt",
+    "macros",
+    "net",
+    "io-util",
+    "io-std",
+    "time",
+] }
+
+[lints]
+workspace = true

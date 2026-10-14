@@ -49,4 +49,25 @@ public final class OverlayPanel: NSPanel {
     }
 
     public var onCancel: (() -> Void)?
+
+    /// Cmd+C/V/X/A without this: an accessory app draws no menu bar, and AppKit only routes a
+    /// Cmd-key event to `copy:`/`paste:`/`cut:`/`selectAll:` when a menu item asks for that
+    /// key equivalent first. A menu that is never shown still gets asked, so this is enough to
+    /// make the chat field's clipboard shortcuts work without an actual Edit menu on screen.
+    public static func installEditMenuIfNeeded() {
+        guard NSApp.mainMenu == nil else { return }
+        let mainMenu = NSMenu()
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+
+        let editMenu = NSMenu(title: "Bearbeiten")
+        editMenu.addItem(withTitle: "Ausschneiden", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Kopieren", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Einfügen", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(
+            withTitle: "Alles auswählen", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenuItem.submenu = editMenu
+
+        NSApp.mainMenu = mainMenu
+    }
 }

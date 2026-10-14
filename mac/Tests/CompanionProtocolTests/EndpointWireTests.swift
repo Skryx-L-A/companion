@@ -89,6 +89,24 @@ final class EndpointWireTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(EndpointConfig.self, from: data), config)
     }
 
+    func testAProfileCarriesTheVoiceItSpeaksWith() throws {
+        // A local speech endpoint has its own voice names — Kokoro answers to `af_heart` and
+        // not to the OpenAI default — so the profile is where the choice is written down.
+        let kokoro = EndpointProfile(
+            id: "mlx-audio-tts", protocolKind: .openaiCompat, url: "http://127.0.0.1:8791",
+            model: "mlx-community/Kokoro-82M-bf16", voice: "af_heart")
+        let data = try JSONEncoder().encode(kokoro)
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(json["voice"] as? String, "af_heart")
+        XCTAssertEqual(try JSONDecoder().decode(EndpointProfile.self, from: data), kokoro)
+
+        let plain = EndpointProfile(id: "say", protocolKind: .cli, url: "/usr/bin/say")
+        let plainJson = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: try JSONEncoder().encode(plain))
+                as? [String: Any])
+        XCTAssertNil(plainJson["voice"], "a profile without a voice writes no field for one")
+    }
+
     func testAChainIsThePrimaryThenTheFallbacksEachNameOnce() {
         let config = EndpointConfig(
             profiles: [
@@ -158,6 +176,43 @@ final class EndpointSchemaTests: XCTestCase {
         XCTAssertEqual(
             Set(properties.keys),
             ["profile", "protocol", "reachable", "latency_ms", "checked_at_ms", "detail"])
+    }
+
+    /// Every field the daemon writes into a profile has a place in this shell's own type.
+    ///
+    /// Without this, a field added on the Rust side is decoded into nothing and dropped the
+    /// next time somebody presses Sichern here — the settings page would quietly delete a
+    /// setting it never showed. `reasoning_effort` was the field that made the gap visible
+    /// (2026-09-05).
+    func testEndpointProfileHasEveryFieldTheSchemaHas() throws {
+        let schema = try RepositoryLayout.schema("server_message.json")
+        let definitions = try XCTUnwrap(schema["$defs"] as? [String: Any])
+        let profile = try XCTUnwrap(definitions["EndpointProfile"] as? [String: Any])
+        let properties = try XCTUnwrap(profile["properties"] as? [String: Any])
+        XCTAssertEqual(
+            Set(properties.keys),
+            ["id", "protocol", "url", "key_ref", "model", "voice", "args", "language",
+             "reasoning_effort"])
+    }
+
+    func testAProfileWithoutAThinkingBudgetWritesNoSuchField() throws {
+        let profile = EndpointProfile(id: "lokal", protocolKind: .openaiCompat, url: "http://127.0.0.1:8080")
+        let data = try JSONEncoder().encode(profile)
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertNil(json["reasoning_effort"], "an absent budget is absent, not null")
+    }
+
+    func testAThinkingBudgetSurvivesTheRoundTrip() throws {
+        let line = Data("""
+            {"id":"lokal","protocol":"openai_compat","url":"http://127.0.0.1:8080",\
+            "model":"ornith:9b","reasoning_effort":"none"}
+            """.utf8)
+        let profile = try JSONDecoder().decode(EndpointProfile.self, from: line)
+        XCTAssertEqual(profile.reasoningEffort, "none")
+
+        let written = try JSONSerialization.jsonObject(with: try JSONEncoder().encode(profile))
+        let json = try XCTUnwrap(written as? [String: Any])
+        XCTAssertEqual(json["reasoning_effort"] as? String, "none")
     }
 
     /// Same reader as `SchemaTests`, kept here so this file stands on its own.

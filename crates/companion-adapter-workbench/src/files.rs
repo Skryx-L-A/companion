@@ -51,6 +51,15 @@ pub struct StoredSession {
     /// File stem, which is the workbench's own unique key for the session.
     pub stem: String,
     pub session: SessionFile,
+    /// When the file was last written, in unix milliseconds. The workbench rewrites it on
+    /// every change to the session, so this is the last moment the session demonstrably did
+    /// something — what `SessionStatus::last_activity_ms` is for. `None` where the file
+    /// system does not say, which is not a reason to drop the session.
+    ///
+    /// Read from the file rather than from its `lastActive` field: that field is an RFC 3339
+    /// string and parsing it would pull a date library into this adapter for one number,
+    /// while `mtime` answers the same question from a `stat` that has already happened.
+    pub modified_ms: Option<u64>,
 }
 
 /// Reads every session file in the directory.
@@ -75,6 +84,7 @@ pub fn read_sessions(dir: &Path) -> (Vec<StoredSession>, Vec<String>) {
         let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
+        let modified_ms = companion_core::adapter::last_activity_of(&path);
         match std::fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str::<SessionFile>(&text).ok())
@@ -82,6 +92,7 @@ pub fn read_sessions(dir: &Path) -> (Vec<StoredSession>, Vec<String>) {
             Some(session) => sessions.push(StoredSession {
                 stem: stem.to_owned(),
                 session,
+                modified_ms,
             }),
             None => broken.push(stem.to_owned()),
         }
@@ -106,12 +117,19 @@ pub struct LimitsLine {
 ///
 /// The file is append-only and can end in a half-written line, so the search runs from the
 /// back and takes the first line that parses.
+///
+/// Usable means it names at least one of the two windows. Both fields are optional and a
+/// line that carries neither parses perfectly well; until 2026-09-03 such a line was handed
+/// back and read with `unwrap_or(0.0)`, which turned "this line says nothing about the
+/// budget" into a measured nought. Skipping it lets an older line that does say something
+/// answer instead, and where none does the caller falls through to its next source.
 pub fn read_latest_limits(path: &Path) -> Option<LimitsLine> {
     let text = std::fs::read_to_string(path).ok()?;
     text.lines()
         .rev()
         .filter(|line| !line.trim().is_empty())
-        .find_map(|line| serde_json::from_str::<LimitsLine>(line).ok())
+        .filter_map(|line| serde_json::from_str::<LimitsLine>(line).ok())
+        .find(|line| line.five_hour_pct.is_some() || line.seven_day_pct.is_some())
 }
 
 /// The quota block of `kontingent.json` for one harness.
@@ -212,6 +230,35 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The mtime of the state file is what dates a session for `done_limit`. It has to be a
+    /// real number the moment the file exists, and it has to move when the workbench rewrites
+    /// the file.
+    #[test]
+    fn a_session_file_carries_the_moment_it_was_last_written() {
+        let dir = fixture_dir("modified");
+        let path = dir.join("dated.json");
+        std::fs::write(&path, r#"{"dir":"/tmp/a","name":"a"}"#).unwrap();
+
+        let (first, _) = read_sessions(&dir);
+        let before = first[0]
+            .modified_ms
+            .expect("a file that exists has an mtime");
+        // Plausible rather than exact: a clock the test can only compare against itself.
+        assert!(
+            before > 1_700_000_000_000,
+            "{before} is not a unix ms stamp"
+        );
+
+        // A second write, far enough apart that even a one-second mtime resolution moves.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(&path, r#"{"dir":"/tmp/a","name":"a","kontext":"weiter"}"#).unwrap();
+        let (again, _) = read_sessions(&dir);
+        let after = again[0].modified_ms.expect("still there");
+        assert!(after > before, "{after} has to be later than {before}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn the_newest_parsable_limits_line_wins_over_a_half_written_one() {
         let dir = fixture_dir("limits");
@@ -236,17 +283,17 @@ mod tests {
     #[test]
     fn the_stem_matches_what_the_workbench_writes() {
         assert_eq!(
-            stem_for("/Users/me/AI/LokalTest", Some("6ab816")),
-            "-Users-me-AI-LokalTest__6ab816"
+            stem_for("/Users/example/AI/LokalTest", Some("6ab816")),
+            "-Users-example-AI-LokalTest__6ab816"
         );
         assert_eq!(
-            stem_for("/Users/me/AI/LocalAI", None),
-            "-Users-me-AI-LocalAI"
+            stem_for("/Users/example/AI/LocalAI", None),
+            "-Users-example-AI-LocalAI"
         );
         // A dot in the path stays a dot, as the real files show.
         assert_eq!(
-            stem_for("/Users/me/.pi-workers/worktrees/kachel", None),
-            "-Users-me-.pi-workers-worktrees-kachel"
+            stem_for("/Users/example/.pi-workers/worktrees/kachel", None),
+            "-Users-example-.pi-workers-worktrees-kachel"
         );
     }
 

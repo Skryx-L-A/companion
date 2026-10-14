@@ -90,16 +90,18 @@ public final class WakewordEnrollment {
     /// Records the next take. Stops on its own when the word is over, or at the cap.
     public func startTake() {
         guard !isRecording, !isComplete, phase == .recording else { return }
-        switch authorization.authorization {
+        let permission = authorization.authorization
+        switch permission {
         case .granted:
             openMicrophone()
-        case .denied:
-            notice = AudioFailure.permissionDenied.message
+        case .denied, .restricted:
+            notice = (permission.refusal ?? .permissionDenied).message
         case .undetermined:
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                guard await self.authorization.requestAuthorization() == .granted else {
-                    self.notice = AudioFailure.permissionDenied.message
+                let answer = await self.authorization.requestAuthorization()
+                guard answer == .granted else {
+                    self.notice = (answer.refusal ?? .permissionDenied).message
                     return
                 }
                 self.openMicrophone()
@@ -159,7 +161,7 @@ public final class WakewordEnrollment {
         let seconds = Double(current.count) / Double(VoiceCaptureFormat.default.bytesPerSecond)
         guard vad.hasSpeech, seconds >= Self.minTakeSeconds else {
             current = Data()
-            notice = "In dieser Aufnahme war nichts zu hoeren. Sprich das Wort deutlich in Richtung Mikrofon."
+            notice = "In dieser Aufnahme war nichts zu hören. Sprich das Wort deutlich in Richtung Mikrofon."
             return
         }
         takes.append(current)

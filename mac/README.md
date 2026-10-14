@@ -34,7 +34,22 @@ the test scripts use it so a run never touches the settings of an installed copy
 finds the socket and the token, and `--onboarding skip|force` decides whether the quick start
 appears. `--dump-sessions <pfad>` and `--snapshot <pfad>` write what the shell knows about the
 sessions as JSON and as a picture, both on the way out, which is what
-`tests/mac/e2e-daemon.sh` reads.
+`tests/mac/e2e-daemon.sh` reads. Either one without `--quit-after` gets a two-second one of its
+own, so a run started only for its output does not sit there forever.
+
+**A test instance always runs with `--no-voice`.** Two shells on one machine fight over the
+same global push-to-talk combination — whoever registered it first keeps it, the other one
+silently has no key — and they stack two figures into the same screen corner. `--no-voice`
+takes no key combination and opens no microphone, which is what makes a test run next to the
+real shell harmless; the house rule in `regeln/tests-und-eingriffe.md` is the same one from
+the other side. Since 2026-09-03 a shell that would take the key refuses to start next to a
+running one and says so on stderr: the lock is `companion-mac.lock` in the configuration
+directory, holding the pid and the start time of the shell that owns it. A run without the
+voice is exempt from it, so every script in `tests/mac/` keeps working next to a real
+instance, and a run under its own `--config-dir` has a lock of its own anyway. `--demo`
+implies `--no-voice` and is therefore exempt as well — until 2026-09-03 it was exempt while
+still taking the key and drawing the figure, which was a hole in the guard rather than an
+exemption.
 
 ## Structure
 
@@ -96,12 +111,13 @@ States without a folder keep the drawn placeholder, so a partial set works.
 `swift test` covers the state machine, the alpha hit test, the layout, the wire types against
 the fixtures and the schema files, the session display and the quick-start settings, the
 wakeword across its C ABI, and it renders the panels to PNG files for review. Four scripts in
-the repository root exercise what a unit test cannot: `tests/mac/ui-smoke.sh` starts the
-window and checks that the frontmost application never changes, `tests/mac/e2e-daemon.sh`
-runs the shell against a real daemon on a throwaway configuration directory,
-`tests/mac/ruhelast.sh` measures idle CPU and memory, and `tests/mac/wakeword-ffi.sh` runs the
-wakeword path from the Rust library up into the Swift tests, against recorded speech when the
-fixtures of `tests/wakeword` are there.
+the private part of the repository exercise what a unit test cannot: `tests/mac/ui-smoke.sh`
+starts the window and checks that the frontmost application never changes,
+`tests/mac/e2e-daemon.sh` runs the shell against a real daemon on a throwaway configuration
+directory, `tests/mac/ruhelast.sh` measures idle CPU and memory, and `tests/mac/wakeword-ffi.sh`
+runs the wakeword path from the Rust library up into the Swift tests, against recorded speech
+when the fixtures of `tests/wakeword` are there. None of the four ships in the public repo, so
+a clone of `Skryx-L-A/companion` runs `swift test` on its own and skips them.
 
 No test opens a microphone. Everything that touches audio hardware sits behind
 `AudioCapturing`, `SpeechPlaying` and `MicrophoneAuthorizing`, and the tests hand in fakes.

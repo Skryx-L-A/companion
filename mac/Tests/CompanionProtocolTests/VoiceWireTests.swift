@@ -34,11 +34,31 @@ final class VoiceRequestWireTests: XCTestCase {
 
     func testVoiceChunkCarriesBase64PCM() throws {
         let pcm = Data([0x01, 0x02, 0x03, 0x04])
-        let written = try object(.voiceChunk(voiceId: "voice-1", pcm: pcm))
+        let written = try object(.voiceChunk(voiceId: "voice-1", audio: pcm, encoding: .pcm16))
         XCTAssertEqual(written["request"] as? String, "voice_chunk")
         XCTAssertEqual(written["voice_id"] as? String, "voice-1")
         let encoded = try XCTUnwrap(written["pcm16_base64"] as? String)
         XCTAssertEqual(Data(base64Encoded: encoded), pcm, "the bytes survive the trip")
+        XCTAssertNil(
+            written["audio_base64"],
+            "PCM16 keeps the field of the first version and writes no second one")
+    }
+
+    func testAnOpusChunkUsesTheNewFieldSoAnOlderDaemonRefusesIt() throws {
+        let packets = Data([0x00, 0x02, 0xaa, 0xbb])
+        let written = try object(.voiceChunk(voiceId: "voice-1", audio: packets, encoding: .opus))
+        let encoded = try XCTUnwrap(written["audio_base64"] as? String)
+        XCTAssertEqual(Data(base64Encoded: encoded), packets)
+        XCTAssertNil(
+            written["pcm16_base64"],
+            "Opus packets must never arrive in the field a daemon reads as samples")
+    }
+
+    func testTheDictationNamesItsEncodingOnlyWhenItIsNotPCM() throws {
+        let plain = try object(.voiceBegin(VoiceBegin()))
+        XCTAssertNil(plain["format"], "absent is what a daemon of either age reads as pcm16")
+        let opus = try object(.voiceBegin(VoiceBegin(encoding: .opus)))
+        XCTAssertEqual(opus["format"] as? String, "opus")
     }
 
     func testVoiceEndNamesTheDictation() throws {
@@ -56,6 +76,12 @@ final class VoiceRequestWireTests: XCTestCase {
         XCTAssertEqual(named["voice"] as? String, "Anna")
     }
 
+    func testTtsStopNamesTheAnswerItEnds() throws {
+        let written = try object(.ttsStop(voiceId: "speech-2"))
+        XCTAssertEqual(written["request"] as? String, "tts_stop")
+        XCTAssertEqual(written["voice_id"] as? String, "speech-2")
+    }
+
     /// The id of a dictation comes back in the answer, and every event about it carries it.
     func testTheAnswerToVoiceBeginIsTheStreamId() throws {
         let line = Data(#"{"type":"response","id":11,"status":"ok","payload":{"body":"voice_stream","voice_id":"voice-3"}}"#.utf8)
@@ -66,13 +92,41 @@ final class VoiceRequestWireTests: XCTestCase {
         XCTAssertEqual(body, .voiceStream(voiceId: "voice-3"))
     }
 
-    func testOnlyTheFourVoiceRequestsAreVoice() {
+    /// The warm-up goes out as a bare request: no payload, and the name the daemon
+    /// dispatches on.
+    func testVoiceWarmIsSentAsABareRequest() throws {
+        let written = try object(.voiceWarm)
+        XCTAssertEqual(written["request"] as? String, "voice_warm")
+        XCTAssertEqual(
+            Set(written.keys), ["type", "id", "request"],
+            "a warm-up carries nothing beyond its name")
+    }
+
+    /// The answer says whether the speech server was already up.
+    func testTheAnswerToVoiceWarmSaysWhetherItWasAlreadyRunning() throws {
+        for (json, expected) in [("true", true), ("false", false)] {
+            let line = Data(
+                #"{"type":"response","id":12,"status":"ok","payload":{"body":"voice_warm","already_running":\#(json)}}"#
+                    .utf8)
+            guard case .response(let response) = try WireCodec.decode(line),
+                  case .success(let body) = response.result else {
+                return XCTFail("not a successful response")
+            }
+            XCTAssertEqual(body, .voiceWarm(alreadyRunning: expected))
+        }
+    }
+
+    func testOnlyTheVoiceRequestsAreVoice() {
         XCTAssertTrue(Request.voiceBegin(VoiceBegin()).isVoice)
-        XCTAssertTrue(Request.voiceChunk(voiceId: "v", pcm: Data()).isVoice)
+        XCTAssertTrue(Request.voiceChunk(voiceId: "v", audio: Data(), encoding: .pcm16).isVoice)
         XCTAssertTrue(Request.voiceEnd(voiceId: "v").isVoice)
         XCTAssertTrue(Request.ttsSpeak(text: "t", voice: nil).isVoice)
+        XCTAssertTrue(Request.ttsStop(voiceId: "v").isVoice)
         XCTAssertFalse(Request.list(.all).isVoice)
         XCTAssertFalse(Request.send(sessionId: "s", text: "t").isVoice)
+        // The warm-up is deliberately outside the set: a daemon too old to know it answers
+        // `not_supported`, and that must not cost the connection its whole voice path.
+        XCTAssertFalse(Request.voiceWarm.isVoice)
     }
 }
 
@@ -150,10 +204,26 @@ final class VoiceEventWireTests: XCTestCase {
     func testDoneNamesItsEndpointWhenThereIsOne() throws {
         XCTAssertEqual(
             try event(#"{"event":"tts_done","voice_id":"voice-2","endpoint":"say"}"#),
-            .voice(.ttsDone(voiceId: "voice-2", endpoint: "say")))
+            .voice(.ttsDone(voiceId: "voice-2", endpoint: "say", reason: .completed)))
         XCTAssertEqual(
             try event(#"{"event":"tts_done","voice_id":"voice-2"}"#),
-            .voice(.ttsDone(voiceId: "voice-2", endpoint: nil)))
+            .voice(.ttsDone(voiceId: "voice-2", endpoint: nil, reason: .completed)))
+    }
+
+    /// The reason is what a client leans on to tell "spoken to the end" from "stopped".
+    /// A daemon that predates `tts_stop` writes none, and every answer such a daemon ends is
+    /// one it spoke to the end; an unknown name stays as it arrived rather than being read as
+    /// one of the three.
+    func testTheReasonSaysWhyAnAnswerEnded() throws {
+        XCTAssertEqual(
+            try event(#"{"event":"tts_done","voice_id":"voice-2","reason":"cancelled"}"#),
+            .voice(.ttsDone(voiceId: "voice-2", endpoint: nil, reason: .cancelled)))
+        XCTAssertEqual(
+            try event(#"{"event":"tts_done","voice_id":"voice-2","reason":"failed"}"#),
+            .voice(.ttsDone(voiceId: "voice-2", endpoint: nil, reason: .failed)))
+        XCTAssertEqual(
+            try event(#"{"event":"tts_done","voice_id":"voice-2","reason":"aufgegeben"}"#),
+            .voice(.ttsDone(voiceId: "voice-2", endpoint: nil, reason: .unrecognised("aufgegeben"))))
     }
 
     func testEveryVoiceEventSurvivesARoundTrip() throws {
@@ -161,7 +231,8 @@ final class VoiceEventWireTests: XCTestCase {
             .sttPartial(voiceId: "voice-1", text: "halb"),
             .sttFinal(voiceId: "voice-1", text: "ganz", endpoint: "whisper"),
             .ttsChunk(voiceId: "voice-2", sequence: 0, format: .wav, audio: Data([1, 2, 3, 4])),
-            .ttsDone(voiceId: "voice-2", endpoint: nil),
+            .ttsDone(voiceId: "voice-2", endpoint: nil, reason: .completed),
+            .ttsDone(voiceId: "voice-3", endpoint: "kokoro", reason: .cancelled),
         ]
         for event in events {
             let data = try JSONEncoder().encode(Event.voice(event))
@@ -169,18 +240,19 @@ final class VoiceEventWireTests: XCTestCase {
         }
     }
 
-    /// The four voice kinds are part of the twenty-one the shell knows — thirteen from the
+    /// The four voice kinds are part of the twenty-three the shell knows — fourteen from the
     /// adapters and the bus, four from the voice pipeline, three from the conversation with
-    /// the companion, one from the settings document — and each of them has its own name.
-    func testTheFourVoiceKindsAreAmongTheTwentyOne() {
-        XCTAssertEqual(EventKind.allCases.count, 21)
+    /// the companion, one from the settings document and one the companion sends of its own
+    /// accord — and each of them has its own name.
+    func testTheFourVoiceKindsAreAmongTheTwentyThree() {
+        XCTAssertEqual(EventKind.allCases.count, 23)
         for kind in VoiceEventKind.allCases {
             let matching = EventKind(rawValue: kind.rawValue)
             XCTAssertNotNil(matching, "\(kind.rawValue) is missing from EventKind")
             XCTAssertEqual(matching?.isVoice, true)
         }
         XCTAssertEqual(
-            Event.voice(.ttsDone(voiceId: "voice-2", endpoint: nil)).kind, .ttsDone)
+            Event.voice(.ttsDone(voiceId: "voice-2", endpoint: nil, reason: .completed)).kind, .ttsDone)
         XCTAssertEqual(EventKind.busy.isVoice, false)
     }
 
@@ -223,5 +295,83 @@ final class VoiceFormatTests: XCTestCase {
             voiceId: "voice-1", text: "mein Passwort ist Hummel", endpoint: nil)
         XCTAssertFalse(final.description.contains("Hummel"), "no spoken words")
         XCTAssertTrue(final.description.contains("24 Zeichen"))
+    }
+}
+
+/// The warm-up as the shell really sends it: through a `DaemonClient` over a transport that
+/// carries nothing, so what goes out and what comes back can both be looked at.
+///
+/// `StubTransport`, `StubTokenSource` and the welcome line live in `PairingTests.swift`; the
+/// client above them knows nothing about which of the two it is talking through.
+@MainActor
+final class VoiceWarmClientTests: XCTestCase {
+    /// A client that has said hello and is ready to be asked something.
+    private func readyClient() throws -> (DaemonClient, StubTransport) {
+        let transport = StubTransport()
+        let client = DaemonClient(
+            transport: transport, tokenSource: StubTokenSource(value: "t-1"),
+            clientName: "companion-mac")
+        client.start()
+        transport.report(.connected)
+        transport.deliver(
+            """
+            {"type":"welcome","protocol_version":2,"role":"human","daemon_version":"0.1.0",\
+            "run_id":"r-1","session_namespace":"ns"}
+            """)
+        guard case .ready = client.status else {
+            throw XCTSkip("the handshake did not finish")
+        }
+        return (client, transport)
+    }
+
+    func testTheWarmUpGoesOutAndItsAnswerComesBack() throws {
+        let (client, transport) = try readyClient()
+        var answer: Result<Bool, DaemonClient.RequestFailure>?
+        client.voiceWarm { answer = $0 }
+
+        XCTAssertEqual(transport.requestName(at: 0), "voice_warm")
+        let request = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: transport.sent[1]) as? [String: Any])
+        let id = try XCTUnwrap(request["id"] as? Int)
+
+        transport.deliver(
+            #"{"type":"response","id":\#(id),"status":"ok","payload":{"body":"voice_warm","already_running":true}}"#)
+        XCTAssertEqual(try answer?.get(), true, "the daemon said the server was already up")
+    }
+
+    /// A daemon that had to start the server says so, and that is the case the wakeword path
+    /// exists for: the loading happened here instead of inside the answer budget.
+    func testAColdServerIsReportedAsHavingBeenStarted() throws {
+        let (client, transport) = try readyClient()
+        var answer: Result<Bool, DaemonClient.RequestFailure>?
+        client.voiceWarm { answer = $0 }
+        let request = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: transport.sent[1]) as? [String: Any])
+        let id = try XCTUnwrap(request["id"] as? Int)
+
+        transport.deliver(
+            #"{"type":"response","id":\#(id),"status":"ok","payload":{"body":"voice_warm","already_running":false}}"#)
+        XCTAssertEqual(try answer?.get(), false)
+    }
+
+    /// A daemon too old to know the request refuses it, and that is the whole consequence:
+    /// the failure reaches the caller, which ignores it, and the `voice_begin` that follows
+    /// starts the server the way it always did.
+    func testAnOlderDaemonRefusesItAndNothingElseHappens() throws {
+        let (client, transport) = try readyClient()
+        var answer: Result<Bool, DaemonClient.RequestFailure>?
+        client.voiceWarm { answer = $0 }
+        let request = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: transport.sent[1]) as? [String: Any])
+        let id = try XCTUnwrap(request["id"] as? Int)
+
+        transport.deliver(
+            #"{"type":"response","id":\#(id),"status":"error","payload":{"code":"not_supported","message":"unknown request"}}"#)
+        guard case .failure(.daemon(let error)) = try XCTUnwrap(answer) else {
+            return XCTFail("expected the daemon's own refusal, got \(String(describing: answer))")
+        }
+        XCTAssertEqual(error.code, .notSupported)
+        XCTAssertEqual(
+            transport.requestName(at: 1), nil, "a refused warm-up must not be asked again")
     }
 }

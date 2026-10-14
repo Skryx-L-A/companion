@@ -77,11 +77,11 @@
   ],
   "$defs": {
     "SessionId": {
-      "description": "Identifies one session. Unique per machine, assigned by the adapter that owns the session.",
+      "description": "Identifies one session. Unique per machine only, assigned by the adapter that owns the session. See the collision rule on [`crate::MachineIdentity`].",
       "type": "string"
     },
     "AuftragId": {
-      "description": "Identifies a job file under `.companion/auftraege/<id>.json`.",
+      "description": "Identifies a job file under `.companion/auftraege/<id>.json`. One path segment: see [`AuftragId::checked`] for what that rules out.",
       "type": "string"
     },
     "SelfAnswer": {
@@ -165,7 +165,7 @@
       ]
     },
     "Cost": {
-      "description": "What a run cost.",
+      "description": "What a run cost.\n\nThree fields, because the three sources `DESIGN.md` § Kosten names measure three\ndifferent things and none of them converts into the others: a Claude transcript counts\ntokens and sometimes carries a price, an API profile turns tokens into money through the\nprice table, and the workbench knows only how much of a subscription window a run ate.\nA field nothing measured stays `None` rather than becoming a plausible zero, the same\nway [`crate::Provenance::Unknown`] does one level up.",
       "type": "object",
       "properties": {
         "tokens": {
@@ -177,6 +177,14 @@
           "minimum": 0
         },
         "usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "budget_fraction": {
+          "description": "Share of the subscription window this run used, between 0.0 and 1.0.\n\nThe workbench's own answer to \"what did that cost\": `wb-budget` reports how full the\nfive-hour and seven-day windows are, and the difference between the reading at the\nstart of a session and the one at its end is the share that session spent. Absent\nwherever no such pair of readings exists — a window that reset in between, a daemon\nthat was not running at the start — because a share computed across a reset would be\na negative number dressed up as a measurement.",
           "type": [
             "number",
             "null"

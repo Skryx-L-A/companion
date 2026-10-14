@@ -24,10 +24,29 @@ public struct SentenceSplitter {
     /// own with the whole start-up latency of the endpoint in front of it.
     public var minimumLength: Int
 
-    private var buffer = ""
+    /// How much of a still unfinished first sentence may arrive before its first clause is
+    /// spoken on its own. `nil` keeps whole sentences only.
+    ///
+    /// The first spoken word waits for the synthesis of the whole first piece, and the speech
+    /// endpoint does not stream: a sentence of seven spoken seconds was measured at almost six
+    /// seconds before its first word (`TASKS.md`, Breeze TTS 2, real-time factor 0.83). Only the
+    /// first piece of an answer is cut at a clause; every later one is spoken while the one
+    /// before it plays, so its length costs nothing a person hears.
+    public var firstClauseAfter: Int?
 
-    public init(minimumLength: Int = 12) {
+    /// The earliest a clause may end, so a cut never leaves a fragment like "Ja, ".
+    public static let shortestFirstClause = 24
+
+    /// Comma and semicolon only. A colon stays out: "Passwort: ..." cut there would put a label
+    /// and its value into two speech requests, and each is redacted on its own.
+    private static let clauseMarks: Set<Character> = [",", ";"]
+
+    private var buffer = ""
+    private var emittedAny = false
+
+    public init(minimumLength: Int = 12, firstClauseAfter: Int? = 60) {
         self.minimumLength = minimumLength
+        self.firstClauseAfter = firstClauseAfter
     }
 
     /// What is being held back, either because the sentence is not finished or because nothing
@@ -40,6 +59,9 @@ public struct SentenceSplitter {
         buffer += text
 
         var sentences: [String] = []
+        if let clause = takeFirstClause() {
+            sentences.append(clause)
+        }
         let characters = Array(buffer)
         // Where the sentence that is being looked at begins, and where the search stands.
         var start = 0
@@ -95,7 +117,37 @@ public struct SentenceSplitter {
         }
 
         buffer = String(characters[start...])
+        if !sentences.isEmpty { emittedAny = true }
         return sentences
+    }
+
+    /// The first clause of a long first sentence, cut off the buffer, or nil.
+    ///
+    /// A clause ends at a comma or semicolon followed by whitespace: "1,5" is not a clause
+    /// end. Nothing is cut once a sentence end has arrived in front
+    /// of the mark, because then the ordinary rule below speaks a whole sentence anyway.
+    private mutating func takeFirstClause() -> String? {
+        guard !emittedAny, let limit = firstClauseAfter else { return nil }
+        let characters = Array(buffer)
+        guard characters.count >= limit,
+              !characters.prefix(Self.shortestFirstClause).contains(where: Self.terminators.contains)
+        else { return nil }
+        var index = Self.shortestFirstClause
+        while index + 1 < characters.count {
+            let character = characters[index]
+            if Self.terminators.contains(character) { return nil }
+            if Self.clauseMarks.contains(character), characters[index + 1].isWhitespace {
+                let clause = String(characters[...index])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                // Only the leading whitespace goes: a trailing space is the gap in front of
+                // a word that has not arrived yet.
+                buffer = String(characters[(index + 1)...].drop(while: { $0.isWhitespace }))
+                emittedAny = true
+                return clause
+            }
+            index += 1
+        }
+        return nil
     }
 
     /// The rest, once nothing more is coming. Whatever is left is one piece, whether it is a
@@ -110,5 +162,6 @@ public struct SentenceSplitter {
     /// Throws away what is held back. Used when an answer is abandoned.
     public mutating func reset() {
         buffer = ""
+        emittedAny = false
     }
 }
