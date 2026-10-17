@@ -53,7 +53,7 @@ state.
 
 ## Build and test
 
-Rust 1.85 or newer, edition 2024. The workspace lives in this directory.
+Rust 1.88 or newer, edition 2024. The workspace lives in this directory.
 
 ```bash
 cargo build --workspace
